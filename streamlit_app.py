@@ -5,6 +5,7 @@ import numpy as np
 from scipy.stats import norm
 import yfinance as yf
 import pandas as pd
+import altair as alt
 
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
@@ -260,12 +261,19 @@ Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> |
 Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
 """, unsafe_allow_html=True)
 
-            # Simplified PnL chart: single point
+            # ------------------- Simplified PnL Altair Chart -------------------
+            dte_range = list(range(derived["dte"] + 1))
+            profit_values = [current_profit_percent if current_profit_percent is not None else 0]*len(dte_range)
             pnl_df = pd.DataFrame({
-                "DTE": [derived["dte"]],
-                "Profit %": [current_profit_percent if current_profit_percent is not None else 0]
-            }).set_index("DTE")
-            st.line_chart(pnl_df, height=150)
+                "DTE": dte_range,
+                "Profit %": profit_values
+            })
+            chart = alt.Chart(pnl_df).mark_line(point=True, color='blue').encode(
+                x=alt.X('DTE', title='Days to Expiration', scale=alt.Scale(domain=(0, derived["dte"]))),
+                y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100), nice=False),
+                        axis=alt.Axis(tickMinStep=10))
+            ).properties(height=150)
+            st.altair_chart(chart, use_container_width=True)
 
         # Remove button
         if st.button("Remove", key=f"remove_{i}"):
