@@ -40,7 +40,6 @@ def format_money(x):
 
 @st.cache_data(ttl=60)
 def get_price(ticker: str):
-    """Fetch latest underlying price"""
     try:
         data = yf.Ticker(ticker).fast_info
         return float(data["last_price"])
@@ -49,7 +48,6 @@ def get_price(ticker: str):
 
 @st.cache_data(ttl=60)
 def get_option_chain(ticker: str, expiration: str):
-    """Return option chain for given expiry as dataframe"""
     try:
         ticker_obj = yf.Ticker(ticker)
         opt_chain = ticker_obj.option_chain(expiration)
@@ -58,19 +56,68 @@ def get_option_chain(ticker: str, expiration: str):
         return None, None
 
 def get_short_leg_data(trade: dict):
-    """Return delta and IV for short strike"""
     expiration = trade["expiration"].isoformat()
     _, puts = get_option_chain(trade["ticker"], expiration)
     if puts is None or puts.empty:
         return None, None
-    # match exact strike
     short_strike = float(trade["short_strike"])
     short_row = puts[puts['strike'] == short_strike]
     if short_row.empty:
         return None, None
     delta = short_row['delta'].values[0] if 'delta' in short_row.columns else None
     iv = short_row['impliedVolatility'].values[0] * 100 if 'impliedVolatility' in short_row.columns else None
-    return delta, iv
+    last_price = short_row['lastPrice'].values[0] if 'lastPrice' in short_row.columns else None
+    return delta, iv, last_price
+
+def compute_spread_value(short_price, long_price, width, credit):
+    """Calculate current spread P/L in % of max risk"""
+    if short_price is None or long_price is None:
+        return None
+    spread_mark = short_price - long_price
+    max_loss = width - credit
+    if max_loss <= 0:
+        return 0
+    return (spread_mark / max_loss) * 100  # percent of max risk
+
+def evaluate_rules(trade, derived, current_price, delta, current_iv):
+    """Return status color based on all rules"""
+    status = "green"  # default safe
+    alerts = []
+
+    # Rule 1: delta ≥ 0.40
+    if delta is not None and delta >= 0.40:
+        status = "red"
+        alerts.append(f"Short delta {delta:.2f} ≥ 0.40")
+
+    # Rule 2: price < short strike
+    if current_price is not None and current_price < trade["short_strike"]:
+        status = "red"
+        alerts.append(f"Price {current_price:.2f} below short strike {trade['short_strike']}")
+
+    # Rule 3: spread value ≥ 150–200% of credit
+    # calculate spread value
+    # For put credit: short_price - long_price = spread mark
+    delta_price = current_price - trade["long_strike"] if current_price is not None else None
+    spread_value_percent = None
+    if delta_price is not None:
+        spread_value_percent = compute_spread_value(current_price, trade["long_strike"], derived["width"], trade["credit"])
+        if spread_value_percent >= 150:
+            status = "red"
+            alerts.append(f"Spread value {spread_value_percent:.0f}% ≥ 150% of credit")
+
+    # Rule 4: DTE < 7
+    if derived["dte"] <= 7 and status != "red":
+        status = "yellow"
+        alerts.append(f"DTE {derived['dte']} ≤ 7")
+
+    # Rule 5: Current IV vs Entry IV
+    entry_iv = trade.get("entry_iv")
+    if entry_iv and current_iv:
+        if current_iv > entry_iv and status != "red":
+            status = "yellow"
+            alerts.append(f"Current IV {current_iv:.1f}% > Entry IV {entry_iv:.1f}%")
+
+    return status, alerts
 
 # ------------------- Initialize -------------------
 init_state()
@@ -123,6 +170,11 @@ if not st.session_state.trades:
 else:
     for i, t in enumerate(st.session_state.trades):
         derived = compute_derived(t)
+        current_price = get_price(t['ticker'])
+        delta, current_iv, short_price = get_short_leg_data(t)
+        status_color, alerts = evaluate_rules(t, derived, current_price, delta, current_iv)
+
+        # Card columns
         cols = st.columns([1,2,2,1])
         with cols[0]:
             st.markdown(f"**{t['ticker']}**")
@@ -140,34 +192,46 @@ else:
             st.write(f"Max loss: {format_money(derived['max_loss'])}")
             st.write(f"Break-even: {derived['breakeven']}")
         with cols[2]:
-            st.write("**Live Data**")
-            current_price = get_price(t['ticker'])
+            st.write("**Live Data / Rules**")
+            # Price
             if current_price is None:
                 st.warning("Price unavailable")
             else:
-                if current_price > t["short_strike"]:
-                    st.success(f"Price: {current_price:.2f}")
-                else:
+                if current_price < t["short_strike"]:
                     st.error(f"Price: {current_price:.2f} 🚨 Below short strike!")
-
-            # Fetch short-leg delta and IV
-            delta, current_iv = get_short_leg_data(t)
+                else:
+                    st.success(f"Price: {current_price:.2f}")
+            # IV display
             entry_iv = t.get("entry_iv")
-            # IV display with color logic
             if entry_iv and current_iv:
                 iv_color = "green" if current_iv < entry_iv else "red"
                 st.markdown(f"Entry IV: **{entry_iv:.1f}%**  Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>", unsafe_allow_html=True)
             else:
                 st.markdown(f"Entry IV: **{entry_iv if entry_iv else '—'}%**  Current IV: {current_iv if current_iv else '—'}%")
             st.write(f"Short-leg delta: {delta if delta else '—'}")
+            # Status badge
+            if status_color == "green":
+                st.success("Status: ✅ Safe")
+            elif status_color == "yellow":
+                st.warning("Status: ⚠ Warning")
+            else:
+                st.error("Status: ❌ Critical")
+
+            # Alerts list
+            if alerts:
+                st.markdown("**Alerts:**")
+                for a in alerts:
+                    st.write(f"- {a}")
+
         with cols[3]:
             if st.button("Remove", key=f"remove_{i}"):
                 st.session_state.trades.pop(i)
                 st.experimental_rerun()
-        # Notes / Alerts
-        with st.expander("Details / Alerts"):
+
+        # Notes / Details
+        with st.expander("Details / Notes"):
             st.write("Notes:", t.get("notes") or "-")
             st.write("Created:", t.get("created_at"))
 
 st.markdown("---")
-st.caption("Step 2 complete — Live price, IV, and delta added. Next step: implement rules engine for alerts and take-profit / stop-loss logic.")
+st.caption("Step 3 complete — Rules engine added with color-coded alerts. Next step: SMS notifications.")
