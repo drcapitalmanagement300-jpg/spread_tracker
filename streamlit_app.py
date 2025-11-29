@@ -69,74 +69,73 @@ def bsm_delta(option_type, S, K, T, r, sigma):
     else:
         return None
 
-def get_short_leg_data(trade: dict):
-    expiration_str = trade["expiration"].isoformat()
-    _, puts = get_option_chain(trade["ticker"], expiration_str)
+def get_leg_data(ticker: str, expiration: date, strike: float, option_type='put'):
+    _, puts = get_option_chain(ticker, expiration.isoformat())
     if puts is None or puts.empty:
-        return None, None, None
+        return None, None
+    leg_row = puts[puts['strike'] == strike]
+    if leg_row.empty:
+        return None, None
+    price = leg_row['lastPrice'].values[0] if 'lastPrice' in leg_row.columns else None
+    iv = leg_row['impliedVolatility'].values[0] * 100 if 'impliedVolatility' in leg_row.columns else None
+    return price, iv
 
-    short_strike = float(trade["short_strike"])
-    short_row = puts[puts['strike'] == short_strike]
-    if short_row.empty:
-        return None, None, None
-
-    # IV from yfinance
-    iv = short_row['impliedVolatility'].values[0] if 'impliedVolatility' in short_row.columns else None
-    iv = iv * 100 if iv else None  # convert to %
-    last_price = short_row['lastPrice'].values[0] if 'lastPrice' in short_row.columns else None
-
-    # Compute delta using BSM
+def get_short_leg_data(trade: dict):
+    short_price, iv = get_leg_data(trade["ticker"], trade["expiration"], float(trade["short_strike"]), 'put')
     current_price = get_price(trade['ticker'])
+    delta = None
     if current_price and iv:
         T = days_to_expiry(trade["expiration"]) / 365
         sigma = iv / 100
         r = 0.05
-        delta = bsm_delta('put', current_price, short_strike, T, r, sigma)
-    else:
-        delta = None
+        delta = bsm_delta('put', current_price, float(trade["short_strike"]), T, r, sigma)
+    return delta, iv, short_price
 
-    return delta, iv, last_price
+def get_long_leg_data(trade: dict):
+    long_price, _ = get_leg_data(trade["ticker"], trade["expiration"], float(trade["long_strike"]), 'put')
+    return long_price
 
-def compute_spread_value(short_price, long_price, width, credit):
-    if short_price is None or long_price is None:
+def compute_spread_value(short_option_price, long_option_price, width, credit):
+    """Returns current spread value as % of max loss"""
+    if short_option_price is None or long_option_price is None or width - credit <= 0:
         return None
-    spread_mark = short_price - long_price
+    spread_mark = short_option_price - long_option_price
     max_loss = width - credit
-    if max_loss <= 0:
-        return 0
     return (spread_mark / max_loss) * 100
 
-def evaluate_rules(trade, derived, current_price, delta, current_iv):
+def evaluate_rules(trade, derived, current_price, delta, current_iv, short_option_price, long_option_price):
     status = "green"
     alerts = []
 
+    # Delta rule
     if delta is not None and delta >= 0.40:
         status = "red"
         alerts.append(f"Short delta {delta:.2f} ≥ 0.40")
 
+    # Price rule
     if current_price is not None and current_price < trade["short_strike"]:
         status = "red"
         alerts.append(f"Price {current_price:.2f} below short strike {trade['short_strike']}")
 
-    delta_price = current_price - trade["long_strike"] if current_price is not None else None
-    spread_value_percent = None
-    if delta_price is not None:
-        spread_value_percent = compute_spread_value(current_price, trade["long_strike"], derived["width"], trade["credit"])
-        if spread_value_percent >= 150:
-            status = "red"
-            alerts.append(f"Spread value {spread_value_percent:.0f}% ≥ 150% of credit")
+    # Spread value rule
+    spread_value_percent = compute_spread_value(short_option_price, long_option_price, derived["width"], trade["credit"])
+    if spread_value_percent is not None and spread_value_percent >= 150:
+        status = "red"
+        alerts.append(f"Spread value {spread_value_percent:.0f}% ≥ 150% of credit")
 
+    # DTE rule
     if derived["dte"] <= 7 and status != "red":
         status = "yellow"
         alerts.append(f"DTE {derived['dte']} ≤ 7")
 
+    # IV rule
     entry_iv = trade.get("entry_iv")
     if entry_iv and current_iv:
         if current_iv > entry_iv and status != "red":
             status = "yellow"
             alerts.append(f"Current IV {current_iv:.1f}% > Entry IV {entry_iv:.1f}%")
 
-    return status, alerts
+    return status, alerts, spread_value_percent
 
 # ------------------- Auto-fetch entry IV -----------------
 def fetch_short_iv(ticker, short_strike, expiration):
@@ -201,8 +200,11 @@ else:
     for i, t in enumerate(st.session_state.trades):
         derived = compute_derived(t)
         current_price = get_price(t['ticker'])
-        delta, current_iv, short_price = get_short_leg_data(t)
-        status_color, alerts = evaluate_rules(t, derived, current_price, delta, current_iv)
+        delta, current_iv, short_option_price = get_short_leg_data(t)
+        long_option_price = get_long_leg_data(t)
+        status_color, alerts, spread_value_percent = evaluate_rules(
+            t, derived, current_price, delta, current_iv, short_option_price, long_option_price
+        )
 
         cols = st.columns([1,2,2,1])
         with cols[0]:
@@ -238,6 +240,8 @@ else:
                 st.markdown(f"Entry IV: **{entry_iv if entry_iv else '—'}%**  Current IV: {current_iv if current_iv else '—'}%")
 
             st.write(f"Short-leg delta: {delta if delta else '—'}")
+            if spread_value_percent is not None:
+                st.write(f"Spread value: {spread_value_percent:.0f}% of max loss")
 
             if status_color == "green":
                 st.success("Status: ✅ Safe")
@@ -261,4 +265,4 @@ else:
             st.write("Created:", t.get("created_at"))
 
 st.markdown("---")
-st.caption("Step 5 complete — Automatic entry IV fetched, BSM delta calculated, rules engine active.")
+st.caption("Spread value now uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched.")
