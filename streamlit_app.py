@@ -5,8 +5,8 @@ import numpy as np
 from scipy.stats import norm
 import yfinance as yf
 
-st.set_page_config(page_title="Credit Spread Monitor", layout="wide")
-st.title("Options Spread Monitor")
+st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
+st.title("Put Credit Spread Monitor")
 
 # ------------------- Helpers ---------------------
 def init_state():
@@ -101,6 +101,15 @@ def compute_spread_value(short_option_price, long_option_price, width, credit):
     max_loss = width - credit
     return (spread_mark / max_loss) * 100
 
+def compute_current_profit(short_price, long_price, credit, width):
+    """Returns current profit as % of max gain"""
+    if short_price is None or long_price is None or credit <= 0:
+        return None
+    spread_value = short_price - long_price
+    max_loss = width - credit
+    current_profit = credit - spread_value  # profit if spread mark rises
+    return (current_profit / credit) * 100
+
 def fetch_short_iv(ticker, short_strike, expiration):
     _, puts = get_option_chain(ticker, expiration.isoformat())
     if puts is None or puts.empty:
@@ -115,34 +124,23 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
     status_color = "green"
     alerts = []
 
-    # Delta
     abs_delta = abs(delta) if delta is not None else None
     if abs_delta is not None and abs_delta >= 0.40:
         status_color = "red"
-        alerts.append(f"Short delta {abs_delta:.2f} ≥ 0.40")
+        alerts.append(f"Short delta {abs_delta:.2f} greater than or equal to 0.40")
 
-    # Price
     if current_price is not None and current_price < trade["short_strike"]:
         status_color = "red"
-        alerts.append(f"Price {current_price:.2f} below short strike")
+        alerts.append(f"Price {current_price:.2f} less than short strike {trade['short_strike']}")
 
-    # Spread value
     spread_value_percent = compute_spread_value(short_option_price, long_option_price, derived["width"], trade["credit"])
     if spread_value_percent is not None and spread_value_percent >= 150:
         status_color = "red"
-        alerts.append(f"Spread value {spread_value_percent:.0f}% ≥ 150% of credit")
+        alerts.append(f"Spread value {spread_value_percent:.0f}% greater than or equal to 150% of credit")
 
-    # DTE
     if derived["dte"] <= 7 and status_color != "red":
-        status_color = "yellow"
-        alerts.append(f"DTE {derived['dte']} ≤ 7")
-
-    # IV check
-    entry_iv = trade.get("entry_iv")
-    if entry_iv and current_iv:
-        if current_iv > entry_iv and status_color != "red":
-            status_color = "yellow"
-            alerts.append(f"Current IV {current_iv:.1f}% > Entry IV {entry_iv:.1f}%")
+        status_color = "orange"
+        alerts.append(f"DTE {derived['dte']} less than or equal to 7")
 
     return status_color, alerts, abs_delta, spread_value_percent
 
@@ -190,16 +188,6 @@ with st.form("add_trade", clear_on_submit=True):
 
 st.markdown("---")
 
-# ------------------- Rules List -------------------
-RULES_LIST = [
-    "❗ Exit if short delta ≥ 0.40",
-    "❗ Exit if price closes below short strike",
-    "❗ Exit if spread value ≥ 150–200% of credit",
-    "⏱ Never hold inside 7 DTE",
-    "🏆 Take profit early at 50–75% of max profit",
-    "Close early if trend breaks / price below key support / volatility spikes"
-]
-
 # ------------------- Active Trades Dashboard -------------------
 st.subheader("Active Trades")
 if not st.session_state.trades:
@@ -213,41 +201,43 @@ else:
         status_color, alerts, abs_delta, spread_value_percent = evaluate_rules(
             t, derived, current_price, delta, current_iv, short_option_price, long_option_price
         )
+        current_profit_percent = compute_current_profit(short_option_price, long_option_price, t["credit"], derived["width"])
 
         cols = st.columns([3,2])
         with cols[0]:
-            st.markdown("### Spread Info")
-            st.write(f"**Ticker:** {t['ticker']}")
-            st.write(f"**Underlying Price:** {current_price if current_price else '-'}")
-            st.write(f"**Short Strike:** {t['short_strike']}")
-            st.write(f"**Long Strike:** {t['long_strike']}")
-            st.write(f"**Spread Width:** {derived['width']}")
-            entry_iv = t.get("entry_iv")
-            if entry_iv and current_iv:
-                iv_color = "green" if current_iv < entry_iv else "red"
-                st.markdown(f"**Entry IV:** {entry_iv:.1f}%  **Current IV:** <span style='color:{iv_color}'>{current_iv:.1f}%</span>", unsafe_allow_html=True)
-            else:
-                st.write(f"**Entry IV:** {entry_iv if entry_iv else '-'}  **Current IV:** {current_iv if current_iv else '-'}")
-            st.write(f"**Expiration Date:** {t['expiration']}")
-            st.write(f"**Current DTE:** {derived['dte']}")
-            st.write(f"**Max Gain:** {format_money(derived['max_gain'])}")
-            st.write(f"**Max Loss:** {format_money(derived['max_loss'])}")
+            # --- Spread Info Card ---
+            with st.container():
+                st.markdown("### Spread Info")
+                st.markdown(f"""
+**Ticker:** {t['ticker']}  
+**Underlying Price:** {current_price if current_price else '-'}  
+**Short Strike:** {t['short_strike']}  
+**Long Strike:** {t['long_strike']}  
+**Spread Width:** {derived['width']}  
+**Expiration Date:** {t['expiration']}  
+**Current DTE:** {derived['dte']}  
+**Max Gain:** {format_money(derived['max_gain'])}  
+**Max Loss:** {format_money(derived['max_loss'])}  
+""")
 
+            # --- Stats / Status ---
             st.markdown("### Stats / Status")
             metrics = {
                 "Short Delta": f"{abs_delta:.2f}" if abs_delta else "-",
                 "Exit Price": f"{current_price:.2f}" if current_price else "-",
                 "Spread Value": f"{spread_value_percent:.0f}%" if spread_value_percent else "-",
                 "DTE": derived['dte'],
-                "Current Profit": "-"  # placeholder if you want to calculate P/L later
+                "Current Profit": f"{current_profit_percent:.1f}%" if current_profit_percent else "-",
+                "Entry IV <= Current IV": f"{t['entry_iv']:.1f}% <= {current_iv:.1f}%" if t['entry_iv'] and current_iv else "-"
             }
 
             rules_text = [
-                "Must be < 0.40",
-                f"Must stay above {t['short_strike']}",
-                "Must ≤ 150–200% of credit",
-                "Must > 7 DTE",
-                "Take profit 50–75%"
+                "Must be less than or equal to 0.40",
+                f"Must be greater than or equal to {t['short_strike']}",
+                "Must be less than or equal to 150% of credit",
+                "Must be greater than 7 DTE",
+                "Take profit 50–75%",
+                "Must be less than or equal to current IV"
             ]
 
             for (metric, value), rule in zip(metrics.items(), rules_text):
@@ -260,12 +250,10 @@ else:
                     color = "red"
                 if metric == "DTE" and derived['dte'] <= 7:
                     color = "orange"
-                st.markdown(f"- **{metric}:** <span style='color:{color}'>{value}</span> | {rule}", unsafe_allow_html=True)
+                if metric == "Entry IV <= Current IV" and t['entry_iv'] and current_iv and current_iv >= t['entry_iv']:
+                    color = "red"
 
-        with cols[1]:
-            st.markdown("### Rules Reference")
-            for r in RULES_LIST:
-                st.write(f"- {r}")
+                st.markdown(f"- **{metric}:** <span style='color:{color}'>{value}</span> | {rule}", unsafe_allow_html=True)
 
         # Remove button
         if st.button("Remove", key=f"remove_{i}"):
@@ -273,4 +261,4 @@ else:
             st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. Stats section now clearly shows metrics with rule checks.")
+st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. Stats section now includes Current Profit dynamically.")
