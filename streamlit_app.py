@@ -237,26 +237,36 @@ Max Loss: {format_money(derived['max_loss'])}
 """, unsafe_allow_html=True)
 
         with card_cols[1]:
-            # Stats with conditional coloring
+            # Stats with conditional coloring and rules
             delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
             exit_color = "red" if current_price is not None and current_price < t['short_strike'] else "green"
             spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
             dte_color = "red" if derived['dte'] <= 7 else "green"
-            profit_color = "red" if current_profit_percent is not None and current_profit_percent < 50 else "green"
+
+            # Current Profit coloring
+            if current_profit_percent is None:
+                profit_color = "black"
+            elif current_profit_percent < 50:
+                profit_color = "green"
+            elif 50 <= current_profit_percent <= 75:
+                profit_color = "yellow"
+            else:
+                profit_color = "red"
+
             iv_color = "red" if rule_violations["iv_rule"] else "green"
 
             st.markdown(
                 f"""
-Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> <br>
-Exit Price: <span style='color:{exit_color}'>{current_price_str}</span> <br>
-Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> <br>
-DTE: <span style='color:{dte_color}'>{derived['dte']}</span> <br>
-Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> <br>
+Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be less than or equal to 0.40 <br>
+Exit Price: <span style='color:{exit_color}'>{current_price_str}</span> | Must be greater than or equal to {t['short_strike']} <br>
+Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
+DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 DTE <br>
+Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% max profit target <br>
 Entry IV ≤ Current IV: <span style='color:{iv_color}'>{t['entry_iv']:.1f}% <= {current_iv:.1f}%</span>
 """, unsafe_allow_html=True)
 
-        # Status icon at bottom outside boxes
-        st.markdown(f"<div style='text-align:center; font-size:40px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
+        # Status icon at bottom outside boxes, slightly smaller
+        st.markdown(f"<div style='text-align:center; font-size:30px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
 
         # Remove button
         if st.button("Remove", key=f"remove_{i}"):
