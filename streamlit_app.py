@@ -277,7 +277,7 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
 
             # PnL graph
             pnl_df = generate_pnl_curve(t["short_strike"], t["long_strike"], t["credit"])
-            st.line_chart(pnl_df.rename(columns={"Underlying":"index"}).set_index("Underlying"))
+            st.line_chart(pnl_df.set_index("Underlying"))
 
         # Status icon at bottom outside boxes, slightly smaller
         st.markdown(f"<div style='text-align:center; font-size:30px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
