@@ -120,25 +120,20 @@ def fetch_short_iv(ticker, short_strike, expiration):
 
 def evaluate_rules(trade, derived, current_price, delta, current_iv, short_option_price, long_option_price):
     rule_violations = {"other_rules": False, "iv_rule": False}
-    alerts = []
 
     abs_delta = abs(delta) if delta is not None else None
 
     if abs_delta is not None and abs_delta >= 0.40:
-        alerts.append(f"Short delta {abs_delta:.2f} greater than or equal to 0.40")
         rule_violations["other_rules"] = True
 
     if current_price is not None and current_price < trade["short_strike"]:
-        alerts.append(f"Price {current_price:.2f} less than short strike {trade['short_strike']}")
         rule_violations["other_rules"] = True
 
     spread_value_percent = compute_spread_value(short_option_price, long_option_price, derived["width"], trade["credit"])
     if spread_value_percent is not None and spread_value_percent >= 150:
-        alerts.append(f"Spread value {spread_value_percent:.0f}% greater than or equal to 150% of credit")
         rule_violations["other_rules"] = True
 
     if derived["dte"] <= 7:
-        alerts.append(f"DTE {derived['dte']} less than or equal to 7")
         rule_violations["other_rules"] = True
 
     entry_iv = trade.get("entry_iv")
@@ -206,7 +201,7 @@ else:
             t, derived, current_price, delta, current_iv, short_option_price, long_option_price
         )
 
-        # Precompute strings
+        # Strings
         abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
         spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else "-"
         current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else "-"
@@ -228,32 +223,36 @@ else:
         with card_cols[0]:
             st.markdown(
                 f"""
-<div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px; box-shadow:2px 2px 5px #ccc'>
-### Spread Info
-**Ticker:** {t['ticker']}  <br>
-**Underlying Price:** {current_price_str}  <br>
-**Short Strike:** {t['short_strike']}  <br>
-**Long Strike:** {t['long_strike']}  <br>
-**Spread Width:** {derived['width']}  <br>
-**Expiration Date:** {t['expiration']}  <br>
-**Current DTE:** {derived['dte']}  <br>
-**Max Gain:** {format_money(derived['max_gain'])}  <br>
-**Max Loss:** {format_money(derived['max_loss'])}  
+<div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px'>
+Ticker: {t['ticker']}  <br>
+Underlying Price: {current_price_str}  <br>
+Short Strike: {t['short_strike']}  <br>
+Long Strike: {t['long_strike']}  <br>
+Spread Width: {derived['width']}  <br>
+Expiration Date: {t['expiration']}  <br>
+Current DTE: {derived['dte']}  <br>
+Max Gain: {format_money(derived['max_gain'])}  <br>
+Max Loss: {format_money(derived['max_loss'])}  
 </div>
 """, unsafe_allow_html=True)
 
         with card_cols[1]:
-            # Stats only, no background
-            iv_rule_color = "red" if rule_violations["iv_rule"] else "green"
+            # Stats with conditional coloring
+            delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
+            exit_color = "red" if current_price is not None and current_price < t['short_strike'] else "green"
+            spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
+            dte_color = "red" if derived['dte'] <= 7 else "green"
+            profit_color = "red" if current_profit_percent is not None and current_profit_percent < 50 else "green"
+            iv_color = "red" if rule_violations["iv_rule"] else "green"
+
             st.markdown(
                 f"""
-### Stats
-- Short Delta: {abs_delta_str} | Must be less than or equal to 0.40 <br>
-- Exit Price: {current_price_str} | Must be greater than or equal to {t['short_strike']} <br>
-- Spread Value: {spread_value_str} | Must be less than or equal to 150% of credit <br>
-- DTE: {derived['dte']} | Must be greater than 7 DTE <br>
-- Current Profit: {current_profit_str} <br>
-- Entry IV ≤ Current IV: <span style='color:{iv_rule_color}'>{t['entry_iv']:.1f}% <= {current_iv:.1f}%</span>
+Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> <br>
+Exit Price: <span style='color:{exit_color}'>{current_price_str}</span> <br>
+Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> <br>
+DTE: <span style='color:{dte_color}'>{derived['dte']}</span> <br>
+Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> <br>
+Entry IV ≤ Current IV: <span style='color:{iv_color}'>{t['entry_iv']:.1f}% <= {current_iv:.1f}%</span>
 """, unsafe_allow_html=True)
 
         # Status icon at bottom outside boxes
