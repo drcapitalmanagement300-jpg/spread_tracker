@@ -134,28 +134,6 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
         rule_violations["iv_rule"] = True
     return rule_violations, abs_delta, spread_value_percent
 
-def generate_realistic_pnl_with_lines(trade, derived, short_option_price, long_option_price):
-    current_price = get_price(trade['ticker'])
-    if current_price is None or short_option_price is None or long_option_price is None:
-        return pd.DataFrame({"DTE": [0], "Profit %": [0]})
-
-    dte = derived['dte']
-    credit = trade['credit']
-    width = derived['width']
-    max_loss = width - credit
-
-    pnl_points = []
-    for day in range(dte, -1, -1):
-        price_sim = current_price * (1 + 0.01 * (day - dte/2))  # simple simulation
-        spread_mark = max(short_option_price - long_option_price + (price_sim - current_price), 0)
-        profit_percent = max(0, min((credit - spread_mark) / credit * 100, 100))
-        pnl_points.append({"DTE": day, "Profit %": profit_percent,
-                           "Max Gain": 100, "Break-even": credit / credit * 100, "Max Loss": 0})
-
-    pnl_df = pd.DataFrame(pnl_points)
-    pnl_df = pnl_df.set_index("DTE")
-    return pnl_df
-
 # ------------------- Initialize -------------------
 init_state()
 
@@ -282,8 +260,11 @@ Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> |
 Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
 """, unsafe_allow_html=True)
 
-            # Realistic PnL chart with horizontal lines
-            pnl_df = generate_realistic_pnl_with_lines(t, derived, short_option_price, long_option_price)
+            # Simplified PnL chart: single point
+            pnl_df = pd.DataFrame({
+                "DTE": [derived["dte"]],
+                "Profit %": [current_profit_percent if current_profit_percent is not None else 0]
+            }).set_index("DTE")
             st.line_chart(pnl_df, height=150)
 
         # Remove button
@@ -292,4 +273,4 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
             st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL graph shows realistic profit % vs DTE with max gain, max loss, and break-even lines.")
+st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL chart shows current profit % vs DTE.")
