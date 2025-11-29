@@ -134,12 +134,27 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
         rule_violations["iv_rule"] = True
     return rule_violations, abs_delta, spread_value_percent
 
-def generate_pnl_curve_dte(credit, max_loss, width, dte, current_profit_percent):
-    # Simulate simple PnL % over remaining DTE
-    x_days = np.arange(dte, -1, -1)  # X-axis: DTE  (0 = expiration)
-    y_profit = np.linspace(current_profit_percent, 100, len(x_days))
-    y_profit = np.clip(y_profit, 0, 100)
-    return pd.DataFrame({"DTE": x_days, "Profit %": y_profit})
+def generate_realistic_pnl_with_lines(trade, derived, short_option_price, long_option_price):
+    current_price = get_price(trade['ticker'])
+    if current_price is None or short_option_price is None or long_option_price is None:
+        return pd.DataFrame({"DTE": [0], "Profit %": [0]})
+
+    dte = derived['dte']
+    credit = trade['credit']
+    width = derived['width']
+    max_loss = width - credit
+
+    pnl_points = []
+    for day in range(dte, -1, -1):
+        price_sim = current_price * (1 + 0.01 * (day - dte/2))  # simple simulation
+        spread_mark = max(short_option_price - long_option_price + (price_sim - current_price), 0)
+        profit_percent = max(0, min((credit - spread_mark) / credit * 100, 100))
+        pnl_points.append({"DTE": day, "Profit %": profit_percent,
+                           "Max Gain": 100, "Break-even": credit / credit * 100, "Max Loss": 0})
+
+    pnl_df = pd.DataFrame(pnl_points)
+    pnl_df = pnl_df.set_index("DTE")
+    return pnl_df
 
 # ------------------- Initialize -------------------
 init_state()
@@ -235,11 +250,9 @@ Max Loss: {format_money(derived['max_loss'])}
 </div>
 """, unsafe_allow_html=True)
 
-            # Status box below spread info
             st.markdown(f"<div style='margin-top:10px; font-size:20px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
 
         with card_cols[1]:
-            # Stats
             delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
             spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
             dte_color = "red" if derived['dte'] <= 7 else "green"
@@ -269,9 +282,9 @@ Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> |
 Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
 """, unsafe_allow_html=True)
 
-            # PnL chart with correct axes
-            pnl_df = generate_pnl_curve_dte(t["credit"], derived['max_loss'], derived['width'], derived['dte'], current_profit_percent)
-            st.line_chart(pnl_df.set_index("DTE"), height=150)
+            # Realistic PnL chart with horizontal lines
+            pnl_df = generate_realistic_pnl_with_lines(t, derived, short_option_price, long_option_price)
+            st.line_chart(pnl_df, height=150)
 
         # Remove button
         if st.button("Remove", key=f"remove_{i}"):
@@ -279,4 +292,4 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
             st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL graph shows current profit % vs DTE.")
+st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL graph shows realistic profit % vs DTE with max gain, max loss, and break-even lines.")
