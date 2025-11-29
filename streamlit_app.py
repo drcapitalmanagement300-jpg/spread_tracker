@@ -58,7 +58,6 @@ def get_option_chain(ticker: str, expiration: str):
 
 # ------------------- Black-Scholes Delta -----------------
 def bsm_delta(option_type, S, K, T, r, sigma):
-    """Calculate delta for European call/put using Black-Scholes-Merton"""
     if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
         return None
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -96,48 +95,12 @@ def get_long_leg_data(trade: dict):
     return long_price
 
 def compute_spread_value(short_option_price, long_option_price, width, credit):
-    """Returns current spread value as % of max loss"""
     if short_option_price is None or long_option_price is None or width - credit <= 0:
         return None
     spread_mark = short_option_price - long_option_price
     max_loss = width - credit
     return (spread_mark / max_loss) * 100
 
-def evaluate_rules(trade, derived, current_price, delta, current_iv, short_option_price, long_option_price):
-    status = "green"
-    alerts = []
-
-    # Delta rule
-    if delta is not None and delta >= 0.40:
-        status = "red"
-        alerts.append(f"Short delta {delta:.2f} ≥ 0.40")
-
-    # Price rule
-    if current_price is not None and current_price < trade["short_strike"]:
-        status = "red"
-        alerts.append(f"Price {current_price:.2f} below short strike {trade['short_strike']}")
-
-    # Spread value rule
-    spread_value_percent = compute_spread_value(short_option_price, long_option_price, derived["width"], trade["credit"])
-    if spread_value_percent is not None and spread_value_percent >= 150:
-        status = "red"
-        alerts.append(f"Spread value {spread_value_percent:.0f}% ≥ 150% of credit")
-
-    # DTE rule
-    if derived["dte"] <= 7 and status != "red":
-        status = "yellow"
-        alerts.append(f"DTE {derived['dte']} ≤ 7")
-
-    # IV rule
-    entry_iv = trade.get("entry_iv")
-    if entry_iv and current_iv:
-        if current_iv > entry_iv and status != "red":
-            status = "yellow"
-            alerts.append(f"Current IV {current_iv:.1f}% > Entry IV {entry_iv:.1f}%")
-
-    return status, alerts, spread_value_percent
-
-# ------------------- Auto-fetch entry IV -----------------
 def fetch_short_iv(ticker, short_strike, expiration):
     _, puts = get_option_chain(ticker, expiration.isoformat())
     if puts is None or puts.empty:
@@ -147,6 +110,41 @@ def fetch_short_iv(ticker, short_strike, expiration):
         return None
     iv = short_row['impliedVolatility'].values[0] * 100
     return iv
+
+def evaluate_rules(trade, derived, current_price, delta, current_iv, short_option_price, long_option_price):
+    status_color = "green"
+    alerts = []
+
+    # Delta
+    abs_delta = abs(delta) if delta is not None else None
+    if abs_delta is not None and abs_delta >= 0.40:
+        status_color = "red"
+        alerts.append(f"Short delta {abs_delta:.2f} ≥ 0.40")
+
+    # Price
+    if current_price is not None and current_price < trade["short_strike"]:
+        status_color = "red"
+        alerts.append(f"Price {current_price:.2f} below short strike")
+
+    # Spread value
+    spread_value_percent = compute_spread_value(short_option_price, long_option_price, derived["width"], trade["credit"])
+    if spread_value_percent is not None and spread_value_percent >= 150:
+        status_color = "red"
+        alerts.append(f"Spread value {spread_value_percent:.0f}% ≥ 150% of credit")
+
+    # DTE
+    if derived["dte"] <= 7 and status_color != "red":
+        status_color = "yellow"
+        alerts.append(f"DTE {derived['dte']} ≤ 7")
+
+    # IV check
+    entry_iv = trade.get("entry_iv")
+    if entry_iv and current_iv:
+        if current_iv > entry_iv and status_color != "red":
+            status_color = "yellow"
+            alerts.append(f"Current IV {current_iv:.1f}% > Entry IV {entry_iv:.1f}%")
+
+    return status_color, alerts, abs_delta, spread_value_percent
 
 # ------------------- Initialize -------------------
 init_state()
@@ -212,61 +210,67 @@ else:
         current_price = get_price(t['ticker'])
         delta, current_iv, short_option_price = get_short_leg_data(t)
         long_option_price = get_long_leg_data(t)
-        status_color, alerts, spread_value_percent = evaluate_rules(
+        status_color, alerts, abs_delta, spread_value_percent = evaluate_rules(
             t, derived, current_price, delta, current_iv, short_option_price, long_option_price
         )
 
-        # --- Trade Card with rules list on the right ---
-        cols = st.columns([3,1])
+        cols = st.columns([3,2])
         with cols[0]:
-            st.markdown(f"**{t['ticker']}** {t['short_strike']}/{t['long_strike']} Exp: {t['expiration'].isoformat()}")
-            st.write(f"Spread width: {derived['width']} | Max gain: {format_money(derived['max_gain'])} | Max loss: {format_money(derived['max_loss'])}")
-            st.write(f"Break-even: {derived['breakeven']} | DTE: {derived['dte']}")
-            
-            if current_price is None:
-                st.warning("Price unavailable")
-            else:
-                if current_price < t["short_strike"]:
-                    st.error(f"Price: {current_price:.2f} 🚨 Below short strike!")
-                else:
-                    st.success(f"Price: {current_price:.2f}")
-
+            st.markdown("### Spread Info")
+            st.write(f"**Ticker:** {t['ticker']}")
+            st.write(f"**Underlying Price:** {current_price if current_price else '-'}")
+            st.write(f"**Short Strike:** {t['short_strike']}")
+            st.write(f"**Long Strike:** {t['long_strike']}")
+            st.write(f"**Spread Width:** {derived['width']}")
             entry_iv = t.get("entry_iv")
             if entry_iv and current_iv:
                 iv_color = "green" if current_iv < entry_iv else "red"
-                st.markdown(f"Entry IV: **{entry_iv:.1f}%**  Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>", unsafe_allow_html=True)
+                st.markdown(f"**Entry IV:** {entry_iv:.1f}%  **Current IV:** <span style='color:{iv_color}'>{current_iv:.1f}%</span>", unsafe_allow_html=True)
             else:
-                st.markdown(f"Entry IV: **{entry_iv if entry_iv else '—'}%**  Current IV: {current_iv if current_iv else '—'}%")
+                st.write(f"**Entry IV:** {entry_iv if entry_iv else '-'}  **Current IV:** {current_iv if current_iv else '-'}")
+            st.write(f"**Expiration Date:** {t['expiration']}")
+            st.write(f"**Current DTE:** {derived['dte']}")
+            st.write(f"**Max Gain:** {format_money(derived['max_gain'])}")
+            st.write(f"**Max Loss:** {format_money(derived['max_loss'])}")
 
-            st.write(f"Short-leg delta: {delta if delta else '—'}")
-            if spread_value_percent is not None:
-                st.write(f"Spread value: {spread_value_percent:.0f}% of max loss")
+            st.markdown("### Stats / Status")
+            metrics = {
+                "Short Delta": f"{abs_delta:.2f}" if abs_delta else "-",
+                "Exit Price": f"{current_price:.2f}" if current_price else "-",
+                "Spread Value": f"{spread_value_percent:.0f}%" if spread_value_percent else "-",
+                "DTE": derived['dte'],
+                "Current Profit": "-"  # placeholder if you want to calculate P/L later
+            }
 
-            if status_color == "green":
-                st.success("Status: ✅ Safe")
-            elif status_color == "yellow":
-                st.warning("Status: ⚠ Warning")
-            else:
-                st.error("Status: ❌ Critical")
+            rules_text = [
+                "Must be < 0.40",
+                f"Must stay above {t['short_strike']}",
+                "Must ≤ 150–200% of credit",
+                "Must > 7 DTE",
+                "Take profit 50–75%"
+            ]
 
-            if alerts:
-                st.markdown("**Alerts:**")
-                for a in alerts:
-                    st.write(f"- {a}")
-
-            with st.expander("Details / Notes"):
-                st.write("Notes:", t.get("notes") or "-")
-                st.write("Created:", t.get("created_at"))
+            for (metric, value), rule in zip(metrics.items(), rules_text):
+                color = "green"
+                if metric == "Short Delta" and abs_delta is not None and abs_delta >= 0.40:
+                    color = "red"
+                if metric == "Exit Price" and current_price is not None and current_price < t['short_strike']:
+                    color = "red"
+                if metric == "Spread Value" and spread_value_percent is not None and spread_value_percent >= 150:
+                    color = "red"
+                if metric == "DTE" and derived['dte'] <= 7:
+                    color = "orange"
+                st.markdown(f"- **{metric}:** <span style='color:{color}'>{value}</span> | {rule}", unsafe_allow_html=True)
 
         with cols[1]:
-            st.markdown("**Rules Reference**")
+            st.markdown("### Rules Reference")
             for r in RULES_LIST:
                 st.write(f"- {r}")
 
-        # Remove button outside of trade card
+        # Remove button
         if st.button("Remove", key=f"remove_{i}"):
             st.session_state.trades.pop(i)
             st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. Rules list displayed for reference.")
+st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. Stats section now clearly shows metrics with rule checks.")
