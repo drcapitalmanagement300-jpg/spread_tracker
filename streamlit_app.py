@@ -4,6 +4,7 @@ from datetime import datetime, date
 import numpy as np
 from scipy.stats import norm
 import yfinance as yf
+import pandas as pd
 
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
@@ -139,6 +140,12 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
 
     return rule_violations, abs_delta, spread_value_percent
 
+def generate_pnl_curve(short_strike, long_strike, credit):
+    s_range = np.linspace(short_strike - 20, long_strike + 20, 100)
+    pnl = np.minimum(short_strike - s_range, long_strike - s_range)
+    pnl = np.clip(pnl + credit, 0, credit + abs(short_strike - long_strike))
+    return pd.DataFrame({"Underlying": s_range, "PnL": pnl})
+
 # ------------------- Initialize -------------------
 init_state()
 
@@ -220,7 +227,7 @@ else:
         with card_cols[0]:
             st.markdown(
                 f"""
-<div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px'>
+<div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px; height:100%'>
 Ticker: {t['ticker']}  <br>
 Underlying Price: {current_price_str}  <br>
 Short Strike: {t['short_strike']}  <br>
@@ -234,7 +241,7 @@ Max Loss: {format_money(derived['max_loss'])}
 """, unsafe_allow_html=True)
 
         with card_cols[1]:
-            # Stats with conditional coloring and rules
+            # Stats with conditional coloring
             delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
             spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
             dte_color = "red" if derived['dte'] <= 7 else "green"
@@ -265,9 +272,12 @@ Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be 
 Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
 DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 DTE <br>
 Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
-Entry IV: {t['entry_iv']:.1f}%  <br>
-Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
+Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
 """, unsafe_allow_html=True)
+
+            # PnL graph
+            pnl_df = generate_pnl_curve(t["short_strike"], t["long_strike"], t["credit"])
+            st.line_chart(pnl_df.rename(columns={"Underlying":"index"}).set_index("Underlying"))
 
         # Status icon at bottom outside boxes, slightly smaller
         st.markdown(f"<div style='text-align:center; font-size:30px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
@@ -278,4 +288,4 @@ Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
             st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched.")
+st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL graph is illustrative based on strike & credit.")
