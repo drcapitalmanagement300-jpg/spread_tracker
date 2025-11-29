@@ -253,14 +253,14 @@ Max Loss: {format_money(derived['max_loss'])}
 
             st.markdown(
                 f"""
-Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be ≤ 0.40 <br>
-Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be ≤ 150% <br>
-DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be > 7 <br>
-Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% target <br>
+Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be less than or equal to 0.40 <br>
+Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
+DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 <br>
+Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
 Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
 """, unsafe_allow_html=True)
 
-            # ------------------- PnL CHART (ONLY CHANGE: reversed x-axis) -------------------
+            # ------------------- PnL CHART WITH HORIZONTAL/VERTICAL LINES -------------------
             dte_range = list(range(derived["dte"] + 1))
             profit_values = [current_profit_percent if current_profit_percent is not None else 0]*len(dte_range)
             pnl_df = pd.DataFrame({
@@ -268,17 +268,19 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
                 "Profit %": profit_values
             })
 
-            chart = alt.Chart(pnl_df).mark_line(point=True, color='blue').encode(
-                x=alt.X('DTE', title='Days to Expiration',
-                        scale=alt.Scale(domain=(derived["dte"], 0))),   # ← REVERSED AXIS
-                y=alt.Y('Profit %', title='Current Profit %',
-                        scale=alt.Scale(domain=(0,100), nice=False),
-                        axis=alt.Axis(tickMinStep=10))
-            ).properties(height=150)
+            base_chart = alt.Chart(pnl_df).mark_line(point=True, color='blue').encode(
+                x=alt.X('DTE', title='Days to Expiration', scale=alt.Scale(domain=(derived["dte"], 0))),
+                y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100), nice=False),
+                        axis=alt.Axis(tickMinStep=10, tickCount=11))  # 0-100 in 10% increments
+            ).properties(height=250)
 
-            st.altair_chart(chart, use_container_width=True)
+            line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(color='green', strokeDash=[5,5]).encode(y='y')
+            line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(color='orange', strokeDash=[5,5]).encode(y='y')
+            vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(color='blue', strokeDash=[5,5]).encode(x='DTE')
 
-        # Remove trade
+            final_chart = base_chart + line_50 + line_75 + vline
+            st.altair_chart(final_chart, use_container_width=True)
+
         if st.button("Remove", key=f"remove_{i}"):
             st.session_state.trades.pop(i)
             st.experimental_rerun()
