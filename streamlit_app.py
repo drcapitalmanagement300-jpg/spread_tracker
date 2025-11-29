@@ -17,6 +17,9 @@ def init_state():
 def days_to_expiry(expiry_date: date) -> int:
     return max((expiry_date - date.today()).days, 0)
 
+def days_open(entry_date: date) -> int:
+    return max((date.today() - entry_date).days, 0)
+
 def compute_derived(trade: dict) -> dict:
     short = float(trade["short_strike"])
     long = float(trade["long_strike"])
@@ -26,12 +29,14 @@ def compute_derived(trade: dict) -> dict:
     max_loss = max(width - credit, 0)
     breakeven = short + credit
     dte = days_to_expiry(trade["expiration"])
+    open_days = days_open(trade["entry_date"])
     return {
         "width": width,
         "max_gain": max_gain,
         "max_loss": max_loss,
         "breakeven": breakeven,
-        "dte": dte
+        "dte": dte,
+        "open_days": open_days
     }
 
 def format_money(x):
@@ -140,11 +145,13 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
 
     return rule_violations, abs_delta, spread_value_percent
 
-def generate_pnl_curve(short_strike, long_strike, credit):
-    s_range = np.linspace(short_strike - 20, long_strike + 20, 100)
-    pnl = np.minimum(short_strike - s_range, long_strike - s_range)
-    pnl = np.clip(pnl + credit, 0, credit + abs(short_strike - long_strike))
-    return pd.DataFrame({"Underlying": s_range, "PnL": pnl})
+def generate_pnl_curve_days_open(credit, max_loss, width, dte, days_open):
+    # Linear decay simulation for now: profit % vs days open
+    days_total = max(dte, 1)
+    days_elapsed = np.arange(0, days_open+1)
+    pnl_percent = credit / (width) * 100 * (1 - days_elapsed / days_total)
+    pnl_percent = np.clip(pnl_percent, 0, 100)
+    return pd.DataFrame({"Days Open": days_elapsed, "Profit %": pnl_percent})
 
 # ------------------- Initialize -------------------
 init_state()
@@ -222,9 +229,10 @@ else:
             status_icon = "✅"
             status_text = "All rules are satisfied."
 
-        # Layout: left = info, right = stats
+        # Layout: left = info + status, right = pnl
         card_cols = st.columns([3,3])
         with card_cols[0]:
+            # Spread info box
             st.markdown(
                 f"""
 <div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px; height:100%'>
@@ -240,13 +248,15 @@ Max Loss: {format_money(derived['max_loss'])}
 </div>
 """, unsafe_allow_html=True)
 
+            # Status box
+            st.markdown(f"<div style='margin-top:10px; font-size:20px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
+
         with card_cols[1]:
             # Stats with conditional coloring
             delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
             spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
             dte_color = "red" if derived['dte'] <= 7 else "green"
 
-            # Current Profit coloring
             if current_profit_percent is None:
                 profit_color = "black"
             elif current_profit_percent < 50:
@@ -256,7 +266,6 @@ Max Loss: {format_money(derived['max_loss'])}
             else:
                 profit_color = "red"
 
-            # IV coloring
             if current_iv is None or t["entry_iv"] is None:
                 iv_color = "black"
             elif current_iv == t["entry_iv"]:
@@ -276,11 +285,8 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
 """, unsafe_allow_html=True)
 
             # PnL graph
-            pnl_df = generate_pnl_curve(t["short_strike"], t["long_strike"], t["credit"])
-            st.line_chart(pnl_df.set_index("Underlying"))
-
-        # Status icon at bottom outside boxes, slightly smaller
-        st.markdown(f"<div style='text-align:center; font-size:30px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
+            pnl_df = generate_pnl_curve_days_open(t["credit"], derived['max_loss'], derived['width'], derived['dte'], derived['open_days'])
+            st.line_chart(pnl_df.set_index("Days Open"), height=150)
 
         # Remove button
         if st.button("Remove", key=f"remove_{i}"):
@@ -288,4 +294,4 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
             st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL graph is illustrative based on strike & credit.")
+st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL graph shows current profit % vs days open.")
