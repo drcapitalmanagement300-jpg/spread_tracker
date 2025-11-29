@@ -271,11 +271,11 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
             base_chart = alt.Chart(pnl_df).mark_line(point=True, color='blue').encode(
                 x=alt.X('DTE', title='Days to Expiration', scale=alt.Scale(domain=(derived["dte"], 0))),
                 y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100), nice=False),
-                        axis=alt.Axis(tickMinStep=10, tickCount=11))  # 0-100 in 10% increments
+                        axis=alt.Axis(tickMinStep=10, tickCount=11))
             ).properties(height=250)
 
-            line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(color='green', strokeDash=[5,5]).encode(y='y')
-            line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(color='orange', strokeDash=[5,5]).encode(y='y')
+            line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(color='yellow', strokeDash=[5,5]).encode(y='y')
+            line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(color='red', strokeDash=[5,5]).encode(y='y')
             vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(color='blue', strokeDash=[5,5]).encode(x='DTE')
 
             final_chart = base_chart + line_50 + line_75 + vline
