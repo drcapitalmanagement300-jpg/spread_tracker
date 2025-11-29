@@ -192,6 +192,16 @@ with st.form("add_trade", clear_on_submit=True):
 
 st.markdown("---")
 
+# ------------------- Rules List -------------------
+RULES_LIST = [
+    "❗ Exit if short delta ≥ 0.40",
+    "❗ Exit if price closes below short strike",
+    "❗ Exit if spread value ≥ 150–200% of credit",
+    "⏱ Never hold inside 7 DTE",
+    "🏆 Take profit early at 50–75% of max profit",
+    "Close early if trend breaks / price below key support / volatility spikes"
+]
+
 # ------------------- Active Trades Dashboard -------------------
 st.subheader("Active Trades")
 if not st.session_state.trades:
@@ -206,24 +216,13 @@ else:
             t, derived, current_price, delta, current_iv, short_option_price, long_option_price
         )
 
-        cols = st.columns([1,2,2,1])
+        # --- Trade Card with rules list on the right ---
+        cols = st.columns([3,1])
         with cols[0]:
-            st.markdown(f"**{t['ticker']}**")
-            st.write(f"{t['short_strike']}/{t['long_strike']}")
-            st.write(f"Exp: {t['expiration'].isoformat()}")
-            dte = derived["dte"]
-            if dte <= 7:
-                st.error(f"{dte} DTE")
-            else:
-                st.success(f"{dte} DTE")
-        with cols[1]:
-            st.write("**Derived**")
-            st.write(f"Spread width: {derived['width']}")
-            st.write(f"Max gain: {format_money(derived['max_gain'])}")
-            st.write(f"Max loss: {format_money(derived['max_loss'])}")
-            st.write(f"Break-even: {derived['breakeven']}")
-        with cols[2]:
-            st.write("**Live Data / Rules**")
+            st.markdown(f"**{t['ticker']}** {t['short_strike']}/{t['long_strike']} Exp: {t['expiration'].isoformat()}")
+            st.write(f"Spread width: {derived['width']} | Max gain: {format_money(derived['max_gain'])} | Max loss: {format_money(derived['max_loss'])}")
+            st.write(f"Break-even: {derived['breakeven']} | DTE: {derived['dte']}")
+            
             if current_price is None:
                 st.warning("Price unavailable")
             else:
@@ -255,14 +254,19 @@ else:
                 for a in alerts:
                     st.write(f"- {a}")
 
-        with cols[3]:
-            if st.button("Remove", key=f"remove_{i}"):
-                st.session_state.trades.pop(i)
-                st.experimental_rerun()
+            with st.expander("Details / Notes"):
+                st.write("Notes:", t.get("notes") or "-")
+                st.write("Created:", t.get("created_at"))
 
-        with st.expander("Details / Notes"):
-            st.write("Notes:", t.get("notes") or "-")
-            st.write("Created:", t.get("created_at"))
+        with cols[1]:
+            st.markdown("**Rules Reference**")
+            for r in RULES_LIST:
+                st.write(f"- {r}")
+
+        # Remove button outside of trade card
+        if st.button("Remove", key=f"remove_{i}"):
+            st.session_state.trades.pop(i)
+            st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Spread value now uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched.")
+st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. Rules list displayed for reference.")
