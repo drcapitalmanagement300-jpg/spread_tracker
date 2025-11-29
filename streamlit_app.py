@@ -120,14 +120,10 @@ def fetch_short_iv(ticker, short_strike, expiration):
     return iv
 
 def evaluate_rules(trade, derived, current_price, delta, current_iv, short_option_price, long_option_price):
-    status_color = "green"
+    rule_violations = {"other_rules": False, "iv_rule": False}
     alerts = []
 
     abs_delta = abs(delta) if delta is not None else None
-    rule_violations = {
-        "other_rules": False,
-        "iv_rule": False
-    }
 
     if abs_delta is not None and abs_delta >= 0.40:
         alerts.append(f"Short delta {abs_delta:.2f} greater than or equal to 0.40")
@@ -249,9 +245,9 @@ else:
 ### Stats / Status
 - Short Delta: {abs_delta:.2f if abs_delta else "-"} | Must be less than or equal to 0.40 <br>
 - Exit Price: {current_price:.2f if current_price else "-"} | Must be greater than or equal to {t['short_strike']} <br>
-- Spread Value: {spread_value_percent:.0f}% if spread_value_percent else "-"} | Must be less than or equal to 150% of credit <br>
+- Spread Value: {f"{spread_value_percent:.0f}%" if spread_value_percent else "-"} | Must be less than or equal to 150% of credit <br>
 - DTE: {derived['dte']} | Must be greater than 7 DTE <br>
-- Current Profit: {current_profit_percent:.1f}% if current_profit_percent else "-"} <br>
+- Current Profit: {f"{current_profit_percent:.1f}%" if current_profit_percent else "-"} <br>
 - Entry IV ≤ Current IV: <span style='color:{iv_rule_color}'>{t['entry_iv']:.1f}% <= {current_iv:.1f}%</span>
 </div>
 """, unsafe_allow_html=True)
