@@ -217,18 +217,21 @@ else:
         # Determine bottom icon
         if rule_violations["other_rules"]:
             status_icon = "❌"
+            status_text = "Some critical rules are violated."
         elif rule_violations["iv_rule"]:
             status_icon = "⚠️"
+            status_text = "Current IV exceeds entry IV."
         else:
             status_icon = "✅"
+            status_text = "All rules are satisfied."
 
-        # Card layout
+        # Card layout with left (info + status) and right (stats)
         card_cols = st.columns([3,3])
         with card_cols[0]:
-            # Spread Info box
+            # Spread Info box (soft green)
             st.markdown(
                 f"""
-<div style='background-color:#f0f8ff; padding:15px; border-radius:10px; box-shadow:2px 2px 5px #ccc'>
+<div style='background-color:#e6f7e6; padding:15px; border-radius:10px; box-shadow:2px 2px 5px #ccc'>
 ### Spread Info
 **Ticker:** {t['ticker']}  <br>
 **Underlying Price:** {current_price_str}  <br>
@@ -238,17 +241,18 @@ else:
 **Expiration Date:** {t['expiration']}  <br>
 **Current DTE:** {derived['dte']}  <br>
 **Max Gain:** {format_money(derived['max_gain'])}  <br>
-**Max Loss:** {format_money(derived['max_loss'])}  
+**Max Loss:** {format_money(derived['max_loss'])}  <br><br>
+<div style='font-size:30px'>{status_icon}</div> <span style='font-size:16px'>{status_text}</span>
 </div>
 """, unsafe_allow_html=True)
 
         with card_cols[1]:
-            # Stats box
+            # Stats box (soft green, same height as left)
             iv_rule_color = "red" if rule_violations["iv_rule"] else "green"
             st.markdown(
                 f"""
-<div style='background-color:#fff0f5; padding:15px; border-radius:10px; box-shadow:2px 2px 5px #ccc'>
-### Stats / Status
+<div style='background-color:#e6f7e6; padding:15px; border-radius:10px; box-shadow:2px 2px 5px #ccc; min-height:300px'>
+### Stats
 - Short Delta: {abs_delta_str} | Must be less than or equal to 0.40 <br>
 - Exit Price: {current_price_str} | Must be greater than or equal to {t['short_strike']} <br>
 - Spread Value: {spread_value_str} | Must be less than or equal to 150% of credit <br>
@@ -257,8 +261,6 @@ else:
 - Entry IV ≤ Current IV: <span style='color:{iv_rule_color}'>{t['entry_iv']:.1f}% <= {current_iv:.1f}%</span>
 </div>
 """, unsafe_allow_html=True)
-
-        st.markdown(f"<div style='text-align:center; font-size:40px'>{status_icon}</div>", unsafe_allow_html=True)
 
         # Remove button
         if st.button("Remove", key=f"remove_{i}"):
