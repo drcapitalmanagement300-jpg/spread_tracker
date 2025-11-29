@@ -102,11 +102,10 @@ def compute_spread_value(short_option_price, long_option_price, width, credit):
     return (spread_mark / max_loss) * 100
 
 def compute_current_profit(short_price, long_price, credit, width):
-    """Returns current profit as % of max gain"""
     if short_price is None or long_price is None or credit <= 0:
         return None
     spread_value = short_price - long_price
-    current_profit = credit - spread_value  # profit if spread mark rises
+    current_profit = credit - spread_value
     return (current_profit / credit) * 100
 
 def fetch_short_iv(ticker, short_strike, expiration):
@@ -142,7 +141,6 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
         alerts.append(f"DTE {derived['dte']} less than or equal to 7")
         rule_violations["other_rules"] = True
 
-    # IV rule
     entry_iv = trade.get("entry_iv")
     if entry_iv and current_iv and current_iv > entry_iv:
         rule_violations["iv_rule"] = True
@@ -208,7 +206,7 @@ else:
             t, derived, current_price, delta, current_iv, short_option_price, long_option_price
         )
 
-        # Precompute strings for safe f-string
+        # Precompute strings
         abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
         spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else "-"
         current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else "-"
@@ -225,13 +223,12 @@ else:
             status_icon = "✅"
             status_text = "All rules are satisfied."
 
-        # Card layout with left (info + status) and right (stats)
+        # Layout: left = info, right = stats
         card_cols = st.columns([3,3])
         with card_cols[0]:
-            # Spread Info box (soft green)
             st.markdown(
                 f"""
-<div style='background-color:#e6f7e6; padding:15px; border-radius:10px; box-shadow:2px 2px 5px #ccc'>
+<div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px; box-shadow:2px 2px 5px #ccc'>
 ### Spread Info
 **Ticker:** {t['ticker']}  <br>
 **Underlying Price:** {current_price_str}  <br>
@@ -241,17 +238,15 @@ else:
 **Expiration Date:** {t['expiration']}  <br>
 **Current DTE:** {derived['dte']}  <br>
 **Max Gain:** {format_money(derived['max_gain'])}  <br>
-**Max Loss:** {format_money(derived['max_loss'])}  <br><br>
-<div style='font-size:30px'>{status_icon}</div> <span style='font-size:16px'>{status_text}</span>
+**Max Loss:** {format_money(derived['max_loss'])}  
 </div>
 """, unsafe_allow_html=True)
 
         with card_cols[1]:
-            # Stats box (soft green, same height as left)
+            # Stats only, no background
             iv_rule_color = "red" if rule_violations["iv_rule"] else "green"
             st.markdown(
                 f"""
-<div style='background-color:#e6f7e6; padding:15px; border-radius:10px; box-shadow:2px 2px 5px #ccc; min-height:300px'>
 ### Stats
 - Short Delta: {abs_delta_str} | Must be less than or equal to 0.40 <br>
 - Exit Price: {current_price_str} | Must be greater than or equal to {t['short_strike']} <br>
@@ -259,8 +254,10 @@ else:
 - DTE: {derived['dte']} | Must be greater than 7 DTE <br>
 - Current Profit: {current_profit_str} <br>
 - Entry IV ≤ Current IV: <span style='color:{iv_rule_color}'>{t['entry_iv']:.1f}% <= {current_iv:.1f}%</span>
-</div>
 """, unsafe_allow_html=True)
+
+        # Status icon at bottom outside boxes
+        st.markdown(f"<div style='text-align:center; font-size:40px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
 
         # Remove button
         if st.button("Remove", key=f"remove_{i}"):
@@ -268,4 +265,4 @@ else:
             st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. Stats section now includes Current Profit dynamically, with colorful boxes and status icon.")
+st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched.")
