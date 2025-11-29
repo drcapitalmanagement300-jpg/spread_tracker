@@ -17,9 +17,6 @@ def init_state():
 def days_to_expiry(expiry_date: date) -> int:
     return max((expiry_date - date.today()).days, 0)
 
-def days_open(entry_date: date) -> int:
-    return max((date.today() - entry_date).days, 0)
-
 def compute_derived(trade: dict) -> dict:
     short = float(trade["short_strike"])
     long = float(trade["long_strike"])
@@ -29,14 +26,12 @@ def compute_derived(trade: dict) -> dict:
     max_loss = max(width - credit, 0)
     breakeven = short + credit
     dte = days_to_expiry(trade["expiration"])
-    open_days = days_open(trade["entry_date"])
     return {
         "width": width,
         "max_gain": max_gain,
         "max_loss": max_loss,
         "breakeven": breakeven,
-        "dte": dte,
-        "open_days": open_days
+        "dte": dte
     }
 
 def format_money(x):
@@ -112,7 +107,7 @@ def compute_current_profit(short_price, long_price, credit, width):
         return None
     spread_value = short_price - long_price
     current_profit = credit - spread_value
-    return (current_profit / credit) * 100
+    return max(0, min((current_profit / credit) * 100, 100))  # Cap 0-100%
 
 def fetch_short_iv(ticker, short_strike, expiration):
     _, puts = get_option_chain(ticker, expiration.isoformat())
@@ -126,32 +121,25 @@ def fetch_short_iv(ticker, short_strike, expiration):
 
 def evaluate_rules(trade, derived, current_price, delta, current_iv, short_option_price, long_option_price):
     rule_violations = {"other_rules": False, "iv_rule": False}
-
     abs_delta = abs(delta) if delta is not None else None
-
     if abs_delta is not None and abs_delta >= 0.40:
         rule_violations["other_rules"] = True
-
     spread_value_percent = compute_spread_value(short_option_price, long_option_price, derived["width"], trade["credit"])
     if spread_value_percent is not None and spread_value_percent >= 150:
         rule_violations["other_rules"] = True
-
     if derived["dte"] <= 7:
         rule_violations["other_rules"] = True
-
     entry_iv = trade.get("entry_iv")
     if entry_iv and current_iv and current_iv > entry_iv:
         rule_violations["iv_rule"] = True
-
     return rule_violations, abs_delta, spread_value_percent
 
-def generate_pnl_curve_days_open(credit, max_loss, width, dte, days_open):
-    # Linear decay simulation for now: profit % vs days open
-    days_total = max(dte, 1)
-    days_elapsed = np.arange(0, days_open+1)
-    pnl_percent = credit / (width) * 100 * (1 - days_elapsed / days_total)
-    pnl_percent = np.clip(pnl_percent, 0, 100)
-    return pd.DataFrame({"Days Open": days_elapsed, "Profit %": pnl_percent})
+def generate_pnl_curve_dte(credit, max_loss, width, dte, current_profit_percent):
+    # Simulate simple PnL % over remaining DTE
+    x_days = np.arange(dte, -1, -1)  # X-axis: DTE  (0 = expiration)
+    y_profit = np.linspace(current_profit_percent, 100, len(x_days))
+    y_profit = np.clip(y_profit, 0, 100)
+    return pd.DataFrame({"DTE": x_days, "Profit %": y_profit})
 
 # ------------------- Initialize -------------------
 init_state()
@@ -218,7 +206,7 @@ else:
         current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else "-"
         current_price_str = f"{current_price:.2f}" if current_price is not None else "-"
 
-        # Determine bottom icon
+        # Determine status icon
         if rule_violations["other_rules"]:
             status_icon = "❌"
             status_text = "Some critical rules are violated."
@@ -232,7 +220,6 @@ else:
         # Layout: left = info + status, right = pnl
         card_cols = st.columns([3,3])
         with card_cols[0]:
-            # Spread info box
             st.markdown(
                 f"""
 <div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px; height:100%'>
@@ -248,15 +235,14 @@ Max Loss: {format_money(derived['max_loss'])}
 </div>
 """, unsafe_allow_html=True)
 
-            # Status box
+            # Status box below spread info
             st.markdown(f"<div style='margin-top:10px; font-size:20px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
 
         with card_cols[1]:
-            # Stats with conditional coloring
+            # Stats
             delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
             spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
             dte_color = "red" if derived['dte'] <= 7 else "green"
-
             if current_profit_percent is None:
                 profit_color = "black"
             elif current_profit_percent < 50:
@@ -265,7 +251,6 @@ Max Loss: {format_money(derived['max_loss'])}
                 profit_color = "yellow"
             else:
                 profit_color = "red"
-
             if current_iv is None or t["entry_iv"] is None:
                 iv_color = "black"
             elif current_iv == t["entry_iv"]:
@@ -284,9 +269,9 @@ Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> |
 Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
 """, unsafe_allow_html=True)
 
-            # PnL graph
-            pnl_df = generate_pnl_curve_days_open(t["credit"], derived['max_loss'], derived['width'], derived['dte'], derived['open_days'])
-            st.line_chart(pnl_df.set_index("Days Open"), height=150)
+            # PnL chart with correct axes
+            pnl_df = generate_pnl_curve_dte(t["credit"], derived['max_loss'], derived['width'], derived['dte'], current_profit_percent)
+            st.line_chart(pnl_df.set_index("DTE"), height=150)
 
         # Remove button
         if st.button("Remove", key=f"remove_{i}"):
@@ -294,4 +279,4 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
             st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL graph shows current profit % vs days open.")
+st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL graph shows current profit % vs DTE.")
