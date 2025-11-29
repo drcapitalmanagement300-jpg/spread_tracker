@@ -108,7 +108,7 @@ def compute_current_profit(short_price, long_price, credit, width):
         return None
     spread_value = short_price - long_price
     current_profit = credit - spread_value
-    return max(0, min((current_profit / credit) * 100, 100))  # Cap 0-100%
+    return max(0, min((current_profit / credit) * 100, 100))
 
 def fetch_short_iv(ticker, short_strike, expiration):
     _, puts = get_option_chain(ticker, expiration.isoformat())
@@ -194,13 +194,11 @@ else:
             t, derived, current_price, delta, current_iv, short_option_price, long_option_price
         )
 
-        # Strings
         abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
         spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else "-"
         current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else "-"
         current_price_str = f"{current_price:.2f}" if current_price is not None else "-"
 
-        # Determine status icon
         if rule_violations["other_rules"]:
             status_icon = "❌"
             status_text = "Some critical rules are violated."
@@ -211,7 +209,6 @@ else:
             status_icon = "✅"
             status_text = "All rules are satisfied."
 
-        # Layout: left = info + status, right = pnl
         card_cols = st.columns([3,3])
         with card_cols[0]:
             st.markdown(
@@ -235,6 +232,7 @@ Max Loss: {format_money(derived['max_loss'])}
             delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
             spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
             dte_color = "red" if derived['dte'] <= 7 else "green"
+
             if current_profit_percent is None:
                 profit_color = "black"
             elif current_profit_percent < 50:
@@ -243,6 +241,7 @@ Max Loss: {format_money(derived['max_loss'])}
                 profit_color = "yellow"
             else:
                 profit_color = "red"
+
             if current_iv is None or t["entry_iv"] is None:
                 iv_color = "black"
             elif current_iv == t["entry_iv"]:
@@ -254,59 +253,35 @@ Max Loss: {format_money(derived['max_loss'])}
 
             st.markdown(
                 f"""
-Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be less than or equal to 0.40 <br>
-Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
-DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 DTE <br>
-Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
+Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be ≤ 0.40 <br>
+Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be ≤ 150% <br>
+DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be > 7 <br>
+Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% target <br>
 Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
 """, unsafe_allow_html=True)
 
-            # ------------------- Altair Chart with Profit Bands -------------------
-            dte_range = list(range(derived["dte"], -1, -1))
+            # ------------------- PnL CHART (ONLY CHANGE: reversed x-axis) -------------------
+            dte_range = list(range(derived["dte"] + 1))
             profit_values = [current_profit_percent if current_profit_percent is not None else 0]*len(dte_range)
             pnl_df = pd.DataFrame({
                 "DTE": dte_range,
                 "Profit %": profit_values
             })
 
-            base = alt.Chart(pnl_df).encode(
-                x=alt.X('DTE', title='Days to Expiration', scale=alt.Scale(domain=(derived["dte"],0))),
-                y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100), nice=False), axis=alt.Axis(tickMinStep=10))
-            )
+            chart = alt.Chart(pnl_df).mark_line(point=True, color='blue').encode(
+                x=alt.X('DTE', title='Days to Expiration',
+                        scale=alt.Scale(domain=(derived["dte"], 0))),   # ← REVERSED AXIS
+                y=alt.Y('Profit %', title='Current Profit %',
+                        scale=alt.Scale(domain=(0,100), nice=False),
+                        axis=alt.Axis(tickMinStep=10))
+            ).properties(height=150)
 
-            # Profit bands
-            green_band = alt.Chart(pd.DataFrame({'y0':[0],'y1':[50]})).mark_rect(opacity=0.25, color='lightgreen').encode(
-                y='y0:Q',
-                y2='y1:Q',
-                x=alt.X('DTE:Q', scale=alt.Scale(domain=(derived["dte"],0)), axis=None)
-            )
+            st.altair_chart(chart, use_container_width=True)
 
-            yellow_band = alt.Chart(pd.DataFrame({'y0':[50],'y1':[75]})).mark_rect(opacity=0.25, color='khaki').encode(
-                y='y0:Q',
-                y2='y1:Q',
-                x=alt.X('DTE:Q', scale=alt.Scale(domain=(derived["dte"],0)), axis=None)
-            )
-
-            red_band = alt.Chart(pd.DataFrame({'y0':[75],'y1':[100]})).mark_rect(opacity=0.25, color='salmon').encode(
-                y='y0:Q',
-                y2='y1:Q',
-                x=alt.X('DTE:Q', scale=alt.Scale(domain=(derived["dte"],0)), axis=None)
-            )
-
-            # Vertical line for current DTE
-            vline_df = pd.DataFrame({'DTE':[derived['dte']]})
-            vline = alt.Chart(vline_df).mark_rule(color='blue', strokeDash=[5,5]).encode(x='DTE')
-
-            line = base.mark_line(point=True, color='blue').encode(y='Profit %', x='DTE')
-
-            final_chart = green_band + yellow_band + red_band + line + vline
-
-            st.altair_chart(final_chart.properties(height=150), use_container_width=True)
-
-        # Remove button
+        # Remove trade
         if st.button("Remove", key=f"remove_{i}"):
             st.session_state.trades.pop(i)
             st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL chart shows current profit % vs DTE.")
+st.caption("Spread value uses actual option prices — alerts accurate, delta BSM-based, entry IV auto-captured.")
