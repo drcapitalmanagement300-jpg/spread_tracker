@@ -208,6 +208,12 @@ else:
             t, derived, current_price, delta, current_iv, short_option_price, long_option_price
         )
 
+        # Precompute strings for safe f-string
+        abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
+        spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else "-"
+        current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else "-"
+        current_price_str = f"{current_price:.2f}" if current_price is not None else "-"
+
         # Determine bottom icon
         if rule_violations["other_rules"]:
             status_icon = "❌"
@@ -225,7 +231,7 @@ else:
 <div style='background-color:#f0f8ff; padding:15px; border-radius:10px; box-shadow:2px 2px 5px #ccc'>
 ### Spread Info
 **Ticker:** {t['ticker']}  <br>
-**Underlying Price:** {current_price if current_price else '-'}  <br>
+**Underlying Price:** {current_price_str}  <br>
 **Short Strike:** {t['short_strike']}  <br>
 **Long Strike:** {t['long_strike']}  <br>
 **Spread Width:** {derived['width']}  <br>
@@ -243,11 +249,11 @@ else:
                 f"""
 <div style='background-color:#fff0f5; padding:15px; border-radius:10px; box-shadow:2px 2px 5px #ccc'>
 ### Stats / Status
-- Short Delta: {abs_delta:.2f if abs_delta else "-"} | Must be less than or equal to 0.40 <br>
-- Exit Price: {current_price:.2f if current_price else "-"} | Must be greater than or equal to {t['short_strike']} <br>
-- Spread Value: {f"{spread_value_percent:.0f}%" if spread_value_percent else "-"} | Must be less than or equal to 150% of credit <br>
+- Short Delta: {abs_delta_str} | Must be less than or equal to 0.40 <br>
+- Exit Price: {current_price_str} | Must be greater than or equal to {t['short_strike']} <br>
+- Spread Value: {spread_value_str} | Must be less than or equal to 150% of credit <br>
 - DTE: {derived['dte']} | Must be greater than 7 DTE <br>
-- Current Profit: {f"{current_profit_percent:.1f}%" if current_profit_percent else "-"} <br>
+- Current Profit: {current_profit_str} <br>
 - Entry IV ≤ Current IV: <span style='color:{iv_rule_color}'>{t['entry_iv']:.1f}% <= {current_iv:.1f}%</span>
 </div>
 """, unsafe_allow_html=True)
