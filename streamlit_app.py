@@ -89,8 +89,8 @@ def get_short_leg_data(trade: dict):
     current_price = get_price(trade['ticker'])
     if current_price and iv:
         T = days_to_expiry(trade["expiration"]) / 365
-        sigma = iv / 100  # convert % to decimal
-        r = 0.05  # 5% risk-free
+        sigma = iv / 100
+        r = 0.05
         delta = bsm_delta('put', current_price, short_strike, T, r, sigma)
     else:
         delta = None
@@ -110,17 +110,14 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv):
     status = "green"
     alerts = []
 
-    # Delta rule
     if delta is not None and delta >= 0.40:
         status = "red"
         alerts.append(f"Short delta {delta:.2f} ≥ 0.40")
 
-    # Price rule
     if current_price is not None and current_price < trade["short_strike"]:
         status = "red"
         alerts.append(f"Price {current_price:.2f} below short strike {trade['short_strike']}")
 
-    # Spread value rule
     delta_price = current_price - trade["long_strike"] if current_price is not None else None
     spread_value_percent = None
     if delta_price is not None:
@@ -129,12 +126,10 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv):
             status = "red"
             alerts.append(f"Spread value {spread_value_percent:.0f}% ≥ 150% of credit")
 
-    # DTE rule
     if derived["dte"] <= 7 and status != "red":
         status = "yellow"
         alerts.append(f"DTE {derived['dte']} ≤ 7")
 
-    # IV rule
     entry_iv = trade.get("entry_iv")
     if entry_iv and current_iv:
         if current_iv > entry_iv and status != "red":
@@ -142,6 +137,17 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv):
             alerts.append(f"Current IV {current_iv:.1f}% > Entry IV {entry_iv:.1f}%")
 
     return status, alerts
+
+# ------------------- Auto-fetch entry IV -----------------
+def fetch_short_iv(ticker, short_strike, expiration):
+    _, puts = get_option_chain(ticker, expiration.isoformat())
+    if puts is None or puts.empty:
+        return None
+    short_row = puts[puts['strike'] == short_strike]
+    if short_row.empty or 'impliedVolatility' not in short_row.columns:
+        return None
+    iv = short_row['impliedVolatility'].values[0] * 100
+    return iv
 
 # ------------------- Initialize -------------------
 init_state()
@@ -157,7 +163,6 @@ with st.form("add_trade", clear_on_submit=True):
     with col2:
         expiration = st.date_input("Expiration date", value=date.today())
         credit = st.number_input("Credit received (per share)", min_value=0.0, format="%.2f")
-        entry_iv = st.number_input("Entry volatility (IV%) — optional", min_value=0.0, max_value=100.0, value=0.0, format="%.1f")
     with col3:
         entry_date = st.date_input("Entry date", value=date.today())
         notes = st.text_input("Notes (optional)")
@@ -170,6 +175,7 @@ with st.form("add_trade", clear_on_submit=True):
         elif long_strike >= short_strike:
             st.warning("For a put credit spread, long strike should be LOWER than short strike.")
         else:
+            auto_iv = fetch_short_iv(ticker, short_strike, expiration)
             trade = {
                 "id": f"{ticker}-{short_strike}-{long_strike}-{expiration.isoformat()}",
                 "ticker": ticker,
@@ -178,12 +184,12 @@ with st.form("add_trade", clear_on_submit=True):
                 "expiration": expiration,
                 "credit": credit,
                 "entry_date": entry_date,
-                "entry_iv": float(entry_iv) if entry_iv > 0 else None,
+                "entry_iv": auto_iv,
                 "notes": notes,
                 "created_at": datetime.utcnow().isoformat()
             }
             st.session_state.trades.append(trade)
-            st.success(f"Added {ticker} {short_strike}/{long_strike} exp {expiration}")
+            st.success(f"Added {ticker} {short_strike}/{long_strike} exp {expiration} | Entry IV: {auto_iv if auto_iv else 'N/A'}")
 
 st.markdown("---")
 
@@ -255,4 +261,4 @@ else:
             st.write("Created:", t.get("created_at"))
 
 st.markdown("---")
-st.caption("Step 4 complete — BSM delta integrated, live price, IV, and full rules engine.")
+st.caption("Step 5 complete — Automatic entry IV fetched, BSM delta calculated, rules engine active.")
