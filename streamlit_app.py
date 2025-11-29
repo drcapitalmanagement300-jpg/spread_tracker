@@ -41,6 +41,7 @@ def format_money(x):
     except Exception:
         return "-"
 
+# ------------------- Data helpers -----------------
 @st.cache_data(ttl=60)
 def get_price(ticker: str):
     try:
@@ -85,7 +86,7 @@ def get_short_leg_data(trade: dict):
     short_price, iv = get_leg_data(trade["ticker"], trade["expiration"], float(trade["short_strike"]), 'put')
     current_price = get_price(trade['ticker'])
     delta = None
-    if current_price and iv:
+    if current_price is not None and iv is not None:
         T = days_to_expiry(trade["expiration"]) / 365
         sigma = iv / 100
         r = 0.05
@@ -108,7 +109,8 @@ def compute_current_profit(short_price, long_price, credit, width):
         return None
     spread_value = short_price - long_price
     current_profit = credit - spread_value
-    return max(0, min((current_profit / credit) * 100, 100))  # Cap 0-100%
+    # convert to percent of credit and cap 0-100
+    return max(0, min((current_profit / credit) * 100, 100))
 
 def fetch_short_iv(ticker, short_strike, expiration):
     _, puts = get_option_chain(ticker, expiration.isoformat())
@@ -123,16 +125,21 @@ def fetch_short_iv(ticker, short_strike, expiration):
 def evaluate_rules(trade, derived, current_price, delta, current_iv, short_option_price, long_option_price):
     rule_violations = {"other_rules": False, "iv_rule": False}
     abs_delta = abs(delta) if delta is not None else None
+
     if abs_delta is not None and abs_delta >= 0.40:
         rule_violations["other_rules"] = True
+
     spread_value_percent = compute_spread_value(short_option_price, long_option_price, derived["width"], trade["credit"])
     if spread_value_percent is not None and spread_value_percent >= 150:
         rule_violations["other_rules"] = True
+
     if derived["dte"] <= 7:
         rule_violations["other_rules"] = True
+
     entry_iv = trade.get("entry_iv")
-    if entry_iv and current_iv and current_iv > entry_iv:
+    if entry_iv is not None and current_iv is not None and current_iv > entry_iv:
         rule_violations["iv_rule"] = True
+
     return rule_violations, abs_delta, spread_value_percent
 
 # ------------------- Initialize -------------------
@@ -194,7 +201,7 @@ else:
             t, derived, current_price, delta, current_iv, short_option_price, long_option_price
         )
 
-        # Strings
+        # Renderable strings
         abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
         spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else "-"
         current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else "-"
@@ -211,9 +218,10 @@ else:
             status_icon = "✅"
             status_text = "All rules are satisfied."
 
-        # Layout: left = info + status, right = pnl
-        card_cols = st.columns([3,3])
-        with card_cols[0]:
+        # Layout columns (left: info + pnl + status, right: stats)
+        cols = st.columns([3,3])
+        with cols[0]:
+            # Spread Info (dark green 10% opacity, no shadow)
             st.markdown(
                 f"""
 <div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px; height:100%'>
@@ -229,12 +237,49 @@ Max Loss: {format_money(derived['max_loss'])}
 </div>
 """, unsafe_allow_html=True)
 
-            st.markdown(f"<div style='margin-top:10px; font-size:20px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
+            # -------------------- PnL Chart (left column, half height) --------------------
+            # build DTE countdown range (ensure at least 1 for domain)
+            dte_max = max(1, derived["dte"])
+            dte_range = list(range(derived["dte"], -1, -1)) if derived["dte"] >= 0 else [0]
+            profit_level = float(current_profit_percent) if current_profit_percent is not None else 0.0
+            profit_values = [profit_level] * len(dte_range)
 
-        with card_cols[1]:
+            pnl_df = pd.DataFrame({
+                "DaysToExp": dte_range,
+                "ProfitPct": profit_values
+            })
+
+            # Altair chart with reversed x-axis (countdown) and fixed y-axis 0-100 with 10% ticks
+            chart = (
+                alt.Chart(pnl_df)
+                .mark_line(point=True, color='steelblue')
+                .encode(
+                    x=alt.X(
+                        "DaysToExp:Q",
+                        title="Days to Expiration",
+                        scale=alt.Scale(domain=(dte_max, 0))
+                    ),
+                    y=alt.Y(
+                        "ProfitPct:Q",
+                        title="Current Profit %",
+                        scale=alt.Scale(domain=(0, 100), nice=False),
+                        axis=alt.Axis(tickMinStep=10)
+                    )
+                )
+                .properties(height=150)
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+            # Status box under the chart
+            st.markdown(f"<div style='margin-top:8px; font-size:18px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
+
+        with cols[1]:
+            # Stats: colors per rule
             delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
             spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
             dte_color = "red" if derived['dte'] <= 7 else "green"
+
+            # Current Profit coloring: green <50, yellow 50-75, red >75
             if current_profit_percent is None:
                 profit_color = "black"
             elif current_profit_percent < 50:
@@ -243,7 +288,9 @@ Max Loss: {format_money(derived['max_loss'])}
                 profit_color = "yellow"
             else:
                 profit_color = "red"
-            if current_iv is None or t["entry_iv"] is None:
+
+            # IV coloring: yellow if equal, red if greater, green if lower
+            if current_iv is None or t.get("entry_iv") is None:
                 iv_color = "black"
             elif current_iv == t["entry_iv"]:
                 iv_color = "yellow"
@@ -258,22 +305,8 @@ Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be 
 Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
 DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 DTE <br>
 Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
-Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
+Entry IV: {t.get('entry_iv') if t.get('entry_iv') is not None else 'N/A'}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
 """, unsafe_allow_html=True)
-
-            # ------------------- Simplified PnL Altair Chart -------------------
-            dte_range = list(range(derived["dte"] + 1))
-            profit_values = [current_profit_percent if current_profit_percent is not None else 0]*len(dte_range)
-            pnl_df = pd.DataFrame({
-                "DTE": dte_range,
-                "Profit %": profit_values
-            })
-            chart = alt.Chart(pnl_df).mark_line(point=True, color='blue').encode(
-                x=alt.X('DTE', title='Days to Expiration', scale=alt.Scale(domain=(0, derived["dte"]))),
-                y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100), nice=False),
-                        axis=alt.Axis(tickMinStep=10))
-            ).properties(height=150)
-            st.altair_chart(chart, use_container_width=True)
 
         # Remove button
         if st.button("Remove", key=f"remove_{i}"):
@@ -281,4 +314,4 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
             st.experimental_rerun()
 
 st.markdown("---")
-st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL chart shows current profit % vs DTE.")
+st.caption("Spread value uses actual option prices — alerts are accurate, BSM delta calculated, auto-entry IV fetched. PnL chart shows current profit % vs days to expiration (countdown).")
