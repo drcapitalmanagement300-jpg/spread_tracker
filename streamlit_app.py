@@ -5,6 +5,7 @@ import numpy as np
 from scipy.stats import norm
 import yfinance as yf
 import pandas as pd
+import altair as alt
 import json
 import io
 from typing import List, Dict, Any, Optional
@@ -17,15 +18,13 @@ st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
 # ----------------------------- Google Drive configuration -----------------------------
-# Put optional DRIVE_FOLDER_ID in Streamlit secrets if you want files stored inside a specific folder.
-# In Streamlit secrets:
-# [gcp_service_account]
-# ... your service account JSON fields ...
-# DRIVE_FOLDER_ID = "your_folder_id_here"   # optional
 DRIVE_FILE_NAME = "credit_spreads.json"
-DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive"]
+DRIVE_SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
+]
 
-# ----------------------------- Drive helpers -----------------------------
+# ----------------------------- Drive helpers (patched, use st.secrets) -----------------------------
 @st.cache_resource
 def init_drive() -> Optional[object]:
     """
@@ -37,50 +36,50 @@ def init_drive() -> Optional[object]:
             st.warning("No gcp_service_account found in Streamlit secrets. Drive persistence disabled.")
             return None
 
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(creds_dict, scopes=DRIVE_SCOPES)
+        creds_info = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(creds_info, scopes=DRIVE_SCOPES)
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        # optional folder id in secrets
-        folder_id = st.secrets.get("DRIVE_FOLDER_ID") if hasattr(st, "secrets") else None
-        if folder_id:
-            st.info(f"Using Drive folder ID: {folder_id}")
-        # show service account email (safe debug)
-        sa_email = creds_dict.get("client_email")
+
+        sa_email = creds_info.get("client_email")
         if sa_email:
-            st.write(f"Drive service account: {sa_email}")
+            st.caption(f"Drive service account: {sa_email}")
+
         return service
     except Exception as e:
-        st.error(f"Google Drive init failed: {e}")
+        st.error(f"Drive initialization failed: {e}")
         return None
 
+
 def _get_folder_id() -> Optional[str]:
-    """Return DRIVE_FOLDER_ID from secrets if set."""
+    """Return optional folder ID from secrets (top-level key DRIVE_FOLDER_ID)."""
     try:
-        return st.secrets.get("DRIVE_FOLDER_ID")  # may be None
+        return st.secrets.get("DRIVE_FOLDER_ID", None)
     except Exception:
         return None
 
+
 def _find_file_id(service, filename: str) -> Optional[str]:
-    """Find file id by filename, optionally scoped to folder if DRIVE_FOLDER_ID set."""
+    """Return Google Drive file ID by filename (optionally scoped to folder)."""
     if service is None:
         return None
     try:
         folder_id = _get_folder_id()
+        # Escape single quotes in filename for Drive query
+        safe_name = filename.replace("'", "\\'")
         if folder_id:
-            q = f"'{folder_id}' in parents and name = '{filename}' and trashed = false"
+            query = f"'{folder_id}' in parents and name = '{safe_name}' and trashed = false"
         else:
-            q = f"name = '{filename}' and trashed = false"
-        resp = service.files().list(q=q, spaces="drive", fields="files(id, name)").execute()
-        files = resp.get("files", [])
-        if not files:
-            return None
-        return files[0]["id"]
+            query = f"name = '{safe_name}' and trashed = false"
+        response = service.files().list(q=query, spaces="drive", fields="files(id,name)").execute()
+        files = response.get("files", [])
+        return files[0]["id"] if files else None
     except Exception as e:
         st.error(f"Drive find file error: {e}")
         return None
 
+
 def _download_file(service, file_id: str) -> Optional[str]:
-    """Download file content and return as string, or None on error."""
+    """Download file content from Drive and return as text, or None on error."""
     try:
         request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
@@ -94,19 +93,19 @@ def _download_file(service, file_id: str) -> Optional[str]:
         st.error(f"Drive download error: {e}")
         return None
 
+
 def _upload_file(service, filename: str, content_str: str) -> bool:
     """Upload or update a file in Drive. Returns True on success."""
     try:
         folder_id = _get_folder_id()
         file_id = _find_file_id(service, filename)
         fh = io.BytesIO(content_str.encode("utf-8"))
-        media = MediaIoBaseUpload(fh, mimetype="application/json", resumable=True)
+        media = MediaIoBaseUpload(fh, mimetype="application/json", resumable=False)
 
         if file_id:
             # Update existing file
             service.files().update(fileId=file_id, media_body=media).execute()
         else:
-            # Create new file; optionally place in specific folder
             body = {"name": filename}
             if folder_id:
                 body["parents"] = [folder_id]
@@ -116,12 +115,12 @@ def _upload_file(service, filename: str, content_str: str) -> bool:
         st.error(f"Drive upload error: {e}")
         return False
 
+
 def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
     """Serialize trades and save to Google Drive. Returns True on success."""
     if service is None:
         st.warning("Drive service not available; cannot save.")
         return False
-    # convert date objects to ISO strings
     serializable = []
     for t in trades:
         ct = {}
@@ -132,6 +131,7 @@ def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
                 ct[k] = v
         serializable.append(ct)
     return _upload_file(service, DRIVE_FILE_NAME, json.dumps(serializable, indent=2))
+
 
 def load_from_drive(service) -> List[Dict[str, Any]]:
     """Load trades JSON from Drive and convert ISO dates back to date objects."""
@@ -150,11 +150,11 @@ def load_from_drive(service) -> List[Dict[str, Any]]:
             nt = {}
             for k, v in t.items():
                 if isinstance(v, str) and k in ("expiration", "entry_date", "created_at"):
-                    # try parse as date or datetime
                     try:
                         parsed = datetime.fromisoformat(v)
+                        # store expiration and entry_date as date objects; keep created_at as string
                         if k == "created_at":
-                            nt[k] = v  # keep created_at as string (optional)
+                            nt[k] = v
                         else:
                             nt[k] = parsed.date()
                     except Exception:
@@ -167,13 +167,12 @@ def load_from_drive(service) -> List[Dict[str, Any]]:
         st.error(f"Drive load error: {e}")
         return []
 
-# Initialize drive service (cached)
+# Initialize drive (cached)
 drive = init_drive()
 
 # ----------------------------- Original helpers (unchanged, cleaned) -----------------------------
 def init_state():
     if "trades" not in st.session_state:
-        # attempt to load from drive; if fail, start empty
         if drive:
             try:
                 st.session_state.trades = load_from_drive(drive) or []
@@ -463,4 +462,24 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
             st.experimental_rerun()
 
 st.markdown("---")
+
+# ----------------------------- Manual save / load controls -----------------------------
+if drive:
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("💾 Save all trades to Google Drive now"):
+            if save_to_drive(drive, st.session_state.trades):
+                st.success("Saved to Drive successfully.")
+            else:
+                st.error("Failed to save to Drive. Check logs.")
+    with colB:
+        if st.button("📥 Reload trades from Google Drive"):
+            loaded = load_from_drive(drive)
+            if loaded:
+                st.session_state.trades = loaded
+                st.success("Loaded trades from Drive.")
+                st.experimental_rerun()
+            else:
+                st.info("No trades found on Drive (or load failed).")
+
 st.caption("Spread value uses actual option prices — alerts accurate, delta BSM-based, entry IV auto-captured.")
