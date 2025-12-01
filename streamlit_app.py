@@ -11,23 +11,23 @@ import os
 import io
 from typing import List, Dict, Any, Optional
 
-# ---------------------- GOOGLE DRIVE IMPORTS ----------------------
+# Google Drive API imports
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-# ---------------------- APP SETUP ----------------------
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
+# ---------------------- DRIVE CONFIG ----------------------
 DRIVE_FILENAME = "spread_trades.json"
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-SERVICE_ACCOUNT_FILE = "service_account.json"  # fallback local file
+SERVICE_ACCOUNT_FILE = "service_account.json"  # local fallback
 
-# ---------------------- GOOGLE DRIVE CREDENTIALS ----------------------
+# ---------------------- DRIVE HELPERS ----------------------
 def _get_credentials() -> Optional[service_account.Credentials]:
-    """Load credentials from Streamlit secrets or local file."""
-    # Streamlit secrets
+    """Obtain Google service account credentials from Streamlit secrets or local file."""
+    # 1) Streamlit Secrets (preferred on Cloud)
     try:
         if st.secrets and "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
@@ -36,14 +36,13 @@ def _get_credentials() -> Optional[service_account.Credentials]:
     except Exception:
         pass
 
-    # Local fallback
+    # 2) Local file fallback
     if os.path.exists(SERVICE_ACCOUNT_FILE):
         try:
             creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
             return creds
         except Exception:
             return None
-
     return None
 
 @st.cache_resource
@@ -61,13 +60,13 @@ def find_file_id(service, filename: str) -> Optional[str]:
     if service is None:
         return None
     try:
-        resp = service.files().list(q=f"name='{filename}' and trashed = false",
-                                    spaces="drive",
-                                    fields="files(id, name)").execute()
+        resp = service.files().list(
+            q=f"name='{filename}' and trashed = false",
+            spaces="drive",
+            fields="files(id, name)"
+        ).execute()
         files = resp.get("files", [])
-        if not files:
-            return None
-        return files[0]["id"]
+        return files[0]["id"] if files else None
     except Exception:
         return None
 
@@ -76,7 +75,10 @@ def serialize_trades_for_storage(trades: List[Dict[str, Any]]) -> str:
     for t in trades:
         ct = {}
         for k, v in t.items():
-            ct[k] = v.isoformat() if isinstance(v, date) else v
+            if isinstance(v, date):
+                ct[k] = v.isoformat()
+            else:
+                ct[k] = v
         cleaned.append(ct)
     return json.dumps(cleaned, indent=2)
 
@@ -87,9 +89,13 @@ def deserialize_trades_from_storage(raw: str) -> List[Dict[str, Any]]:
         for t in loaded:
             nt = {}
             for k, v in t.items():
-                if k in ("expiration", "entry_date") and isinstance(v, str):
+                if isinstance(v, str) and k in ("expiration", "entry_date", "created_at"):
                     try:
-                        nt[k] = datetime.fromisoformat(v).date()
+                        dt = datetime.fromisoformat(v)
+                        if k == "created_at":
+                            nt[k] = v
+                        else:
+                            nt[k] = dt.date()
                     except Exception:
                         nt[k] = v
                 else:
@@ -128,24 +134,28 @@ def load_from_drive() -> List[Dict[str, Any]]:
     if service is None:
         st.info("Google Drive credentials not found; starting with empty trades.")
         return []
-
     file_id = find_file_id(service, DRIVE_FILENAME)
     if not file_id:
         return []
-
     try:
         request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while not done:
-            status, done = downloader.next_chunk()
+            _, done = downloader.next_chunk()
         fh.seek(0)
         raw = fh.read().decode("utf-8")
-        trades = deserialize_trades_from_storage(raw)
-        return trades
+        return deserialize_trades_from_storage(raw)
     except Exception:
         return []
+
+# ---------------------- SESSION INIT ----------------------
+def init_state():
+    if "trades" not in st.session_state:
+        st.session_state.trades = load_from_drive()
+
+init_state()
 
 # ---------------------- HELPER FUNCTIONS ----------------------
 def days_to_expiry(expiry_date: date) -> int:
@@ -160,13 +170,7 @@ def compute_derived(trade: dict) -> dict:
     max_loss = max(width - credit, 0)
     breakeven = short + credit
     dte = days_to_expiry(trade["expiration"])
-    return {
-        "width": width,
-        "max_gain": max_gain,
-        "max_loss": max_loss,
-        "breakeven": breakeven,
-        "dte": dte
-    }
+    return {"width": width, "max_gain": max_gain, "max_loss": max_loss, "breakeven": breakeven, "dte": dte}
 
 def format_money(x):
     try:
@@ -194,8 +198,11 @@ def get_option_chain(ticker: str, expiration: str):
 def bsm_delta(option_type, S, K, T, r, sigma):
     if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
         return None
-    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    return norm.cdf(d1) - 1 if option_type.lower() == 'put' else norm.cdf(d1)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    if option_type.lower() == 'call':
+        return norm.cdf(d1)
+    elif option_type.lower() == 'put':
+        return norm.cdf(d1) - 1
 
 def get_leg_data(ticker: str, expiration: date, strike: float, option_type='put'):
     _, puts = get_option_chain(ticker, expiration.isoformat())
@@ -209,7 +216,7 @@ def get_leg_data(ticker: str, expiration: date, strike: float, option_type='put'
     return price, iv
 
 def get_short_leg_data(trade: dict):
-    short_price, iv = get_leg_data(trade["ticker"], trade["expiration"], float(trade["short_strike"]), 'put')
+    short_price, iv = get_leg_data(trade["ticker"], trade["expiration"], float(trade["short_strike"]))
     current_price = get_price(trade['ticker'])
     delta = None
     if current_price and iv:
@@ -220,7 +227,7 @@ def get_short_leg_data(trade: dict):
     return delta, iv, short_price
 
 def get_long_leg_data(trade: dict):
-    long_price, _ = get_leg_data(trade["ticker"], trade["expiration"], float(trade["long_strike"]), 'put')
+    long_price, _ = get_leg_data(trade["ticker"], trade["expiration"], float(trade["long_strike"]))
     return long_price
 
 def compute_spread_value(short_option_price, long_option_price, width, credit):
@@ -237,25 +244,94 @@ def compute_current_profit(short_price, long_price, credit, width):
     current_profit = credit - spread_value
     return max(0, min((current_profit / credit) * 100, 100))
 
-# ---------------------- FETCH SHORT IV ----------------------
 def fetch_short_iv(ticker, short_strike, expiration):
-    """Return implied volatility (%) of short leg, or None if not found"""
     _, puts = get_option_chain(ticker, expiration.isoformat())
     if puts is None or puts.empty:
         return None
     short_row = puts[puts['strike'] == short_strike]
     if short_row.empty or 'impliedVolatility' not in short_row.columns:
         return None
-    return float(short_row['impliedVolatility'].values[0] * 100)
+    iv = short_row['impliedVolatility'].values[0] * 100
+    return iv
 
-# ---------------------- SESSION STATE ----------------------
-def init_state():
-    if "trades" not in st.session_state:
-        st.session_state.trades = load_from_drive()
-init_state()
+# ---------------------- TRADE INPUT FORM ----------------------
+with st.form("add_trade", clear_on_submit=True):
+    st.subheader("Add new put credit spread")
+    col1, col2, col3 = st.columns([2,2,2])
+    with col1:
+        ticker = st.text_input("Ticker (e.g. AAPL)").upper()
+        short_strike = st.number_input("Short strike", min_value=0.0, format="%.2f")
+        long_strike = st.number_input("Long strike", min_value=0.0, format="%.2f")
+    with col2:
+        expiration = st.date_input("Expiration date", value=date.today())
+        credit = st.number_input("Credit received (per share)", min_value=0.0, format="%.2f")
+    with col3:
+        entry_date = st.date_input("Entry date", value=date.today())
+        notes = st.text_input("Notes (optional)")
+        st.write("")
 
-# ---------------------- FORM & DASHBOARD ----------------------
-# (Here you would copy your existing Streamlit form, save/load buttons, and dashboard code)
-# Make sure the form calls `fetch_short_iv()` when adding a new trade.
-# Use `save_to_drive()` and `load_from_drive()` as above.
+    submitted = st.form_submit_button("Add trade for monitoring")
+    if submitted:
+        if not ticker:
+            st.warning("Please provide a ticker symbol.")
+        elif long_strike >= short_strike:
+            st.warning("For a put credit spread, long strike should be LOWER than short strike.")
+        else:
+            auto_iv = fetch_short_iv(ticker, short_strike, expiration)
+            trade = {
+                "id": f"{ticker}-{short_strike}-{long_strike}-{expiration.isoformat()}",
+                "ticker": ticker,
+                "short_strike": short_strike,
+                "long_strike": long_strike,
+                "expiration": expiration,
+                "credit": credit,
+                "entry_date": entry_date,
+                "entry_iv": auto_iv,
+                "notes": notes,
+                "created_at": datetime.utcnow().isoformat()
+            }
+            st.session_state.trades.append(trade)
+            st.success(f"Added {ticker} {short_strike}/{long_strike} exp {expiration} | Entry IV: {auto_iv if auto_iv else 'N/A'}")
 
+# ---------------------- SAVE / LOAD ----------------------
+st.markdown("---")
+st.subheader("Data Persistence")
+colA, colB = st.columns(2)
+with colA:
+    if st.button("💾 Save trades to Google Drive"):
+        ok = save_to_drive(st.session_state.trades)
+        if ok:
+            st.success("Saved to Google Drive.")
+        else:
+            st.error("Save failed. Check credentials and try again.")
+
+with colB:
+    if st.button("📥 Load trades from Google Drive"):
+        loaded = load_from_drive()
+        if loaded:
+            st.session_state.trades = loaded
+            st.success("Loaded from Google Drive.")
+            st.experimental_rerun()
+        else:
+            st.info("No saved trades found in Drive (or credentials missing).")
+
+# ---------------------- DASHBOARD ----------------------
+st.markdown("---")
+st.subheader("Active Trades")
+if not st.session_state.trades:
+    st.info("No trades added yet. Use the form above to add your first spread.")
+else:
+    for i, t in enumerate(st.session_state.trades):
+        derived = compute_derived(t)
+        current_price = get_price(t['ticker'])
+        delta, current_iv, short_option_price = get_short_leg_data(t)
+        long_option_price = get_long_leg_data(t)
+        current_profit_percent = compute_current_profit(short_option_price, long_option_price, t["credit"], derived["width"])
+
+        # simple table card for each trade
+        st.markdown(f"**{t['ticker']} {t['short_strike']}/{t['long_strike']}** | Exp {t['expiration']}")
+        st.write(f"Current Profit: {current_profit_percent:.1f}%" if current_profit_percent is not None else "N/A")
+        if st.button("Remove", key=f"remove_{i}"):
+            st.session_state.trades.pop(i)
+            save_to_drive(st.session_state.trades)
+            st.experimental_rerun()
