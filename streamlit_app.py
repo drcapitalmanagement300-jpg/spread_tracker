@@ -1,89 +1,101 @@
 # app.py
 import streamlit as st
-from datetime import datetime, date
+from datetime import date, datetime
 import numpy as np
 from scipy.stats import norm
 import yfinance as yf
 import pandas as pd
-import altair as alt
 import json
 import io
 
-from pydrive2.auth import GoogleAuth
-from pydrive2.drive import GoogleDrive
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
-
 # =========================================================
-#                  GOOGLE DRIVE HELPERS
+#                GOOGLE DRIVE HELPERS (NEW)
 # =========================================================
 
 @st.cache_resource
 def init_drive():
-    """Authenticate Google Drive using Streamlit secrets."""
+    """Authenticate using Streamlit secrets (service account)."""
     try:
         creds_dict = st.secrets["gcp_service_account"]
-
-        scope = [
-            "https://www.googleapis.com/auth/drive.file",
-            "https://www.googleapis.com/auth/drive",
-        ]
-        credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-
-        gauth = GoogleAuth()
-        gauth.credentials = credentials
-        drive = GoogleDrive(gauth)
-        return drive
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/drive.file"]
+        )
+        service = build("drive", "v3", credentials=creds)
+        return service
     except Exception as e:
-        st.error(f"Drive init failed: {e}")
+        st.error(f"Failed Google Drive auth: {e}")
         return None
 
 
 DRIVE_FILE_NAME = "credit_spreads.json"
 
 
-def load_from_drive(drive):
-    """Load JSON file from Google Drive."""
+def find_file(service):
+    """Return file_id if file exists."""
     try:
-        file_list = drive.ListFile(
-            {"q": f"title='{DRIVE_FILE_NAME}'"}
-        ).GetList()
+        query = f"name='{DRIVE_FILE_NAME}'"
+        results = service.files().list(q=query, fields="files(id)").execute()
+        files = results.get("files", [])
+        return files[0]["id"] if files else None
+    except:
+        return None
 
-        if not file_list:
+
+def load_from_drive(service):
+    """Load JSON data from Drive file."""
+    try:
+        file_id = find_file(service)
+        if not file_id:
             return []
 
-        file = file_list[0]
-        content = file.GetContentString()
-        return json.loads(content)
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+        fh.seek(0)
+        return json.loads(fh.read().decode())
     except:
         return []
 
 
-def save_to_drive(drive, data):
-    """Save JSON to Google Drive."""
-    file_list = drive.ListFile(
-        {"q": f"title='{DRIVE_FILE_NAME}'"}
-    ).GetList()
+def save_to_drive(service, data):
+    """Upload JSON to Google Drive."""
+    file_id = find_file(service)
 
-    # If file exists — update it
-    if file_list:
-        file = file_list[0]
+    fh = io.BytesIO(json.dumps(data, indent=2).encode())
+    media = MediaIoBaseUpload(fh, mimetype="application/json")
+
+    if file_id:
+        service.files().update(
+            fileId=file_id,
+            media_body=media
+        ).execute()
     else:
-        file = drive.CreateFile({"title": DRIVE_FILE_NAME})
+        file_metadata = {"name": DRIVE_FILE_NAME}
+        service.files().create(
+            body=file_metadata,
+            media_body=media
+        ).execute()
 
-    file.SetContentString(json.dumps(data, indent=2))
-    file.Upload()
 
-
-# Initialize Google Drive
 drive = init_drive()
 
 
+
 # =========================================================
-#               ORIGINAL APP HELPERS (UNCHANGED)
+#               ORIGINAL HELPERS (UNCHANGED)
 # =========================================================
 
 def init_state():
@@ -94,25 +106,23 @@ def init_state():
             st.session_state.trades = []
 
 
-def days_to_expiry(expiry_date: date) -> int:
-    return max((expiry_date - date.today()).days, 0)
+def days_to_expiry(exp):
+    return max((exp - date.today()).days, 0)
 
 
-def compute_derived(trade: dict) -> dict:
-    short = float(trade["short_strike"])
-    long = float(trade["long_strike"])
-    credit = float(trade.get("credit", 0) or 0)
+def compute_derived(t):
+    short = float(t["short_strike"])
+    long = float(t["long_strike"])
+    credit = float(t["credit"])
     width = abs(long - short)
     max_gain = credit
-    max_loss = max(width - credit, 0)
-    breakeven = short + credit
-    dte = days_to_expiry(trade["expiration"])
+    max_loss = width - credit
     return {
         "width": width,
         "max_gain": max_gain,
         "max_loss": max_loss,
-        "breakeven": breakeven,
-        "dte": dte
+        "breakeven": short + credit,
+        "dte": days_to_expiry(t["expiration"])
     }
 
 
@@ -124,17 +134,17 @@ def format_money(x):
 
 
 @st.cache_data(ttl=60)
-def get_price(ticker: str):
+def get_price(t):
     try:
-        return float(yf.Ticker(ticker).fast_info["last_price"])
+        return float(yf.Ticker(t).fast_info["last_price"])
     except:
         return None
 
 
 @st.cache_data(ttl=60)
-def get_option_chain(ticker: str, expiration: str):
+def get_option_chain(t, exp_str):
     try:
-        opt = yf.Ticker(ticker).option_chain(expiration)
+        opt = yf.Ticker(t).option_chain(exp_str)
         return opt.calls, opt.puts
     except:
         return None, None
@@ -143,43 +153,32 @@ def get_option_chain(ticker: str, expiration: str):
 def bsm_delta(option_type, S, K, T, r, sigma):
     if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
         return None
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    if option_type == 'call':
-        return norm.cdf(d1)
-    else:
-        return norm.cdf(d1) - 1
+    d1 = (np.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma * np.sqrt(T))
+    return norm.cdf(d1) - 1 if option_type == "put" else norm.cdf(d1)
 
 
-def get_leg_data(ticker: str, expiration: date, strike: float):
-    _, puts = get_option_chain(ticker, expiration.isoformat())
+def get_leg_data(ticker, exp, strike):
+    _, puts = get_option_chain(ticker, exp.isoformat())
     if puts is None or puts.empty:
         return None, None
-    row = puts[puts['strike'] == strike]
+    row = puts[puts["strike"] == strike]
     if row.empty:
         return None, None
-    return (
-        row['lastPrice'].values[0],
-        row['impliedVolatility'].values[0] * 100
-    )
+    return row["lastPrice"].values[0], row["impliedVolatility"].values[0] * 100
 
 
-def get_short_leg_data(trade: dict):
-    short_price, iv = get_leg_data(
-        trade["ticker"], trade["expiration"], float(trade["short_strike"])
-    )
-    current_price = get_price(trade["ticker"])
+def get_short_leg_data(t):
+    price, iv = get_leg_data(t["ticker"], t["expiration"], float(t["short_strike"]))
     delta = None
-    if current_price and iv:
-        T = days_to_expiry(trade["expiration"]) / 365
-        r = 0.05
-        delta = bsm_delta('put', current_price, float(trade["short_strike"]), T, r, iv / 100)
-    return delta, iv, short_price
+    S = get_price(t["ticker"])
+    if S and iv:
+        T = days_to_expiry(t["expiration"]) / 365
+        delta = bsm_delta("put", S, float(t["short_strike"]), T, 0.05, iv/100)
+    return delta, iv, price
 
 
-def get_long_leg_data(trade: dict):
-    price, _ = get_leg_data(
-        trade["ticker"], trade["expiration"], float(trade["long_strike"])
-    )
+def get_long_leg_data(t):
+    price, _ = get_leg_data(t["ticker"], t["expiration"], float(t["long_strike"]))
     return price
 
 
@@ -190,15 +189,15 @@ def compute_spread_value(short_p, long_p, width, credit):
 
 
 def compute_current_profit(short_p, long_p, credit, width):
-    if short_p is None or long_p is None or credit <= 0:
+    if short_p is None or long_p is None:
         return None
-    spread_value = short_p - long_p
-    current_profit = credit - spread_value
-    return max(0, min((current_profit / credit) * 100, 100))
+    sp = short_p - long_p
+    profit = credit - sp
+    return max(0, min((profit / credit) * 100, 100))
 
 
-def fetch_short_iv(ticker, strike, expiration):
-    _, puts = get_option_chain(ticker, expiration.isoformat())
+def fetch_short_iv(t, strike, exp):
+    _, puts = get_option_chain(t, exp.isoformat())
     if puts is None or puts.empty:
         return None
     row = puts[puts["strike"] == strike]
@@ -207,41 +206,40 @@ def fetch_short_iv(ticker, strike, expiration):
     return row["impliedVolatility"].values[0] * 100
 
 
-def evaluate_rules(trade, derived, current_price, delta, current_iv, short_p, long_p):
-    rule_violations = {"other_rules": False, "iv_rule": False}
+def evaluate_rules(t, derived, S, delta, iv, short_p, long_p):
+    v = {"other_rules": False, "iv_rule": False}
 
-    # delta rule
-    if delta is not None and abs(delta) >= 0.40:
-        rule_violations["other_rules"] = True
+    if delta and abs(delta) >= 0.40:
+        v["other_rules"] = True
 
-    # spread value rule
-    sp = compute_spread_value(short_p, long_p, derived["width"], trade["credit"])
-    if sp is not None and sp >= 150:
-        rule_violations["other_rules"] = True
+    sp = compute_spread_value(short_p, long_p, derived["width"], t["credit"])
+    if sp and sp >= 150:
+        v["other_rules"] = True
 
-    # dte rule
     if derived["dte"] <= 7:
-        rule_violations["other_rules"] = True
+        v["other_rules"] = True
 
-    # IV rule
-    if trade.get("entry_iv") and current_iv and current_iv > trade["entry_iv"]:
-        rule_violations["iv_rule"] = True
+    if t["entry_iv"] and iv and iv > t["entry_iv"]:
+        v["iv_rule"] = True
 
-    return rule_violations, abs(delta) if delta else None, sp
+    return v, abs(delta) if delta else None, sp
+
 
 
 # =========================================================
-#                 LOAD INITIAL STATE
+#                   LOAD STATE
 # =========================================================
+
 init_state()
 
 
 # =========================================================
-#                INPUT FORM (UNCHANGED)
+#                     INPUT FORM
 # =========================================================
 with st.form("add_trade", clear_on_submit=True):
     st.subheader("Add new put credit spread")
-    col1, col2, col3 = st.columns([2, 2, 2])
+
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         ticker = st.text_input("Ticker").upper()
@@ -264,8 +262,8 @@ with st.form("add_trade", clear_on_submit=True):
         elif long_strike >= short_strike:
             st.warning("Long strike must be LOWER than short strike.")
         else:
-            entry_iv = fetch_short_iv(ticker, short_strike, expiration)
-            trade = {
+            iv = fetch_short_iv(ticker, short_strike, expiration)
+            t = {
                 "id": f"{ticker}-{short_strike}-{long_strike}-{expiration}",
                 "ticker": ticker,
                 "short_strike": short_strike,
@@ -273,25 +271,25 @@ with st.form("add_trade", clear_on_submit=True):
                 "expiration": expiration,
                 "credit": credit,
                 "entry_date": entry_date,
-                "entry_iv": entry_iv,
+                "entry_iv": iv,
                 "notes": notes,
                 "created_at": datetime.utcnow().isoformat()
             }
-            st.session_state.trades.append(trade)
+            st.session_state.trades.append(t)
 
-            # SAVE TO GOOGLE DRIVE
             if drive:
                 save_to_drive(drive, st.session_state.trades)
 
-            st.success(f"Added {ticker} spread. Entry IV: {entry_iv}")
+            st.success(f"Added {ticker}. Entry IV: {iv}")
 
 
 st.markdown("---")
 
 
 # =========================================================
-#           ACTIVE TRADES (UNCHANGED UI)
+#                ACTIVE TRADES DISPLAY
 # =========================================================
+
 st.subheader("Active Trades")
 
 if not st.session_state.trades:
@@ -299,26 +297,22 @@ if not st.session_state.trades:
 else:
     for i, t in enumerate(st.session_state.trades):
         derived = compute_derived(t)
-        current_price = get_price(t["ticker"])
-        delta, current_iv, short_price = get_short_leg_data(t)
-        long_price = get_long_leg_data(t)
-
-        current_profit = compute_current_profit(
-            short_price, long_price, t["credit"], derived["width"]
-        )
+        S = get_price(t["ticker"])
+        delta, iv, sp = get_short_leg_data(t)
+        long_p = get_long_leg_data(t)
+        current_profit = compute_current_profit(sp, long_p, t["credit"], derived["width"])
 
         rules, abs_delta, spread_val = evaluate_rules(
-            t, derived, current_price, delta, current_iv, short_price, long_price
+            t, derived, S, delta, iv, sp, long_p
         )
 
-        # Card layout
-        cols = st.columns([3, 3])
+        cols = st.columns(2)
 
         with cols[0]:
             st.markdown(
                 f"""
                 **Ticker:** {t['ticker']}  
-                **Underlying:** {current_price}  
+                **Underlying:** {S}  
                 **Short Strike:** {t['short_strike']}  
                 **Long Strike:** {t['long_strike']}  
                 **Width:** {derived['width']}  
@@ -336,15 +330,14 @@ else:
                 **Spread Value:** {spread_val}%  
                 **Current Profit:** {current_profit}%  
                 **Entry IV:** {t['entry_iv']}%  
-                **Current IV:** {current_iv}%  
+                **Current IV:** {iv}%  
                 """
             )
 
-        # Remove button
         if st.button("Remove", key=f"rm_{i}"):
             st.session_state.trades.pop(i)
             if drive:
                 save_to_drive(drive, st.session_state.trades)
             st.experimental_rerun()
 
-st.caption("Powered by live option chain data + Google Drive autosync.")
+st.caption("Synced with Google Drive — no pydrive2 required.")
