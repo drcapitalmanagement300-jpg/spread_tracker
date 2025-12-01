@@ -6,17 +6,100 @@ from scipy.stats import norm
 import yfinance as yf
 import pandas as pd
 import altair as alt
+import json
+import os
+
+from pydrive.auth import GoogleAuth
+from pydrive.drive import GoogleDrive
 
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
-# ------------------- Helpers ---------------------
+# --------------------------------------------------------------------
+# 🔹 1. GOOGLE DRIVE AUTH + HELPERS (SECTION 4)
+# --------------------------------------------------------------------
+
+def init_drive():
+    """Initialize Google Drive authentication."""
+    gauth = GoogleAuth()
+    gauth.DEFAULT_SETTINGS['client_config_file'] = "client_secrets.json"
+    try:
+        gauth.LoadCredentialsFile("creds.json")
+    except:
+        pass
+
+    if gauth.credentials is None:
+        st.warning("Please authenticate with Google Drive.")
+        auth_url = gauth.GetAuthUrl()
+        st.markdown(f"[Click here to authenticate]({auth_url})")
+
+        auth_code = st.text_input("Enter Google authentication code:")
+        if auth_code:
+            gauth.Auth(auth_code)
+            gauth.SaveCredentialsFile("creds.json")
+            st.success("Authenticated successfully! Reload the app.")
+            st.stop()
+
+    elif gauth.access_token_expired:
+        gauth.Refresh()
+        gauth.SaveCredentialsFile("creds.json")
+    else:
+        gauth.Authorize()
+
+    return GoogleDrive(gauth)
+
+
+@st.cache_resource
+def get_drive():
+    return init_drive()
+
+def save_to_drive(trades):
+    """Saves the list of trades to Google Drive."""
+    drive = get_drive()
+
+    # Remove existing file if present
+    file_list = drive.ListFile({'q': "title='spread_trades.json'"}).GetList()
+    for f in file_list:
+        f.Delete()
+
+    # Upload new version
+    file = drive.CreateFile({'title': 'spread_trades.json'})
+    file.SetContentString(json.dumps(trades, indent=2))
+    file.Upload()
+    return True
+
+
+def load_from_drive():
+    """Loads trades JSON from Google Drive."""
+    try:
+        drive = get_drive()
+
+        file_list = drive.ListFile({'q': "title='spread_trades.json'"}).GetList()
+        if not file_list:
+            return []
+
+        file = file_list[0]
+        content = file.GetContentString()
+        return json.loads(content)
+    except Exception:
+        return []
+
+# --------------------------------------------------------------------
+# 2. SESSION INITIALIZATION
+# --------------------------------------------------------------------
+
 def init_state():
     if "trades" not in st.session_state:
-        st.session_state.trades = []
+        st.session_state.trades = load_from_drive()
+
+init_state()
 
 def days_to_expiry(expiry_date: date) -> int:
     return max((expiry_date - date.today()).days, 0)
+
+# --------------------------------------------------------------------
+# 3. YOUR EXISTING HELPERS (UNCHANGED)
+# --------------------------------------------------------------------
 
 def compute_derived(trade: dict) -> dict:
     short = float(trade["short_strike"])
@@ -58,7 +141,6 @@ def get_option_chain(ticker: str, expiration: str):
     except Exception:
         return None, None
 
-# ------------------- Black-Scholes Delta -----------------
 def bsm_delta(option_type, S, K, T, r, sigma):
     if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
         return None
@@ -135,10 +217,10 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
         rule_violations["iv_rule"] = True
     return rule_violations, abs_delta, spread_value_percent
 
-# ------------------- Initialize -------------------
-init_state()
+# --------------------------------------------------------------------
+# 4. TRADE INPUT FORM  (UNCHANGED)
+# --------------------------------------------------------------------
 
-# ------------------- Trade Input Form -------------------
 with st.form("add_trade", clear_on_submit=True):
     st.subheader("Add new put credit spread")
     col1, col2, col3 = st.columns([2,2,2])
@@ -179,7 +261,31 @@ with st.form("add_trade", clear_on_submit=True):
 
 st.markdown("---")
 
-# ------------------- Active Trades Dashboard -------------------
+# --------------------------------------------------------------------
+# 5. SAVE / LOAD BUTTONS (NEW)
+# --------------------------------------------------------------------
+
+st.subheader("Data Persistence")
+
+colA, colB = st.columns(2)
+
+with colA:
+    if st.button("💾 Save trades to Google Drive"):
+        save_to_drive(st.session_state.trades)
+        st.success("Saved to Google Drive.")
+
+with colB:
+    if st.button("📥 Load trades from Google Drive"):
+        st.session_state.trades = load_from_drive()
+        st.success("Loaded from Google Drive.")
+        st.experimental_rerun()
+
+st.markdown("---")
+
+# --------------------------------------------------------------------
+# 6. ACTIVE TRADES DASHBOARD (UNCHANGED)
+# --------------------------------------------------------------------
+
 st.subheader("Active Trades")
 if not st.session_state.trades:
     st.info("No trades added yet. Use the form above to add your first spread.")
@@ -260,7 +366,6 @@ Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> |
 Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
 """, unsafe_allow_html=True)
 
-            # ------------------- PnL CHART WITH HORIZONTAL/VERTICAL LINES -------------------
             dte_range = list(range(derived["dte"] + 1))
             profit_values = [current_profit_percent if current_profit_percent is not None else 0]*len(dte_range)
             pnl_df = pd.DataFrame({
