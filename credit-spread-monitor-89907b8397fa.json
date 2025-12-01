@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "credit-spread-monitor",
+  "private_key_id": "89907b8397fad966d0b28e5a932d2d047b4171b6",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDDGCk4px4iW/x5\nRH1gP3i55SRC0mO60ew63tKPL+ZWx4oHqEfDhGQ4ss2Nh8H7ROxVdzLsqvIaM+fT\nX7hRXpswdZaZ+JXAVj6j/g80dViChsdTYCgyzpNzsL9zEzZjD7mQF8s4KGiYR3wF\nqhpegLsVnwGmM/SA+5NmA33l8waQfhujHUI4NxaDL7FLkx0ewmIu2Ji+4xkWMTnY\nFnb45IXSJH0sdnLBYwvmkn/9nmWxWn2DPxtqrRpyQHhV0SkZUIqx32+47At0PZXa\noZ2lf3CDG5KFwXF7JsJ3DRL7246/tFZTdW5Zd+n+VL9SndCRo8hQv5YRPjdX+ULf\nuIdloXurAgMBAAECggEAWs69rR14VMTdJPLgqrKQdnJ2KNY1zmjUnGhHuJcyjxTs\npfjJgnN2lL+BFs3oWBTyLiu/29ILw2+CievlZpZzBKDO+xbuWSqrmHhySlgOXR7v\n21qIC3IExxYvXphEOeLBXBT/JcIFQVAQpbBR+sfPjNZIlbxcI8c1ige5C5XNaeZA\nAc+w0qAHWZ18d/1PFHyGv/xgVmQcLtSZPMPNUS6r9JEDm3P4U0GNpKEYFBGDwE1E\nE/o5pdSkEnZgRItXVGeMKfL0JtyvYTOEHhnASAxByzbCRhLC3bmZ+RDHqihKyfkd\nYcnAuZN+equn7QY/OCApPneufzCdb9IsbuZceU3neQKBgQD0kreXBqs1ycFv1zmU\nQUIGKaYrLUj1QccKUZNWU4cLZbl5O80Sg+xiLw3ExK2a5WpnRxHn0JlVEQkjJtsb\n7nFcv0/cYhVUqbdt222yVPea7BRAyWoCH2eLSsvQYgcuysfSigPZ/pZKAP8ZkjJE\nG71mRcSkur2QV6+DKQWsb+Hk+QKBgQDMNaPcuuYOdNnY5Fuw2xZ28lN4N1pP+0w2\nWohUewSnapOBnilSNv6BFI1uq+vhSyFEJH/myInKmU068zhmuQp8pCfa/k+MElDn\nr7rP8fEWJJ4CgrDlepFM09p/+CvBQgcvuikLqxz5YtuttctMKAaFoykxRVKg4Son\nf9t5gh8iwwKBgQDVKYsZ9pYCq3YNJGjq7nW9KU/LEg0ktc/lDnR8KRDqvh6Jq7Vx\nDcpZSOmXNlSZTJsQqMDSat05Zz+vg441Kf1j+NqCGnq8768P8NALPkMQo/KDBQmA\nEB8PKIG7fbUE83h16BSzS1Fx7qxofSOSeRr6qJRbfub5h3NRvc9UG6+nAQKBgEE9\nDblxuBd8OzBwW96XT4j2h7YLMP4GUWW37H/YwTbe9HrfVWIfkZUZRMnLgNL71ofX\nhUjsXiDscuDXXPhsOy5wnw72WeFs5I3v9SWDrLqfPh+dMvhM/OhnchGZ7hiSiIs1\n1PEWXG5Lp9TKFEWjL9o3suw7slcVOAtgbHRYHqxTAoGBANhmSywfgZpCLszIJdo3\n9JoCSrJhxJZiISjsE3+bAhlcglbJTac7pi/8S2ANs9AKTuqWeHAx+lFSnhXLy1UO\nL2ZY/Tz9cDWm7wmuSGeefb6wDlU4N3EptkWcp2qi/dgn6RcJInGtwKxo9rzLuLrp\n+CfpSpn+M+cIK3W5dlbVspq0\n-----END PRIVATE KEY-----\n",
+  "client_email": "spread-monitor-service@credit-spread-monitor.iam.gserviceaccount.com",
+  "client_id": "116468717588195711618",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/spread-monitor-service%40credit-spread-monitor.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
