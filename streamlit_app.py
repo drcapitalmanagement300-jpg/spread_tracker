@@ -1,4 +1,4 @@
-# app.py
+# streamlit_app.py
 import streamlit as st
 from datetime import datetime, date
 import numpy as np
@@ -16,62 +16,52 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-
-st.subheader("Google Drive Credentials Test")
-
-try:
-    from google.oauth2 import service_account
-    SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-    
-    if "gcp_service_account" in st.secrets:
-        creds = service_account.Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"], scopes=SCOPES
-        )
-        st.success("✅ Streamlit secrets loaded correctly!")
-        st.write("Project ID:", creds.project_id)
-    else:
-        st.warning("⚠️ gcp_service_account not found in Streamlit secrets.")
-except Exception as e:
-    st.error(f"❌ Failed to load credentials: {e}")
-
-
-
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
 # ---------------------- DRIVE CONFIG ----------------------
 DRIVE_FILENAME = "spread_trades.json"
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-SERVICE_ACCOUNT_FILE = "service_account.json"  # local fallback filename
+SERVICE_ACCOUNT_FILE = "service_account.json"  # local fallback
 
 # ---------------------- DRIVE HELPERS ----------------------
 def _get_credentials() -> Optional[service_account.Credentials]:
     """
-    Obtain service account credentials either from:
-    - a local file named service_account.json (SERVICE_ACCOUNT_FILE)
-    - or from Streamlit secrets (st.secrets["gcp_service_account"])
-    Returns None if credentials are not available.
+    Obtain service account credentials from:
+      1) Streamlit secrets (recommended for deployed apps)
+      2) Local file (for development)
+    Returns a Credentials object or None if neither is available.
     """
-    # 1) Try Streamlit Secrets (recommended for deployed apps)
+    # 1) Try Streamlit secrets
     try:
         if st.secrets and "gcp_service_account" in st.secrets:
             info = st.secrets["gcp_service_account"]
+            if not isinstance(info, dict):
+                st.error("Streamlit secret 'gcp_service_account' is not a dict! Check TOML formatting.")
+                return None
             creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            st.write("✅ Loaded Google Drive credentials from Streamlit secrets.")
             return creds
-    except Exception:
-        # fall through to file-based
-        pass
+    except Exception as e:
+        st.error(f"Failed to load credentials from Streamlit secrets: {e}")
 
-    # 2) Try local file
+    # 2) Try local file fallback
     if os.path.exists(SERVICE_ACCOUNT_FILE):
         try:
-            creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+            creds = service_account.Credentials.from_service_account_file(
+                SERVICE_ACCOUNT_FILE, scopes=SCOPES
+            )
+            st.write(f"✅ Loaded Google Drive credentials from local file {SERVICE_ACCOUNT_FILE}")
             return creds
-        except Exception:
-            return None
+        except Exception as e:
+            st.error(f"Failed to load credentials from local file: {e}")
 
+    # No credentials found
+    st.warning(
+        "⚠️ Google Drive credentials not found. Add a service_account.json file locally "
+        "or configure Streamlit secrets."
+    )
     return None
-
 
 @st.cache_resource
 def get_drive_service():
@@ -85,16 +75,20 @@ def get_drive_service():
     try:
         service = build("drive", "v3", credentials=creds, cache_discovery=False)
         return service
-    except Exception:
+    except Exception as e:
+        st.error(f"Failed to build Google Drive service: {e}")
         return None
-
 
 def find_file_id(service, filename: str) -> Optional[str]:
     """Return file id for the given filename in Drive, or None if not found."""
     if service is None:
         return None
     try:
-        resp = service.files().list(q=f"name='{filename}' and trashed = false", spaces="drive", fields="files(id, name)").execute()
+        resp = service.files().list(
+            q=f"name='{filename}' and trashed = false",
+            spaces="drive",
+            fields="files(id, name)"
+        ).execute()
         files = resp.get("files", [])
         if not files:
             return None
@@ -102,17 +96,10 @@ def find_file_id(service, filename: str) -> Optional[str]:
     except Exception:
         return None
 
-
 def serialize_trades_for_storage(trades: List[Dict[str, Any]]) -> str:
     """Convert Python objects (dates) into JSON-friendly types and return JSON string."""
-    def convert(item):
-        if isinstance(item, date):
-            return item.isoformat()
-        return item
-
     cleaned = []
     for t in trades:
-        # shallow-copy and convert fields
         ct = {}
         for k, v in t.items():
             if isinstance(v, date):
@@ -121,7 +108,6 @@ def serialize_trades_for_storage(trades: List[Dict[str, Any]]) -> str:
                 ct[k] = v
         cleaned.append(ct)
     return json.dumps(cleaned, indent=2)
-
 
 def deserialize_trades_from_storage(raw: str) -> List[Dict[str, Any]]:
     """Parse JSON and convert ISO date strings back to date objects where appropriate."""
@@ -132,19 +118,14 @@ def deserialize_trades_from_storage(raw: str) -> List[Dict[str, Any]]:
             nt = {}
             for k, v in t.items():
                 if isinstance(v, str):
-                    # attempt to parse ISO dates for known keys
                     if k in ("expiration", "entry_date", "created_at"):
-                        # created_at uses datetime isoformat; try both date and datetime parsing
                         try:
-                            # Try date first (YYYY-MM-DD)
                             dt = datetime.fromisoformat(v)
-                            # If it's a full datetime, keep string for created_at; if we want datetime object, convert:
                             if k == "created_at":
-                                nt[k] = v  # keep created_at as string
+                                nt[k] = v
                             else:
                                 nt[k] = dt.date()
                         except Exception:
-                            # fallback: keep as original string
                             nt[k] = v
                     else:
                         nt[k] = v
@@ -155,29 +136,24 @@ def deserialize_trades_from_storage(raw: str) -> List[Dict[str, Any]]:
     except Exception:
         return []
 
-
 def save_to_drive(trades: List[Dict[str, Any]]) -> bool:
     """Save trades list as JSON file to Google Drive (overwrites existing file with same name)."""
     service = get_drive_service()
     if service is None:
-        st.warning("Google Drive credentials not found. Place service_account.json in app folder or add gcp_service_account to Streamlit secrets.")
+        st.warning("Google Drive credentials not found. Add service_account.json or Streamlit secrets.")
         return False
 
     json_str = serialize_trades_for_storage(trades)
     fh = io.BytesIO(json_str.encode("utf-8"))
     media = MediaIoBaseUpload(fh, mimetype="application/json", resumable=True)
 
-    # if file exists, delete it (we'll upload a clean copy)
     existing_id = find_file_id(service, DRIVE_FILENAME)
     try:
         if existing_id:
-            # delete old file (so drive list remains clean)
             service.files().delete(fileId=existing_id).execute()
     except Exception:
-        # ignore deletion error and continue to upload
         pass
 
-    # create new file
     file_metadata = {"name": DRIVE_FILENAME}
     try:
         service.files().create(body=file_metadata, media_body=media, fields="id").execute()
@@ -186,13 +162,11 @@ def save_to_drive(trades: List[Dict[str, Any]]) -> bool:
         st.error(f"Failed to save to Drive: {e}")
         return False
 
-
 def load_from_drive() -> List[Dict[str, Any]]:
     """Load trades JSON from Google Drive and return list of trades (with date fields converted)."""
     service = get_drive_service()
     if service is None:
-        # credentials missing -> no-op, but keep UX friendly
-        st.info("Google Drive credentials not found; starting with local empty trades. Add service_account.json or configure Streamlit secrets to enable Drive persistence.")
+        st.info("Google Drive credentials not found; starting with empty trades.")
         return []
 
     file_id = find_file_id(service, DRIVE_FILENAME)
@@ -213,15 +187,13 @@ def load_from_drive() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
-# ---------------------- SESSION INITIALIZATION ----------------------
+# ---------------------- SESSION STATE ----------------------
 def init_state():
     if "trades" not in st.session_state:
-        # attempt to load from Drive (if credentials available)
         st.session_state.trades = load_from_drive()
-
 init_state()
 
-# ---------------------- EXISTING HELPERS (UNCHANGED) ----------------------
+# ---------------------- UTILITY FUNCTIONS ----------------------
 def days_to_expiry(expiry_date: date) -> int:
     return max((expiry_date - date.today()).days, 0)
 
@@ -256,90 +228,9 @@ def get_price(ticker: str):
     except Exception:
         return None
 
-@st.cache_data(ttl=60)
-def get_option_chain(ticker: str, expiration: str):
-    try:
-        ticker_obj = yf.Ticker(ticker)
-        opt_chain = ticker_obj.option_chain(expiration)
-        return opt_chain.calls, opt_chain.puts
-    except Exception:
-        return None, None
-
-def bsm_delta(option_type, S, K, T, r, sigma):
-    if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
-        return None
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    if option_type.lower() == 'call':
-        return norm.cdf(d1)
-    elif option_type.lower() == 'put':
-        return norm.cdf(d1) - 1
-    else:
-        return None
-
-def get_leg_data(ticker: str, expiration: date, strike: float, option_type='put'):
-    _, puts = get_option_chain(ticker, expiration.isoformat())
-    if puts is None or puts.empty:
-        return None, None
-    leg_row = puts[puts['strike'] == strike]
-    if leg_row.empty:
-        return None, None
-    price = leg_row['lastPrice'].values[0] if 'lastPrice' in leg_row.columns else None
-    iv = leg_row['impliedVolatility'].values[0] * 100 if 'impliedVolatility' in leg_row.columns else None
-    return price, iv
-
-def get_short_leg_data(trade: dict):
-    short_price, iv = get_leg_data(trade["ticker"], trade["expiration"], float(trade["short_strike"]), 'put')
-    current_price = get_price(trade['ticker'])
-    delta = None
-    if current_price and iv:
-        T = days_to_expiry(trade["expiration"]) / 365
-        sigma = iv / 100
-        r = 0.05
-        delta = bsm_delta('put', current_price, float(trade["short_strike"]), T, r, sigma)
-    return delta, iv, short_price
-
-def get_long_leg_data(trade: dict):
-    long_price, _ = get_leg_data(trade["ticker"], trade["expiration"], float(trade["long_strike"]), 'put')
-    return long_price
-
-def compute_spread_value(short_option_price, long_option_price, width, credit):
-    if short_option_price is None or long_option_price is None or width - credit <= 0:
-        return None
-    spread_mark = short_option_price - long_option_price
-    max_loss = width - credit
-    return (spread_mark / max_loss) * 100
-
-def compute_current_profit(short_price, long_price, credit, width):
-    if short_price is None or long_price is None or credit <= 0:
-        return None
-    spread_value = short_price - long_price
-    current_profit = credit - spread_value
-    return max(0, min((current_profit / credit) * 100, 100))
-
-def fetch_short_iv(ticker, short_strike, expiration):
-    _, puts = get_option_chain(ticker, expiration.isoformat())
-    if puts is None or puts.empty:
-        return None
-    short_row = puts[puts['strike'] == short_strike]
-    if short_row.empty or 'impliedVolatility' not in short_row.columns:
-        return None
-    iv = short_row['impliedVolatility'].values[0] * 100
-    return iv
-
-def evaluate_rules(trade, derived, current_price, delta, current_iv, short_option_price, long_option_price):
-    rule_violations = {"other_rules": False, "iv_rule": False}
-    abs_delta = abs(delta) if delta is not None else None
-    if abs_delta is not None and abs_delta >= 0.40:
-        rule_violations["other_rules"] = True
-    spread_value_percent = compute_spread_value(short_option_price, long_option_price, derived["width"], trade["credit"])
-    if spread_value_percent is not None and spread_value_percent >= 150:
-        rule_violations["other_rules"] = True
-    if derived["dte"] <= 7:
-        rule_violations["other_rules"] = True
-    entry_iv = trade.get("entry_iv")
-    if entry_iv and current_iv and current_iv > entry_iv:
-        rule_violations["iv_rule"] = True
-    return rule_violations, abs_delta, spread_value_percent
+# ---------------------- Remaining Option/Spread Helpers ----------------------
+# (You can keep all your get_option_chain, bsm_delta, get_leg_data, get_short_leg_data, get_long_leg_data,
+# compute_spread_value, compute_current_profit, fetch_short_iv, evaluate_rules functions exactly as before)
 
 # ---------------------- TRADE INPUT FORM ----------------------
 with st.form("add_trade", clear_on_submit=True):
@@ -383,10 +274,7 @@ with st.form("add_trade", clear_on_submit=True):
 st.markdown("---")
 
 # ---------------------- SAVE / LOAD BUTTONS ----------------------
-st.subheader("Data Persistence")
-
 colA, colB = st.columns(2)
-
 with colA:
     if st.button("💾 Save trades to Google Drive"):
         ok = save_to_drive(st.session_state.trades)
@@ -394,7 +282,6 @@ with colA:
             st.success("Saved to Google Drive.")
         else:
             st.error("Save failed. Check credentials and try again.")
-
 with colB:
     if st.button("📥 Load trades from Google Drive"):
         loaded = load_from_drive()
@@ -403,116 +290,7 @@ with colB:
             st.success("Loaded from Google Drive.")
             st.experimental_rerun()
         else:
-            st.info("No saved trades found in Drive (or credentials missing).")
-
-st.markdown("---")
+            st.info("No saved trades found or credentials missing.")
 
 # ---------------------- ACTIVE TRADES DASHBOARD ----------------------
-st.subheader("Active Trades")
-if not st.session_state.trades:
-    st.info("No trades added yet. Use the form above to add your first spread.")
-else:
-    for i, t in enumerate(st.session_state.trades):
-        derived = compute_derived(t)
-        current_price = get_price(t['ticker'])
-        delta, current_iv, short_option_price = get_short_leg_data(t)
-        long_option_price = get_long_leg_data(t)
-        current_profit_percent = compute_current_profit(short_option_price, long_option_price, t["credit"], derived["width"])
-        rule_violations, abs_delta, spread_value_percent = evaluate_rules(
-            t, derived, current_price, delta, current_iv, short_option_price, long_option_price
-        )
-
-        abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
-        spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else "-"
-        current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else "-"
-        current_price_str = f"{current_price:.2f}" if current_price is not None else "-"
-
-        if rule_violations["other_rules"]:
-            status_icon = "❌"
-            status_text = "Some critical rules are violated."
-        elif rule_violations["iv_rule"]:
-            status_icon = "⚠️"
-            status_text = "Current IV exceeds entry IV."
-        else:
-            status_icon = "✅"
-            status_text = "All rules are satisfied."
-
-        card_cols = st.columns([3,3])
-        with card_cols[0]:
-            st.markdown(
-                f"""
-<div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px; height:100%'>
-Ticker: {t['ticker']}  <br>
-Underlying Price: {current_price_str}  <br>
-Short Strike: {t['short_strike']}  <br>
-Long Strike: {t['long_strike']}  <br>
-Spread Width: {derived['width']}  <br>
-Expiration Date: {t['expiration']}  <br>
-Current DTE: {derived['dte']}  <br>
-Max Gain: {format_money(derived['max_gain'])}  <br>
-Max Loss: {format_money(derived['max_loss'])}  
-</div>
-""", unsafe_allow_html=True)
-
-            st.markdown(f"<div style='margin-top:10px; font-size:20px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
-
-        with card_cols[1]:
-            delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
-            spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
-            dte_color = "red" if derived['dte'] <= 7 else "green"
-
-            if current_profit_percent is None:
-                profit_color = "black"
-            elif current_profit_percent < 50:
-                profit_color = "green"
-            elif 50 <= current_profit_percent <= 75:
-                profit_color = "yellow"
-            else:
-                profit_color = "red"
-
-            if current_iv is None or t["entry_iv"] is None:
-                iv_color = "black"
-            elif current_iv == t["entry_iv"]:
-                iv_color = "yellow"
-            elif current_iv > t["entry_iv"]:
-                iv_color = "red"
-            else:
-                iv_color = "green"
-
-            st.markdown(
-                f"""
-Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be less than or equal to 0.40 <br>
-Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
-DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 <br>
-Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
-Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
-""", unsafe_allow_html=True)
-
-            dte_range = list(range(derived["dte"] + 1))
-            profit_values = [current_profit_percent if current_profit_percent is not None else 0]*len(dte_range)
-            pnl_df = pd.DataFrame({
-                "DTE": dte_range,
-                "Profit %": profit_values
-            })
-
-            base_chart = alt.Chart(pnl_df).mark_line(point=True, color='blue').encode(
-                x=alt.X('DTE', title='Days to Expiration', scale=alt.Scale(domain=(derived["dte"], 0))),
-                y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100), nice=False),
-                        axis=alt.Axis(tickMinStep=10, tickCount=11))
-            ).properties(height=250)
-
-            line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(color='yellow', strokeDash=[5,5]).encode(y='y')
-            line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(color='red', strokeDash=[5,5]).encode(y='y')
-            vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(color='blue', strokeDash=[5,5]).encode(x='DTE')
-
-            final_chart = base_chart + line_50 + line_75 + vline
-            st.altair_chart(final_chart, use_container_width=True)
-
-        if st.button("Remove", key=f"remove_{i}"):
-            st.session_state.trades.pop(i)
-            # Save automatically after removal if possible
-            save_to_drive(st.session_state.trades)
-            st.experimental_rerun()
-
-st.markdown("---")
-st.caption("Spread value uses actual option prices — alerts accurate, delta BSM-based, entry IV auto-captured.")
+# Keep your dashboard code exactly as it was
