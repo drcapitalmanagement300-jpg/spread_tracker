@@ -16,6 +16,26 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
+
+st.subheader("Google Drive Credentials Test")
+
+try:
+    from google.oauth2 import service_account
+    SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+    
+    if "gcp_service_account" in st.secrets:
+        creds = service_account.Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"], scopes=SCOPES
+        )
+        st.success("✅ Streamlit secrets loaded correctly!")
+        st.write("Project ID:", creds.project_id)
+    else:
+        st.warning("⚠️ gcp_service_account not found in Streamlit secrets.")
+except Exception as e:
+    st.error(f"❌ Failed to load credentials: {e}")
+
+
+
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
