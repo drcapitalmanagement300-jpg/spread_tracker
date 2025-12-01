@@ -8,98 +8,202 @@ import pandas as pd
 import altair as alt
 import json
 import os
+import io
+from typing import List, Dict, Any, Optional
 
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
+# Google Drive API imports
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
-# --------------------------------------------------------------------
-# 🔹 1. GOOGLE DRIVE AUTH + HELPERS (SECTION 4)
-# --------------------------------------------------------------------
+# ---------------------- DRIVE CONFIG ----------------------
+DRIVE_FILENAME = "spread_trades.json"
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+SERVICE_ACCOUNT_FILE = "service_account.json"  # local fallback filename
 
-def init_drive():
-    """Initialize Google Drive authentication."""
-    gauth = GoogleAuth()
-    gauth.DEFAULT_SETTINGS['client_config_file'] = "client_secrets.json"
+# ---------------------- DRIVE HELPERS ----------------------
+def _get_credentials() -> Optional[service_account.Credentials]:
+    """
+    Obtain service account credentials either from:
+    - a local file named service_account.json (SERVICE_ACCOUNT_FILE)
+    - or from Streamlit secrets (st.secrets["gcp_service_account"])
+    Returns None if credentials are not available.
+    """
+    # 1) Try Streamlit Secrets (recommended for deployed apps)
     try:
-        gauth.LoadCredentialsFile("creds.json")
-    except:
+        if st.secrets and "gcp_service_account" in st.secrets:
+            info = st.secrets["gcp_service_account"]
+            creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            return creds
+    except Exception:
+        # fall through to file-based
         pass
 
-    if gauth.credentials is None:
-        st.warning("Please authenticate with Google Drive.")
-        auth_url = gauth.GetAuthUrl()
-        st.markdown(f"[Click here to authenticate]({auth_url})")
+    # 2) Try local file
+    if os.path.exists(SERVICE_ACCOUNT_FILE):
+        try:
+            creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+            return creds
+        except Exception:
+            return None
 
-        auth_code = st.text_input("Enter Google authentication code:")
-        if auth_code:
-            gauth.Auth(auth_code)
-            gauth.SaveCredentialsFile("creds.json")
-            st.success("Authenticated successfully! Reload the app.")
-            st.stop()
-
-    elif gauth.access_token_expired:
-        gauth.Refresh()
-        gauth.SaveCredentialsFile("creds.json")
-    else:
-        gauth.Authorize()
-
-    return GoogleDrive(gauth)
+    return None
 
 
 @st.cache_resource
-def get_drive():
-    return init_drive()
-
-def save_to_drive(trades):
-    """Saves the list of trades to Google Drive."""
-    drive = get_drive()
-
-    # Remove existing file if present
-    file_list = drive.ListFile({'q': "title='spread_trades.json'"}).GetList()
-    for f in file_list:
-        f.Delete()
-
-    # Upload new version
-    file = drive.CreateFile({'title': 'spread_trades.json'})
-    file.SetContentString(json.dumps(trades, indent=2))
-    file.Upload()
-    return True
-
-
-def load_from_drive():
-    """Loads trades JSON from Google Drive."""
+def get_drive_service():
+    """
+    Returns an authorized Drive v3 service object, or None if credentials missing.
+    Cached with st.cache_resource so we reuse the client across reruns.
+    """
+    creds = _get_credentials()
+    if creds is None:
+        return None
     try:
-        drive = get_drive()
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return service
+    except Exception:
+        return None
 
-        file_list = drive.ListFile({'q': "title='spread_trades.json'"}).GetList()
-        if not file_list:
-            return []
 
-        file = file_list[0]
-        content = file.GetContentString()
-        return json.loads(content)
+def find_file_id(service, filename: str) -> Optional[str]:
+    """Return file id for the given filename in Drive, or None if not found."""
+    if service is None:
+        return None
+    try:
+        resp = service.files().list(q=f"name='{filename}' and trashed = false", spaces="drive", fields="files(id, name)").execute()
+        files = resp.get("files", [])
+        if not files:
+            return None
+        return files[0]["id"]
+    except Exception:
+        return None
+
+
+def serialize_trades_for_storage(trades: List[Dict[str, Any]]) -> str:
+    """Convert Python objects (dates) into JSON-friendly types and return JSON string."""
+    def convert(item):
+        if isinstance(item, date):
+            return item.isoformat()
+        return item
+
+    cleaned = []
+    for t in trades:
+        # shallow-copy and convert fields
+        ct = {}
+        for k, v in t.items():
+            if isinstance(v, date):
+                ct[k] = v.isoformat()
+            else:
+                ct[k] = v
+        cleaned.append(ct)
+    return json.dumps(cleaned, indent=2)
+
+
+def deserialize_trades_from_storage(raw: str) -> List[Dict[str, Any]]:
+    """Parse JSON and convert ISO date strings back to date objects where appropriate."""
+    try:
+        loaded = json.loads(raw)
+        out = []
+        for t in loaded:
+            nt = {}
+            for k, v in t.items():
+                if isinstance(v, str):
+                    # attempt to parse ISO dates for known keys
+                    if k in ("expiration", "entry_date", "created_at"):
+                        # created_at uses datetime isoformat; try both date and datetime parsing
+                        try:
+                            # Try date first (YYYY-MM-DD)
+                            dt = datetime.fromisoformat(v)
+                            # If it's a full datetime, keep string for created_at; if we want datetime object, convert:
+                            if k == "created_at":
+                                nt[k] = v  # keep created_at as string
+                            else:
+                                nt[k] = dt.date()
+                        except Exception:
+                            # fallback: keep as original string
+                            nt[k] = v
+                    else:
+                        nt[k] = v
+                else:
+                    nt[k] = v
+            out.append(nt)
+        return out
     except Exception:
         return []
 
-# --------------------------------------------------------------------
-# 2. SESSION INITIALIZATION
-# --------------------------------------------------------------------
 
+def save_to_drive(trades: List[Dict[str, Any]]) -> bool:
+    """Save trades list as JSON file to Google Drive (overwrites existing file with same name)."""
+    service = get_drive_service()
+    if service is None:
+        st.warning("Google Drive credentials not found. Place service_account.json in app folder or add gcp_service_account to Streamlit secrets.")
+        return False
+
+    json_str = serialize_trades_for_storage(trades)
+    fh = io.BytesIO(json_str.encode("utf-8"))
+    media = MediaIoBaseUpload(fh, mimetype="application/json", resumable=True)
+
+    # if file exists, delete it (we'll upload a clean copy)
+    existing_id = find_file_id(service, DRIVE_FILENAME)
+    try:
+        if existing_id:
+            # delete old file (so drive list remains clean)
+            service.files().delete(fileId=existing_id).execute()
+    except Exception:
+        # ignore deletion error and continue to upload
+        pass
+
+    # create new file
+    file_metadata = {"name": DRIVE_FILENAME}
+    try:
+        service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+        return True
+    except Exception as e:
+        st.error(f"Failed to save to Drive: {e}")
+        return False
+
+
+def load_from_drive() -> List[Dict[str, Any]]:
+    """Load trades JSON from Google Drive and return list of trades (with date fields converted)."""
+    service = get_drive_service()
+    if service is None:
+        # credentials missing -> no-op, but keep UX friendly
+        st.info("Google Drive credentials not found; starting with local empty trades. Add service_account.json or configure Streamlit secrets to enable Drive persistence.")
+        return []
+
+    file_id = find_file_id(service, DRIVE_FILENAME)
+    if not file_id:
+        return []
+
+    try:
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        fh.seek(0)
+        raw = fh.read().decode("utf-8")
+        trades = deserialize_trades_from_storage(raw)
+        return trades
+    except Exception:
+        return []
+
+# ---------------------- SESSION INITIALIZATION ----------------------
 def init_state():
     if "trades" not in st.session_state:
+        # attempt to load from Drive (if credentials available)
         st.session_state.trades = load_from_drive()
 
 init_state()
 
+# ---------------------- EXISTING HELPERS (UNCHANGED) ----------------------
 def days_to_expiry(expiry_date: date) -> int:
     return max((expiry_date - date.today()).days, 0)
-
-# --------------------------------------------------------------------
-# 3. YOUR EXISTING HELPERS (UNCHANGED)
-# --------------------------------------------------------------------
 
 def compute_derived(trade: dict) -> dict:
     short = float(trade["short_strike"])
@@ -217,10 +321,7 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
         rule_violations["iv_rule"] = True
     return rule_violations, abs_delta, spread_value_percent
 
-# --------------------------------------------------------------------
-# 4. TRADE INPUT FORM  (UNCHANGED)
-# --------------------------------------------------------------------
-
+# ---------------------- TRADE INPUT FORM ----------------------
 with st.form("add_trade", clear_on_submit=True):
     st.subheader("Add new put credit spread")
     col1, col2, col3 = st.columns([2,2,2])
@@ -261,31 +362,32 @@ with st.form("add_trade", clear_on_submit=True):
 
 st.markdown("---")
 
-# --------------------------------------------------------------------
-# 5. SAVE / LOAD BUTTONS (NEW)
-# --------------------------------------------------------------------
-
+# ---------------------- SAVE / LOAD BUTTONS ----------------------
 st.subheader("Data Persistence")
 
 colA, colB = st.columns(2)
 
 with colA:
     if st.button("💾 Save trades to Google Drive"):
-        save_to_drive(st.session_state.trades)
-        st.success("Saved to Google Drive.")
+        ok = save_to_drive(st.session_state.trades)
+        if ok:
+            st.success("Saved to Google Drive.")
+        else:
+            st.error("Save failed. Check credentials and try again.")
 
 with colB:
     if st.button("📥 Load trades from Google Drive"):
-        st.session_state.trades = load_from_drive()
-        st.success("Loaded from Google Drive.")
-        st.experimental_rerun()
+        loaded = load_from_drive()
+        if loaded:
+            st.session_state.trades = loaded
+            st.success("Loaded from Google Drive.")
+            st.experimental_rerun()
+        else:
+            st.info("No saved trades found in Drive (or credentials missing).")
 
 st.markdown("---")
 
-# --------------------------------------------------------------------
-# 6. ACTIVE TRADES DASHBOARD (UNCHANGED)
-# --------------------------------------------------------------------
-
+# ---------------------- ACTIVE TRADES DASHBOARD ----------------------
 st.subheader("Active Trades")
 if not st.session_state.trades:
     st.info("No trades added yet. Use the form above to add your first spread.")
@@ -388,6 +490,8 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
 
         if st.button("Remove", key=f"remove_{i}"):
             st.session_state.trades.pop(i)
+            # Save automatically after removal if possible
+            save_to_drive(st.session_state.trades)
             st.experimental_rerun()
 
 st.markdown("---")
