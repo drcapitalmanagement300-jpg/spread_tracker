@@ -10,53 +10,142 @@ import json
 import io
 from typing import List, Dict, Any, Optional
 
-from google.oauth2.service_account import Credentials
+# OAuth / Google API imports
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
-# ----------------------------- Google Drive configuration -----------------------------
+# ----------------------------- Config / constants -----------------------------
 DRIVE_FILE_NAME = "credit_spreads.json"
 DRIVE_SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/drive",
 ]
 
-# ----------------------------- Drive helpers (patched, use st.secrets) -----------------------------
-@st.cache_resource
-def init_drive() -> Optional[object]:
-    """
-    Initialize Google Drive service using service account stored in st.secrets["gcp_service_account"].
-    Returns the drive service object or None.
-    """
+# ----------------------------- OAuth helpers -----------------------------
+def _get_redirect_uri() -> str:
+    """redirect_uri from secrets"""
     try:
-        if "gcp_service_account" not in st.secrets:
-            st.warning("No gcp_service_account found in Streamlit secrets. Drive persistence disabled.")
-            return None
-
-        creds_info = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(creds_info, scopes=DRIVE_SCOPES)
-        service = build("drive", "v3", credentials=creds, cache_discovery=False)
-
-        sa_email = creds_info.get("client_email")
-        if sa_email:
-            st.caption(f"Drive service account: {sa_email}")
-
-        return service
-    except Exception as e:
-        st.error(f"Drive initialization failed: {e}")
+        return st.secrets["google_oauth"]["redirect_uri"]
+    except Exception:
         return None
 
+def get_flow() -> Flow:
+    """
+    Build an OAuth Flow object from st.secrets["google_oauth"].
+    """
+    client_id = st.secrets["google_oauth"]["client_id"]
+    client_secret = st.secrets["google_oauth"]["client_secret"]
+    redirect_uri = _get_redirect_uri()
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uris": [redirect_uri],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=DRIVE_SCOPES,
+    )
+    flow.redirect_uri = redirect_uri
+    return flow
 
+def ensure_logged_in():
+    """
+    Ensures user is logged in. If not, shows login link and stops execution.
+    If returning from Google with ?code=..., exchanges code and stores credentials in session_state.
+    """
+    # initialize session state storage for credentials
+    if "credentials" not in st.session_state:
+        st.session_state["credentials"] = None
+
+    # If user just returned with a code, exchange it
+    if "code" in st.query_params and st.session_state.get("credentials") is None:
+        try:
+            flow = get_flow()
+            code = st.query_params["code"]
+            # fetch_token expects code string; if query param is list, get first
+            if isinstance(code, list):
+                code = code[0]
+            flow.fetch_token(code=code)
+            creds = flow.credentials
+            # store minimal serializable credential dict in session state
+            st.session_state["credentials"] = {
+                "token": creds.token,
+                "refresh_token": creds.refresh_token,
+                "token_uri": creds.token_uri,
+                "client_id": creds.client_id,
+                "client_secret": creds.client_secret,
+                "scopes": creds.scopes,
+            }
+            # remove query params (nice-to-have) - cannot modify URL directly; display success
+            st.experimental_rerun()
+        except Exception as e:
+            st.error(f"OAuth token exchange failed: {e}")
+            st.stop()
+
+    # If not logged in, present link and stop
+    if st.session_state.get("credentials") is None:
+        flow = get_flow()
+        auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline", include_granted_scopes="true")
+        st.markdown("### Sign in with Google to enable Drive persistence")
+        st.markdown(f"[Click here to sign in with Google]({auth_url})")
+        st.info("You must sign in to save/read trades to/from your Google Drive. After signing in you'll be redirected back to the app.")
+        st.stop()
+
+def build_drive_service_from_session() -> Optional[object]:
+    """
+    Create a Drive service object from credentials stored in st.session_state.
+    Returns None if credentials aren't present or creation fails.
+    """
+    creds_dict = st.session_state.get("credentials")
+    if not creds_dict:
+        return None
+    try:
+        creds = Credentials(
+            token=creds_dict.get("token"),
+            refresh_token=creds_dict.get("refresh_token"),
+            token_uri=creds_dict.get("token_uri"),
+            client_id=creds_dict.get("client_id"),
+            client_secret=creds_dict.get("client_secret"),
+            scopes=creds_dict.get("scopes"),
+        )
+        # Refresh token if expired (will use refresh_token and client_secret)
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                # write back refreshed token
+                st.session_state["credentials"]["token"] = creds.token
+            except Exception as e:
+                st.warning(f"Could not refresh credentials: {e}")
+
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return service
+    except Exception as e:
+        st.error(f"Failed to build Drive service: {e}")
+        return None
+
+def logout():
+    """Clear stored credentials"""
+    if "credentials" in st.session_state:
+        st.session_state.pop("credentials", None)
+    st.success("Logged out. Reload the page to sign in again.")
+    st.experimental_rerun()
+
+# ----------------------------- Drive helpers (unchanged logic) -----------------------------
 def _get_folder_id() -> Optional[str]:
     """Return optional folder ID from secrets (top-level key DRIVE_FOLDER_ID)."""
     try:
         return st.secrets.get("DRIVE_FOLDER_ID", None)
     except Exception:
         return None
-
 
 def _find_file_id(service, filename: str) -> Optional[str]:
     """Return Google Drive file ID by filename (optionally scoped to folder)."""
@@ -77,7 +166,6 @@ def _find_file_id(service, filename: str) -> Optional[str]:
         st.error(f"Drive find file error: {e}")
         return None
 
-
 def _download_file(service, file_id: str) -> Optional[str]:
     """Download file content from Drive and return as text, or None on error."""
     try:
@@ -92,7 +180,6 @@ def _download_file(service, file_id: str) -> Optional[str]:
     except Exception as e:
         st.error(f"Drive download error: {e}")
         return None
-
 
 def _upload_file(service, filename: str, content_str: str) -> bool:
     """Upload or update a file in Drive. Returns True on success."""
@@ -115,7 +202,6 @@ def _upload_file(service, filename: str, content_str: str) -> bool:
         st.error(f"Drive upload error: {e}")
         return False
 
-
 def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
     """Serialize trades and save to Google Drive. Returns True on success."""
     if service is None:
@@ -131,7 +217,6 @@ def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
                 ct[k] = v
         serializable.append(ct)
     return _upload_file(service, DRIVE_FILE_NAME, json.dumps(serializable, indent=2))
-
 
 def load_from_drive(service) -> List[Dict[str, Any]]:
     """Load trades JSON from Drive and convert ISO dates back to date objects."""
@@ -167,15 +252,12 @@ def load_from_drive(service) -> List[Dict[str, Any]]:
         st.error(f"Drive load error: {e}")
         return []
 
-# Initialize drive (cached)
-drive = init_drive()
-
 # ----------------------------- Original helpers (unchanged, cleaned) -----------------------------
-def init_state():
+def init_state(drive_service):
     if "trades" not in st.session_state:
-        if drive:
+        if drive_service:
             try:
-                st.session_state.trades = load_from_drive(drive) or []
+                st.session_state.trades = load_from_drive(drive_service) or []
             except Exception:
                 st.session_state.trades = []
         else:
@@ -298,8 +380,18 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
         rule_violations["iv_rule"] = True
     return rule_violations, abs_delta, spread_value_percent
 
+# ----------------------------- Authenticate & Build Drive service -----------------------------
+ensure_logged_in()
+drive = build_drive_service_from_session()
+
+# show logout button
+logout_col1, logout_col2 = st.columns([9,1])
+with logout_col2:
+    if st.button("Log out"):
+        logout()
+
 # ----------------------------- Initialize session -----------------------------
-init_state()
+init_state(drive)
 
 # ----------------------------- Trade input form -----------------------------
 with st.form("add_trade", clear_on_submit=True):
