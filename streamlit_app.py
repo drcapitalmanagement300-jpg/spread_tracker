@@ -355,7 +355,6 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_price
     # --- Delta >= 0.40 ---
     if delta is not None and abs(delta) >= 0.40:
         violations["other_rules"] = True
-
     # --- Spread value >= 150% ---
     spread_value = compute_spread_value(short_price, long_price, derived["width"], trade["credit"])
     if spread_value is not None and spread_value >= 150:
