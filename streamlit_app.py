@@ -286,4 +286,88 @@ def bsm_delta(option_type, S, K, T, r, sigma):
         return None
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     if option_type.lower() == "call":
-        return norm
+        return norm.cdf(d1)
+    elif option_type.lower() == "put":
+        return norm.cdf(d1) - 1
+    return None
+
+def get_leg_data(ticker: str, expiration: date, strike: float, option_type="put"):
+    _, puts = get_option_chain(ticker, expiration.isoformat())
+    if puts is None or puts.empty:
+        return None, None
+    row = puts[puts["strike"] == strike]
+    if row.empty:
+        return None, None
+    price = row["lastPrice"].values[0] if "lastPrice" in row.columns else None
+    iv = row["impliedVolatility"].values[0] * 100 if "impliedVolatility" in row.columns else None
+    return price, iv
+
+def get_short_leg_data(trade: dict):
+    short_price, iv = get_leg_data(
+        trade["ticker"],
+        trade["expiration"],
+        float(trade["short_strike"]),
+        "put"
+    )
+    current_price = get_price(trade["ticker"])
+    delta = None
+    if current_price and iv:
+        T = days_to_expiry(trade["expiration"]) / 365
+        sigma = iv / 100
+        r = 0.05
+        delta = bsm_delta("put", current_price, float(trade["short_strike"]), T, r, sigma)
+    return delta, iv, short_price
+
+def get_long_leg_data(trade: dict):
+    long_price, _ = get_leg_data(
+        trade["ticker"],
+        trade["expiration"],
+        float(trade["long_strike"]),
+        "put"
+    )
+    return long_price
+
+def compute_spread_value(short_price, long_price, width, credit):
+    if short_price is None or long_price is None or width - credit <= 0:
+        return None
+    spread_mark = short_price - long_price
+    return (spread_mark / (width - credit)) * 100
+
+def compute_current_profit(short_price, long_price, credit, width):
+    if short_price is None or long_price is None or credit <= 0:
+        return None
+    spread_value = short_price - long_price
+    current_profit = credit - spread_value
+    return max(0, min((current_profit / credit) * 100, 100))
+
+def fetch_short_iv(ticker, short_strike, expiration):
+    _, puts = get_option_chain(ticker, expiration.isoformat())
+    if puts is None or puts.empty:
+        return None
+    row = puts[puts["strike"] == short_strike]
+    if row.empty or "impliedVolatility" not in row.columns:
+        return None
+    return row["impliedVolatility"].values[0] * 100
+
+def evaluate_rules(trade, derived, current_price, delta, current_iv, short_price, long_price):
+    violations = {"other_rules": False, "iv_rule": False}
+
+    # --- Delta >= 0.40 ---
+    if delta is not None and abs(delta) >= 0.40:
+        violations["other_rules"] = True
+
+    # --- Spread value >= 150% ---
+    spread_value = compute_spread_value(short_price, long_price, derived["width"], trade["credit"])
+    if spread_value is not None and spread_value >= 150:
+        violations["other_rules"] = True
+
+    # --- < 7 DTE ---
+    if derived["dte"] <= 7:
+        violations["other_rules"] = True
+
+    # --- IV surge rule ---
+    entry_iv = trade.get("entry_iv")
+    if entry_iv and current_iv and current_iv > entry_iv * 1.25:
+        violations["iv_rule"] = True
+
+    return violations
