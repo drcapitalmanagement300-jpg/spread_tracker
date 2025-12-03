@@ -1,166 +1,586 @@
+# app.py
 import streamlit as st
-from datetime import datetime
+from datetime import date, datetime
 import json
 import io
-from google.oauth2.credentials import Credentials
+from typing import List, Dict, Any, Optional
+
+import numpy as np
+from scipy.stats import norm
+import yfinance as yf
+import pandas as pd
+import altair as alt
+
+# Google OAuth / Drive
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials as OAuthCredentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
-st.set_page_config(page_title="Credit Spread Monitor", layout="wide")
-st.title("Options Spread Monitor")
+st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
+st.title("Put Credit Spread Monitor")
 
-# ==========================================
-# 1. OAuth Login (Streamlit built-in)
-# ==========================================
+# ----------------------------- Config -----------------------------
+DRIVE_FILE_NAME = "credit_spreads.json"
+DRIVE_SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
+]
 
-with st.sidebar:
-    st.subheader("Google Login")
-    login_info = st.login("google", use_cookie=True)
+# ----------------------------- OAuth helpers -----------------------------
+def _get_redirect_uri() -> Optional[str]:
+    try:
+        return st.secrets["google_oauth"]["redirect_uri"]
+    except Exception:
+        return None
 
-if not login_info.authenticated:
-    st.warning("Please sign in with Google to load/save your spread data.")
-    st.stop()
+def _get_oauth_config():
+    """Return client_id/client_secret/redirect from secrets or raise."""
+    if "google_oauth" not in st.secrets:
+        st.error("Missing google_oauth in Streamlit secrets. Add client_id, client_secret and redirect_uri.")
+        st.stop()
+    cfg = st.secrets["google_oauth"]
+    for k in ("client_id", "client_secret", "redirect_uri"):
+        if k not in cfg:
+            st.error(f"google_oauth secret missing key: {k}")
+            st.stop()
+    return cfg
 
-creds = Credentials(
-    token=login_info.token["access_token"],
-    refresh_token=login_info.token.get("refresh_token"),
-    token_uri="https://oauth2.googleapis.com/token",
-    client_id=login_info.client_info["client_id"],
-    client_secret=login_info.client_info["client_secret"]
-)
+def get_flow() -> Flow:
+    cfg = _get_oauth_config()
+    client_id = cfg["client_id"]
+    client_secret = cfg["client_secret"]
+    redirect_uri = cfg["redirect_uri"]
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [redirect_uri],
+            }
+        },
+        scopes=DRIVE_SCOPES,
+    )
+    flow.redirect_uri = redirect_uri
+    return flow
 
-drive_service = build("drive", "v3", credentials=creds)
+def exchange_code_for_credentials(code: str) -> Optional[Dict[str, Any]]:
+    """Exchange code for tokens and return serializable credential dict (or None)."""
+    try:
+        flow = get_flow()
+        # fetch_token accepts code
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        cred_dict = {
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "scopes": list(creds.scopes) if creds.scopes else DRIVE_SCOPES,
+        }
+        return cred_dict
+    except Exception as e:
+        st.error(f"OAuth token exchange failed: {e}")
+        return None
 
-# ==========================================
-# 2. Google Drive Helpers
-# ==========================================
+def ensure_logged_in():
+    """Ensure we have credentials in session; if not, show sign-in link and stop."""
+    if "credentials" not in st.session_state:
+        st.session_state["credentials"] = None
 
-FOLDER_NAME = "spread-monitor-data"
-FILE_NAME = "spreads.json"
+    # If Google returned code (we're on redirect uri path), try exchange
+    q = st.experimental_get_query_params()
+    if "code" in q and not st.session_state["credentials"]:
+        code = q.get("code")
+        if isinstance(code, list):
+            code = code[0]
+        cred_dict = exchange_code_for_credentials(code)
+        if cred_dict:
+            st.session_state["credentials"] = cred_dict
+            # remove code param for cleanliness
+            try:
+                st.experimental_set_query_params()
+            except Exception:
+                pass
+            st.experimental_rerun() if hasattr(st, "experimental_rerun") else None
+        else:
+            st.stop()
 
-def get_or_create_folder():
-    """Find or create the Drive folder that stores the JSON."""
-    query = f"name='{FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder'"
-    results = drive_service.files().list(q=query, fields="files(id)").execute()
-    files = results.get("files", [])
+    if not st.session_state.get("credentials"):
+        flow = get_flow()
+        auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline", include_granted_scopes="true")
+        st.markdown("### Sign in with Google to enable Drive persistence")
+        st.markdown(f"[Click here to sign in with Google]({auth_url})")
+        st.info("After signing in you'll be redirected back to the app. You must allow Drive access.")
+        st.stop()
 
-    if files:
-        return files[0]["id"]
+def build_drive_service_from_session() -> Optional[object]:
+    cred_dict = st.session_state.get("credentials")
+    if not cred_dict:
+        return None
+    try:
+        creds = OAuthCredentials(
+            token=cred_dict.get("token"),
+            refresh_token=cred_dict.get("refresh_token"),
+            token_uri=cred_dict.get("token_uri"),
+            client_id=cred_dict.get("client_id"),
+            client_secret=cred_dict.get("client_secret"),
+            scopes=cred_dict.get("scopes"),
+        )
+        # refresh if expired
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                # persist refreshed token back to session
+                st.session_state["credentials"]["token"] = creds.token
+            except Exception:
+                pass
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return service
+    except Exception as e:
+        st.error(f"Failed to build Drive service: {e}")
+        return None
 
-    file_metadata = {
-        "name": FOLDER_NAME,
-        "mimeType": "application/vnd.google-apps.folder"
-    }
-    created = drive_service.files().create(body=file_metadata, fields="id").execute()
-    return created["id"]
+def logout():
+    st.session_state.pop("credentials", None)
+    st.success("Logged out. Reload the page to sign in again.")
+    # attempt a rerun to re-evaluate UI
+    try:
+        st.experimental_rerun()
+    except Exception:
+        pass
 
+# ----------------------------- Drive helpers -----------------------------
+def _get_folder_id() -> Optional[str]:
+    try:
+        return st.secrets.get("DRIVE_FOLDER_ID", None)
+    except Exception:
+        return None
 
-def get_file_id(folder_id):
-    """Find the JSON file inside the folder."""
-    query = f"'{folder_id}' in parents and name='{FILE_NAME}'"
-    results = drive_service.files().list(q=query, fields="files(id)").execute()
-    files = results.get("files", [])
-    return files[0]["id"] if files else None
+def _find_file_id(service, filename: str) -> Optional[str]:
+    if service is None:
+        return None
+    try:
+        folder_id = _get_folder_id()
+        safe_name = filename.replace("'", "\\'")
+        if folder_id:
+            q = f"'{folder_id}' in parents and name = '{safe_name}' and trashed = false"
+        else:
+            q = f"name = '{safe_name}' and trashed = false"
+        resp = service.files().list(q=q, spaces="drive", fields="files(id,name)").execute()
+        files = resp.get("files", [])
+        return files[0]["id"] if files else None
+    except Exception as e:
+        st.error(f"Drive find file error: {e}")
+        return None
 
+def _download_file(service, file_id: str) -> Optional[str]:
+    try:
+        request = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        fh.seek(0)
+        return fh.read().decode("utf-8")
+    except Exception as e:
+        st.error(f"Drive download error: {e}")
+        return None
 
-def load_json_from_drive():
-    """Download JSON from Drive or return empty list."""
-    folder_id = get_or_create_folder()
-    file_id = get_file_id(folder_id)
+def _upload_file(service, filename: str, content_str: str) -> bool:
+    try:
+        folder_id = _get_folder_id()
+        file_id = _find_file_id(service, filename)
+        fh = io.BytesIO(content_str.encode("utf-8"))
+        media = MediaIoBaseUpload(fh, mimetype="application/json", resumable=False)
 
-    if not file_id:
+        if file_id:
+            service.files().update(fileId=file_id, media_body=media).execute()
+        else:
+            body = {"name": filename}
+            if folder_id:
+                body["parents"] = [folder_id]
+            service.files().create(body=body, media_body=media).execute()
+        return True
+    except Exception as e:
+        st.error(f"Drive upload error: {e}")
+        return False
+
+def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
+    if service is None:
+        st.warning("Drive service not available; cannot save.")
+        return False
+    serializable = []
+    for t in trades:
+        ct = {}
+        for k, v in t.items():
+            if isinstance(v, (date, datetime)):
+                ct[k] = v.isoformat()
+            else:
+                ct[k] = v
+        serializable.append(ct)
+    return _upload_file(service, DRIVE_FILE_NAME, json.dumps(serializable, indent=2))
+
+def load_from_drive(service) -> List[Dict[str, Any]]:
+    if service is None:
+        return []
+    try:
+        file_id = _find_file_id(service, DRIVE_FILE_NAME)
+        if not file_id:
+            return []
+        raw = _download_file(service, file_id)
+        if not raw:
+            return []
+        loaded = json.loads(raw)
+        out = []
+        for t in loaded:
+            nt = {}
+            for k, v in t.items():
+                if isinstance(v, str) and k in ("expiration", "entry_date", "created_at"):
+                    try:
+                        parsed = datetime.fromisoformat(v)
+                        if k == "created_at":
+                            nt[k] = v
+                        else:
+                            nt[k] = parsed.date()
+                    except Exception:
+                        nt[k] = v
+                else:
+                    nt[k] = v
+            out.append(nt)
+        return out
+    except Exception as e:
+        st.error(f"Drive load error: {e}")
         return []
 
-    request = drive_service.files().get_media(fileId=file_id)
-    file_stream = io.BytesIO()
-    downloader = MediaIoBaseDownload(file_stream, request)
+# ----------------------------- App core (UI & logic) -----------------------------
+# Ensure the user is logged-in via OAuth
+ensure_logged_in()
+drive = build_drive_service_from_session()
 
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
+# small logout button
+_, logout_col = st.columns([9,1])
+with logout_col:
+    if st.button("Log out"):
+        logout()
 
-    file_stream.seek(0)
-    return json.loads(file_stream.read().decode("utf-8"))
+# ------------------- Helpers (same as your original app) -------------------
+def init_state():
+    if "trades" not in st.session_state:
+        if drive:
+            try:
+                st.session_state.trades = load_from_drive(drive) or []
+            except Exception:
+                st.session_state.trades = []
+        else:
+            st.session_state.trades = []
 
+def days_to_expiry(expiry_date: date) -> int:
+    return max((expiry_date - date.today()).days, 0)
 
-def save_json_to_drive(data):
-    """Upload JSON to Drive (create if needed)."""
-    folder_id = get_or_create_folder()
-    file_id = get_file_id(folder_id)
-
-    json_bytes = json.dumps(data, indent=2).encode("utf-8")
-    media = MediaIoBaseUpload(io.BytesIO(json_bytes), mimetype="application/json")
-
-    metadata = {"name": FILE_NAME, "parents": [folder_id]}
-
-    if file_id:
-        drive_service.files().update(
-            fileId=file_id,
-            body=metadata,
-            media_body=media
-        ).execute()
-    else:
-        drive_service.files().create(
-            body=metadata,
-            media_body=media,
-            fields="id"
-        ).execute()
-
-# ==========================================
-# 3. Load Data
-# ==========================================
-
-if "spreads" not in st.session_state:
-    try:
-        st.session_state.spreads = load_json_from_drive()
-        st.success("Loaded saved data from Drive.")
-    except Exception as e:
-        st.error(f"Failed to load data: {e}")
-        st.session_state.spreads = []
-
-spreads = st.session_state.spreads
-
-# ==========================================
-# 4. UI — Add new spread
-# ==========================================
-
-st.subheader("Add New Spread")
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    ticker = st.text_input("Ticker").upper()
-
-with col2:
-    entry_date = st.date_input("Entry Date", datetime.now())
-
-with col3:
-    credit = st.number_input("Credit Received", min_value=0.0, format="%.2f")
-
-if st.button("Add Spread"):
-    new_item = {
-        "ticker": ticker,
-        "entry_date": str(entry_date),
-        "credit": credit,
-        "created": datetime.now().isoformat()
+def compute_derived(trade: dict) -> dict:
+    short = float(trade["short_strike"])
+    long = float(trade["long_strike"])
+    credit = float(trade.get("credit", 0) or 0)
+    width = abs(long - short)
+    max_gain = credit
+    max_loss = max(width - credit, 0)
+    breakeven = short + credit
+    dte = days_to_expiry(trade["expiration"])
+    return {
+        "width": width,
+        "max_gain": max_gain,
+        "max_loss": max_loss,
+        "breakeven": breakeven,
+        "dte": dte
     }
-    spreads.append(new_item)
-    save_json_to_drive(spreads)
-    st.success("Spread added & saved to Drive.")
 
-# ==========================================
-# 5. Display Table
-# ==========================================
+def format_money(x):
+    try:
+        return f"${float(x):.2f}"
+    except Exception:
+        return "-"
 
-st.subheader("Current Spreads")
-if spreads:
-    st.table(spreads)
+@st.cache_data(ttl=60)
+def get_price(ticker: str):
+    try:
+        data = yf.Ticker(ticker).fast_info
+        return float(data["last_price"])
+    except Exception:
+        return None
+
+@st.cache_data(ttl=60)
+def get_option_chain(ticker: str, expiration: str):
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        opt_chain = ticker_obj.option_chain(expiration)
+        return opt_chain.calls, opt_chain.puts
+    except Exception:
+        return None, None
+
+def bsm_delta(option_type, S, K, T, r, sigma):
+    if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
+        return None
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    if option_type.lower() == 'call':
+        return norm.cdf(d1)
+    elif option_type.lower() == 'put':
+        return norm.cdf(d1) - 1
+    else:
+        return None
+
+def get_leg_data(ticker: str, expiration: date, strike: float, option_type='put'):
+    _, puts = get_option_chain(ticker, expiration.isoformat())
+    if puts is None or puts.empty:
+        return None, None
+    leg_row = puts[puts['strike'] == strike]
+    if leg_row.empty:
+        return None, None
+    price = leg_row['lastPrice'].values[0] if 'lastPrice' in leg_row.columns else None
+    iv = leg_row['impliedVolatility'].values[0] * 100 if 'impliedVolatility' in leg_row.columns else None
+    return price, iv
+
+def get_short_leg_data(trade: dict):
+    short_price, iv = get_leg_data(trade["ticker"], trade["expiration"], float(trade["short_strike"]), 'put')
+    current_price = get_price(trade['ticker'])
+    delta = None
+    if current_price and iv:
+        T = days_to_expiry(trade["expiration"]) / 365
+        sigma = iv / 100
+        r = 0.05
+        delta = bsm_delta('put', current_price, float(trade["short_strike"]), T, r, sigma)
+    return delta, iv, short_price
+
+def get_long_leg_data(trade: dict):
+    long_price, _ = get_leg_data(trade["ticker"], trade["expiration"], float(trade["long_strike"]), 'put')
+    return long_price
+
+def compute_spread_value(short_option_price, long_option_price, width, credit):
+    if short_option_price is None or long_option_price is None or width - credit <= 0:
+        return None
+    spread_mark = short_option_price - long_option_price
+    max_loss = width - credit
+    return (spread_mark / max_loss) * 100
+
+def compute_current_profit(short_price, long_price, credit, width):
+    if short_price is None or long_price is None or credit <= 0:
+        return None
+    spread_value = short_price - long_price
+    current_profit = credit - spread_value
+    return max(0, min((current_profit / credit) * 100, 100))
+
+def fetch_short_iv(ticker, short_strike, expiration):
+    _, puts = get_option_chain(ticker, expiration.isoformat())
+    if puts is None or puts.empty:
+        return None
+    short_row = puts[puts['strike'] == short_strike]
+    if short_row.empty or 'impliedVolatility' not in short_row.columns:
+        return None
+    iv = short_row['impliedVolatility'].values[0] * 100
+    return iv
+
+def evaluate_rules(trade, derived, current_price, delta, current_iv, short_option_price, long_option_price):
+    rule_violations = {"other_rules": False, "iv_rule": False}
+    abs_delta = abs(delta) if delta is not None else None
+    if abs_delta is not None and abs_delta >= 0.40:
+        rule_violations["other_rules"] = True
+    spread_value_percent = compute_spread_value(short_option_price, long_option_price, derived["width"], trade["credit"])
+    if spread_value_percent is not None and spread_value_percent >= 150:
+        rule_violations["other_rules"] = True
+    if derived["dte"] <= 7:
+        rule_violations["other_rules"] = True
+    entry_iv = trade.get("entry_iv")
+    if entry_iv and current_iv and current_iv > entry_iv:
+        rule_violations["iv_rule"] = True
+    return rule_violations, abs_delta, spread_value_percent
+
+# ----------------------------- Initialize session & UI -----------------------------
+init_state()
+
+with st.form("add_trade", clear_on_submit=True):
+    st.subheader("Add new put credit spread")
+    col1, col2, col3 = st.columns([2,2,2])
+    with col1:
+        ticker = st.text_input("Ticker (e.g. AAPL)").upper()
+        short_strike = st.number_input("Short strike", min_value=0.0, format="%.2f")
+        long_strike = st.number_input("Long strike", min_value=0.0, format="%.2f")
+    with col2:
+        expiration = st.date_input("Expiration date", value=date.today())
+        credit = st.number_input("Credit received (per share)", min_value=0.0, format="%.2f")
+    with col3:
+        entry_date = st.date_input("Entry date", value=date.today())
+        notes = st.text_input("Notes (optional)")
+        st.write("")
+    submitted = st.form_submit_button("Add trade for monitoring")
+    if submitted:
+        if not ticker:
+            st.warning("Please provide a ticker symbol.")
+        elif long_strike >= short_strike:
+            st.warning("For a put credit spread, long strike should be LOWER than short strike.")
+        else:
+            auto_iv = fetch_short_iv(ticker, short_strike, expiration)
+            trade = {
+                "id": f"{ticker}-{short_strike}-{long_strike}-{expiration.isoformat()}",
+                "ticker": ticker,
+                "short_strike": short_strike,
+                "long_strike": long_strike,
+                "expiration": expiration,
+                "credit": credit,
+                "entry_date": entry_date,
+                "entry_iv": auto_iv,
+                "notes": notes,
+                "created_at": datetime.utcnow().isoformat()
+            }
+            st.session_state.trades.append(trade)
+            if drive:
+                ok = save_to_drive(drive, st.session_state.trades)
+                if ok:
+                    st.success(f"Added {ticker} — saved to Drive. Entry IV: {auto_iv if auto_iv else 'N/A'}")
+                else:
+                    st.warning(f"Added {ticker} locally, but failed to save to Drive.")
+            else:
+                st.success(f"Added {ticker} locally. (Drive not configured)")
+
+st.markdown("---")
+
+st.subheader("Active Trades")
+if not st.session_state.trades:
+    st.info("No trades added yet. Use the form above to add your first spread.")
 else:
-    st.info("No spreads yet. Add one above.")
+    for i, t in enumerate(st.session_state.trades):
+        derived = compute_derived(t)
+        current_price = get_price(t['ticker'])
+        delta, current_iv, short_option_price = get_short_leg_data(t)
+        long_option_price = get_long_leg_data(t)
+        current_profit_percent = compute_current_profit(short_option_price, long_option_price, t["credit"], derived["width"])
+        rule_violations, abs_delta, spread_value_percent = evaluate_rules(
+            t, derived, current_price, delta, current_iv, short_option_price, long_option_price
+        )
 
-# ==========================================
-# 6. Save Button
-# ==========================================
+        abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
+        spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else "-"
+        current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else "-"
+        current_price_str = f"{current_price:.2f}" if current_price is not None else "-"
 
-if st.button("Force Save to Drive"):
-    save_json_to_drive(spreads)
-    st.success("Saved to Drive.")
+        if rule_violations["other_rules"]:
+            status_icon = "❌"
+            status_text = "Some critical rules are violated."
+        elif rule_violations["iv_rule"]:
+            status_icon = "⚠️"
+            status_text = "Current IV exceeds entry IV."
+        else:
+            status_icon = "✅"
+            status_text = "All rules are satisfied."
+
+        card_cols = st.columns([3,3])
+        with card_cols[0]:
+            st.markdown(
+                f\"\"\"
+<div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px; height:100%'>
+Ticker: {t['ticker']}  <br>
+Underlying Price: {current_price_str}  <br>
+Short Strike: {t['short_strike']}  <br>
+Long Strike: {t['long_strike']}  <br>
+Spread Width: {derived['width']}  <br>
+Expiration Date: {t['expiration']}  <br>
+Current DTE: {derived['dte']}  <br>
+Max Gain: {format_money(derived['max_gain'])}  <br>
+Max Loss: {format_money(derived['max_loss'])}  
+</div>
+\"\"\", unsafe_allow_html=True)
+
+            st.markdown(f\"<div style='margin-top:10px; font-size:20px'>{status_icon} {status_text}</div>\", unsafe_allow_html=True)
+
+        with card_cols[1]:
+            delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
+            spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
+            dte_color = "red" if derived['dte'] <= 7 else "green"
+
+            if current_profit_percent is None:
+                profit_color = "black"
+            elif current_profit_percent < 50:
+                profit_color = "green"
+            elif 50 <= current_profit_percent <= 75:
+                profit_color = "yellow"
+            else:
+                profit_color = "red"
+
+            if current_iv is None or t["entry_iv"] is None:
+                iv_color = "black"
+            elif current_iv == t["entry_iv"]:
+                iv_color = "yellow"
+            elif current_iv > t["entry_iv"]:
+                iv_color = "red"
+            else:
+                iv_color = "green"
+
+            st.markdown(
+                f\"\"\"
+Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be less than or equal to 0.40 <br>
+Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
+DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 <br>
+Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
+Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
+\"\"\", unsafe_allow_html=True)
+
+            # PnL chart (same as before)
+            dte_range = list(range(derived["dte"] + 1))
+            profit_values = [current_profit_percent if current_profit_percent is not None else 0]*len(dte_range)
+            pnl_df = pd.DataFrame({"DTE": dte_range, "Profit %": profit_values})
+
+            base_chart = alt.Chart(pnl_df).mark_line(point=True).encode(
+                x=alt.X('DTE', title='Days to Expiration', scale=alt.Scale(domain=(derived["dte"], 0))),
+                y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100), nice=False),
+                        axis=alt.Axis(tickMinStep=10, tickCount=11))
+            ).properties(height=250)
+
+            line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(color='yellow', strokeDash=[5,5]).encode(y='y')
+            line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(color='red', strokeDash=[5,5]).encode(y='y')
+            vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(color='blue', strokeDash=[5,5]).encode(x='DTE')
+
+            final_chart = base_chart + line_50 + line_75 + vline
+            st.altair_chart(final_chart, use_container_width=True)
+
+        if st.button("Remove", key=f"remove_{i}"):
+            st.session_state.trades.pop(i)
+            if drive:
+                ok = save_to_drive(drive, st.session_state.trades)
+                if ok:
+                    st.success("Saved updated trades to Drive.")
+                else:
+                    st.warning("Removed locally but failed to save to Drive.")
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
+
+st.markdown("---")
+
+# Manual Save/Load
+if drive:
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("💾 Save all trades to Google Drive now"):
+            if save_to_drive(drive, st.session_state.trades):
+                st.success("Saved to Drive successfully.")
+            else:
+                st.error("Failed to save to Drive. Check logs.")
+    with colB:
+        if st.button("📥 Reload trades from Google Drive"):
+            loaded = load_from_drive(drive)
+            if loaded:
+                st.session_state.trades = loaded
+                st.success("Loaded trades from Drive.")
+                try:
+                    st.experimental_rerun()
+                except Exception:
+                    pass
+            else:
+                st.info("No trades found on Drive (or load failed).")
+
+st.caption("Spread value uses actual option prices — alerts accurate, delta BSM-based, entry IV auto-captured.")
