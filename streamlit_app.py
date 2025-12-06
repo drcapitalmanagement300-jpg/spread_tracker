@@ -1,27 +1,3 @@
-# debug_startup.py (paste these lines at the very top of streamlit_app.py temporarily)
-import os, sys, traceback
-import streamlit as st
-
-st.write("=== startup debug ===")
-st.write("cwd:", os.getcwd())
-st.write("python sys.path (first 8 entries):", sys.path[:8])
-try:
-    st.write("repo files:", sorted(os.listdir(".")))
-except Exception as e:
-    st.write("os.listdir('.') failed:", e)
-
-# try importing persistence and capture exception details
-try:
-    import persistence as _p  # keep as a raw import to show better errors
-    st.write("Imported persistence module:", getattr(_p, "__file__", "<built-in>"))
-except Exception as e:
-    st.error("Failed to import persistence module.")
-    st.write("Exception type:", type(e).__name__)
-    st.write("Exception message:", str(e))
-    st.text(traceback.format_exc())
-    st.stop()
-# end debug startup
-
 # app.py (patched to use persistence.py)
 import streamlit as st
 from datetime import date, datetime
