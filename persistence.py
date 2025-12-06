@@ -217,4 +217,33 @@ def load_from_drive(service) -> List[Dict[str, Any]]:
     if not file_id:
         return []
 
-    raw = _download_file(service, file_i_
+    raw = _download_file(service, file_id)
+    if not raw:
+        return []
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+
+    # Deserialize date fields
+    parsed = []
+    for t in data:
+        ct = {}
+        for k, v in t.items():
+            if isinstance(v, str):
+                # Try parsing ISO dates
+                try:
+                    if len(v) == 10:  # YYYY-MM-DD
+                        ct[k] = date.fromisoformat(v)
+                    elif "T" in v:  # datetime
+                        ct[k] = datetime.fromisoformat(v)
+                    else:
+                        ct[k] = v
+                except Exception:
+                    ct[k] = v
+            else:
+                ct[k] = v
+        parsed.append(ct)
+
+    return parsed
