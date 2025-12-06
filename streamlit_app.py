@@ -399,4 +399,4 @@ with colB:
         else:
             st.info("No trades found on Drive (or load failed).")
 
-st.caption("Spread value uses actual option prices — alerts
+st.caption("Spread value uses actual option prices — alerts accurate, delta BSM-based, entry IV auto-captured.")
