@@ -512,8 +512,8 @@ Max Loss: {format_money(derived['max_loss'])}
             except Exception:
                 current_iv30_rank = None
 
-            entry_rank_display = f\"{entry_iv30_rank:.1f}%\" if isinstance(entry_iv30_rank, (int, float)) else (str(entry_iv30_rank) or "N/A")
-            current_rank_display = f\"{current_iv30_rank:.1f}%\" if isinstance(current_iv30_rank, (int, float)) else (str(current_iv30_rank) or "N/A")
+            entry_rank_display = f"{entry_iv30_rank:.1f}%" if isinstance(entry_iv30_rank, (int, float)) else (str(entry_iv30_rank) or "N/A")
+            current_rank_display = f"{current_iv30_rank:.1f}%" if isinstance(current_iv30_rank, (int, float)) else (str(current_iv30_rank) or "N/A")
 
             # Avoid formatting errors if entry_iv/current_iv is None
             entry_iv_display = f"{t.get('entry_iv'):.1f}%" if isinstance(t.get("entry_iv"), (int, float)) else (str(t.get("entry_iv")) or "N/A")
