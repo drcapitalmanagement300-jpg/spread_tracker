@@ -1,4 +1,4 @@
-# app.py
+# app.py (patched to use persistence.py)
 import streamlit as st
 from datetime import date, datetime
 import json
@@ -11,274 +11,63 @@ import yfinance as yf
 import pandas as pd
 import altair as alt
 
-# Google OAuth / Drive
-from google_auth_oauthlib.flow import Flow
-from google.oauth2.credentials import Credentials as OAuthCredentials
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+# Persistence (Google OAuth + Drive) — provided in persistence.py
+from persistence import (
+    ensure_logged_in,
+    build_drive_service_from_session,
+    save_to_drive,
+    load_from_drive,
+    logout,
+)
 
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
-# ----------------------------- Config -----------------------------
-DRIVE_FILE_NAME = "credit_spreads.json"
-DRIVE_SCOPES = [
-    "https://www.googleapis.com/auth/drive.file",
-    "https://www.googleapis.com/auth/drive",
-]
-
-# ----------------------------- OAuth helpers -----------------------------
-def _get_redirect_uri() -> Optional[str]:
-    try:
-        return st.secrets["google_oauth"]["redirect_uri"]
-    except Exception:
-        return None
-
-def _get_oauth_config():
-    """Return client_id/client_secret/redirect from secrets or raise."""
-    if "google_oauth" not in st.secrets:
-        st.error("Missing google_oauth in Streamlit secrets. Add client_id, client_secret and redirect_uri.")
-        st.stop()
-    cfg = st.secrets["google_oauth"]
-    for k in ("client_id", "client_secret", "redirect_uri"):
-        if k not in cfg:
-            st.error(f"google_oauth secret missing key: {k}")
-            st.stop()
-    return cfg
-
-def get_flow() -> Flow:
-    cfg = _get_oauth_config()
-    client_id = cfg["client_id"]
-    client_secret = cfg["client_secret"]
-    redirect_uri = cfg["redirect_uri"]
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [redirect_uri],
-            }
-        },
-        scopes=DRIVE_SCOPES,
-    )
-    flow.redirect_uri = redirect_uri
-    return flow
-
-def exchange_code_for_credentials(code: str) -> Optional[Dict[str, Any]]:
-    """Exchange code for tokens and return serializable credential dict (or None)."""
-    try:
-        flow = get_flow()
-        # fetch_token accepts code
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-        cred_dict = {
-            "token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-            "client_secret": creds.client_secret,
-            "scopes": list(creds.scopes) if creds.scopes else DRIVE_SCOPES,
-        }
-        return cred_dict
-    except Exception as e:
-        st.error(f"OAuth token exchange failed: {e}")
-        return None
-
-def ensure_logged_in():
-    """Ensure we have credentials in session; if not, show sign-in link and stop."""
-    if "credentials" not in st.session_state:
-        st.session_state["credentials"] = None
-
-    # If Google returned code (we're on redirect uri path), try exchange
-    q = st.experimental_get_query_params()
-    if "code" in q and not st.session_state["credentials"]:
-        code = q.get("code")
-        if isinstance(code, list):
-            code = code[0]
-        cred_dict = exchange_code_for_credentials(code)
-        if cred_dict:
-            st.session_state["credentials"] = cred_dict
-            # remove code param for cleanliness
-            try:
-                st.experimental_set_query_params()
-            except Exception:
-                pass
-            st.experimental_rerun() if hasattr(st, "experimental_rerun") else None
-        else:
-            st.stop()
-
-    if not st.session_state.get("credentials"):
-        flow = get_flow()
-        auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline", include_granted_scopes="true")
-        st.markdown("### Sign in with Google to enable Drive persistence")
-        st.markdown(f"[Click here to sign in with Google]({auth_url})")
-        st.info("After signing in you'll be redirected back to the app. You must allow Drive access.")
-        st.stop()
-
-def build_drive_service_from_session() -> Optional[object]:
-    cred_dict = st.session_state.get("credentials")
-    if not cred_dict:
-        return None
-    try:
-        creds = OAuthCredentials(
-            token=cred_dict.get("token"),
-            refresh_token=cred_dict.get("refresh_token"),
-            token_uri=cred_dict.get("token_uri"),
-            client_id=cred_dict.get("client_id"),
-            client_secret=cred_dict.get("client_secret"),
-            scopes=cred_dict.get("scopes"),
-        )
-        # refresh if expired
-        if creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-                # persist refreshed token back to session
-                st.session_state["credentials"]["token"] = creds.token
-            except Exception:
-                pass
-        service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        return service
-    except Exception as e:
-        st.error(f"Failed to build Drive service: {e}")
-        return None
-
-def logout():
-    st.session_state.pop("credentials", None)
-    st.success("Logged out. Reload the page to sign in again.")
-    # attempt a rerun to re-evaluate UI
-    try:
-        st.experimental_rerun()
-    except Exception:
-        pass
-
-# ----------------------------- Drive helpers -----------------------------
-def _get_folder_id() -> Optional[str]:
-    try:
-        return st.secrets.get("DRIVE_FOLDER_ID", None)
-    except Exception:
-        return None
-
-def _find_file_id(service, filename: str) -> Optional[str]:
-    if service is None:
-        return None
-    try:
-        folder_id = _get_folder_id()
-        safe_name = filename.replace("'", "\\'")
-        if folder_id:
-            q = f"'{folder_id}' in parents and name = '{safe_name}' and trashed = false"
-        else:
-            q = f"name = '{safe_name}' and trashed = false"
-        resp = service.files().list(q=q, spaces="drive", fields="files(id,name)").execute()
-        files = resp.get("files", [])
-        return files[0]["id"] if files else None
-    except Exception as e:
-        st.error(f"Drive find file error: {e}")
-        return None
-
-def _download_file(service, file_id: str) -> Optional[str]:
-    try:
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        fh.seek(0)
-        return fh.read().decode("utf-8")
-    except Exception as e:
-        st.error(f"Drive download error: {e}")
-        return None
-
-def _upload_file(service, filename: str, content_str: str) -> bool:
-    try:
-        folder_id = _get_folder_id()
-        file_id = _find_file_id(service, filename)
-        fh = io.BytesIO(content_str.encode("utf-8"))
-        media = MediaIoBaseUpload(fh, mimetype="application/json", resumable=False)
-
-        if file_id:
-            service.files().update(fileId=file_id, media_body=media).execute()
-        else:
-            body = {"name": filename}
-            if folder_id:
-                body["parents"] = [folder_id]
-            service.files().create(body=body, media_body=media).execute()
-        return True
-    except Exception as e:
-        st.error(f"Drive upload error: {e}")
-        return False
-
-def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
-    if service is None:
-        st.warning("Drive service not available; cannot save.")
-        return False
-    serializable = []
-    for t in trades:
-        ct = {}
-        for k, v in t.items():
-            if isinstance(v, (date, datetime)):
-                ct[k] = v.isoformat()
-            else:
-                ct[k] = v
-        serializable.append(ct)
-    return _upload_file(service, DRIVE_FILE_NAME, json.dumps(serializable, indent=2))
-
-def load_from_drive(service) -> List[Dict[str, Any]]:
-    if service is None:
-        return []
-    try:
-        file_id = _find_file_id(service, DRIVE_FILE_NAME)
-        if not file_id:
-            return []
-        raw = _download_file(service, file_id)
-        if not raw:
-            return []
-        loaded = json.loads(raw)
-        out = []
-        for t in loaded:
-            nt = {}
-            for k, v in t.items():
-                if isinstance(v, str) and k in ("expiration", "entry_date", "created_at"):
-                    try:
-                        parsed = datetime.fromisoformat(v)
-                        if k == "created_at":
-                            nt[k] = v
-                        else:
-                            nt[k] = parsed.date()
-                    except Exception:
-                        nt[k] = v
-                else:
-                    nt[k] = v
-            out.append(nt)
-        return out
-    except Exception as e:
-        st.error(f"Drive load error: {e}")
-        return []
-
 # ----------------------------- App core (UI & logic) -----------------------------
-# Ensure the user is logged-in via OAuth
-ensure_logged_in()
-drive = build_drive_service_from_session()
 
-# small logout button
-_, logout_col = st.columns([9,1])
+# Ensure the user is logged-in via OAuth (this will show sign-in UI and stop the app
+# if the user is not authenticated). We catch exceptions so the app can still run
+# locally if you decide to not sign in.
+try:
+    ensure_logged_in()
+except Exception:
+    # If ensure_logged_in raised (for example, missing secrets), allow the app to continue
+    # but warn the user.
+    st.warning("Google OAuth not available. You can still use the app locally but Drive persistence will be disabled.")
+    # Do not stop; build_drive_service_from_session will likely return None below.
+
+# Build Drive service (may be None if not signed in)
+drive_service = None
+try:
+    drive_service = build_drive_service_from_session()
+except Exception:
+    drive_service = None
+
+# small logout button in header area
+_, logout_col = st.columns([9, 1])
 with logout_col:
     if st.button("Log out"):
-        logout()
+        try:
+            logout()
+        except Exception:
+            # If logout fails for any reason, still clear credentials
+            st.session_state.pop("credentials", None)
+            st.success("Logged out (local). Reload the page to sign in again.")
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
 
 # ------------------- Helpers (same as your original app) -------------------
 def init_state():
     if "trades" not in st.session_state:
-        if drive:
+        loaded = []
+        if drive_service:
             try:
-                st.session_state.trades = load_from_drive(drive) or []
+                loaded = load_from_drive(drive_service) or []
             except Exception:
-                st.session_state.trades = []
-        else:
-            st.session_state.trades = []
+                loaded = []
+        st.session_state.trades = loaded if loaded else []
 
 def days_to_expiry(expiry_date: date) -> int:
     return max((expiry_date - date.today()).days, 0)
@@ -437,14 +226,19 @@ with st.form("add_trade", clear_on_submit=True):
                 "created_at": datetime.utcnow().isoformat()
             }
             st.session_state.trades.append(trade)
-            if drive:
-                ok = save_to_drive(drive, st.session_state.trades)
-                if ok:
-                    st.success(f"Added {ticker} — saved to Drive. Entry IV: {auto_iv if auto_iv else 'N/A'}")
-                else:
-                    st.warning(f"Added {ticker} locally, but failed to save to Drive.")
+
+            # Try to save to Drive; if Drive not configured, show success locally
+            saved_to_drive = False
+            if drive_service:
+                try:
+                    saved_to_drive = save_to_drive(drive_service, st.session_state.trades)
+                except Exception:
+                    saved_to_drive = False
+
+            if saved_to_drive:
+                st.success(f"Added {ticker} — saved to Drive. Entry IV: {auto_iv if auto_iv else 'N/A'}")
             else:
-                st.success(f"Added {ticker} locally. (Drive not configured)")
+                st.success(f"Added {ticker} locally. (Drive not configured or save failed)")
 
 st.markdown("---")
 
@@ -480,7 +274,7 @@ else:
         card_cols = st.columns([3,3])
         with card_cols[0]:
             st.markdown(
-                f\"\"\"
+                f"""
 <div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px; height:100%'>
 Ticker: {t['ticker']}  <br>
 Underlying Price: {current_price_str}  <br>
@@ -492,9 +286,9 @@ Current DTE: {derived['dte']}  <br>
 Max Gain: {format_money(derived['max_gain'])}  <br>
 Max Loss: {format_money(derived['max_loss'])}  
 </div>
-\"\"\", unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-            st.markdown(f\"<div style='margin-top:10px; font-size:20px'>{status_icon} {status_text}</div>\", unsafe_allow_html=True)
+            st.markdown(f"<div style='margin-top:10px; font-size:20px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
 
         with card_cols[1]:
             delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
@@ -519,16 +313,20 @@ Max Loss: {format_money(derived['max_loss'])}
             else:
                 iv_color = "green"
 
+            # Avoid formatting errors if entry_iv/current_iv is None
+            entry_iv_display = f"{t['entry_iv']:.1f}%" if isinstance(t.get("entry_iv"), (int, float)) else (str(t.get("entry_iv")) or "N/A")
+            current_iv_display = f"{current_iv:.1f}%" if isinstance(current_iv, (int, float)) else (str(current_iv) or "N/A")
+
             st.markdown(
-                f\"\"\"
+                f"""
 Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be less than or equal to 0.40 <br>
 Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
 DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 <br>
 Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
-Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{current_iv:.1f}%</span>
-\"\"\", unsafe_allow_html=True)
+Entry IV: {entry_iv_display} | Current IV: <span style='color:{iv_color}'>{current_iv_display}</span>
+""", unsafe_allow_html=True)
 
-            # PnL chart (same as before)
+            # PnL chart
             dte_range = list(range(derived["dte"] + 1))
             profit_values = [current_profit_percent if current_profit_percent is not None else 0]*len(dte_range)
             pnl_df = pd.DataFrame({"DTE": dte_range, "Profit %": profit_values})
@@ -539,21 +337,27 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
                         axis=alt.Axis(tickMinStep=10, tickCount=11))
             ).properties(height=250)
 
-            line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(color='yellow', strokeDash=[5,5]).encode(y='y')
-            line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(color='red', strokeDash=[5,5]).encode(y='y')
-            vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(color='blue', strokeDash=[5,5]).encode(x='DTE')
+            line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(strokeDash=[5,5]).encode(y='y')
+            line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(strokeDash=[5,5]).encode(y='y')
+            vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(strokeDash=[5,5]).encode(x='DTE')
 
             final_chart = base_chart + line_50 + line_75 + vline
             st.altair_chart(final_chart, use_container_width=True)
 
         if st.button("Remove", key=f"remove_{i}"):
             st.session_state.trades.pop(i)
-            if drive:
-                ok = save_to_drive(drive, st.session_state.trades)
-                if ok:
-                    st.success("Saved updated trades to Drive.")
-                else:
-                    st.warning("Removed locally but failed to save to Drive.")
+            # Try saving updated trades to Drive
+            saved = False
+            if drive_service:
+                try:
+                    saved = save_to_drive(drive_service, st.session_state.trades)
+                except Exception:
+                    saved = False
+
+            if saved:
+                st.success("Saved updated trades to Drive.")
+            else:
+                st.warning("Removed locally but failed to save to Drive (or Drive not configured).")
             try:
                 st.experimental_rerun()
             except Exception:
@@ -561,26 +365,37 @@ Entry IV: {t['entry_iv']:.1f}% | Current IV: <span style='color:{iv_color}'>{cur
 
 st.markdown("---")
 
-# Manual Save/Load
-if drive:
-    colA, colB = st.columns(2)
-    with colA:
-        if st.button("💾 Save all trades to Google Drive now"):
-            if save_to_drive(drive, st.session_state.trades):
-                st.success("Saved to Drive successfully.")
-            else:
-                st.error("Failed to save to Drive. Check logs.")
-    with colB:
-        if st.button("📥 Reload trades from Google Drive"):
-            loaded = load_from_drive(drive)
-            if loaded:
-                st.session_state.trades = loaded
-                st.success("Loaded trades from Drive.")
-                try:
-                    st.experimental_rerun()
-                except Exception:
-                    pass
-            else:
-                st.info("No trades found on Drive (or load failed).")
+# Manual Save/Load (uses persistence API)
+colA, colB = st.columns(2)
+with colA:
+    if st.button("💾 Save all trades to Google Drive now"):
+        saved = False
+        if drive_service:
+            try:
+                saved = save_to_drive(drive_service, st.session_state.trades)
+            except Exception:
+                saved = False
+        if saved:
+            st.success("Saved to Drive successfully.")
+        else:
+            st.error("Failed to save to Drive. Check logs or ensure you're signed in.")
+
+with colB:
+    if st.button("📥 Reload trades from Google Drive"):
+        loaded = []
+        if drive_service:
+            try:
+                loaded = load_from_drive(drive_service) or []
+            except Exception:
+                loaded = []
+        if loaded:
+            st.session_state.trades = loaded
+            st.success("Loaded trades from Drive.")
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
+        else:
+            st.info("No trades found on Drive (or load failed).")
 
 st.caption("Spread value uses actual option prices — alerts accurate, delta BSM-based, entry IV auto-captured.")
