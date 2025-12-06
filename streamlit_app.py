@@ -1,4 +1,4 @@
-# app.py (fully patched with IV30 rank display)
+# app.py (patched to auto-fetch IV and show IV ranks in cards)
 import streamlit as st
 from datetime import date, datetime
 import json
@@ -24,21 +24,18 @@ st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
 # ----------------------------- App core (UI & logic) -----------------------------
-
-# Ensure the user is logged-in via OAuth
 try:
     ensure_logged_in()
 except Exception:
-    st.warning("Google OAuth not available. You can still use the app locally but Drive persistence will be disabled.")
+    st.warning("Google OAuth not available. Drive persistence disabled.")
 
-# Build Drive service (may be None if not signed in)
 drive_service = None
 try:
     drive_service = build_drive_service_from_session()
 except Exception:
     drive_service = None
 
-# Logout button
+# small logout button
 _, logout_col = st.columns([9, 1])
 with logout_col:
     if st.button("Log out"):
@@ -46,7 +43,7 @@ with logout_col:
             logout()
         except Exception:
             st.session_state.pop("credentials", None)
-            st.success("Logged out (local). Reload the page to sign in again.")
+            st.success("Logged out (local). Reload page to sign in again.")
             try:
                 st.experimental_rerun()
             except Exception:
@@ -75,7 +72,13 @@ def compute_derived(trade: dict) -> dict:
     max_loss = max(width - credit, 0)
     breakeven = short + credit
     dte = days_to_expiry(trade["expiration"])
-    return {"width": width, "max_gain": max_gain, "max_loss": max_loss, "breakeven": breakeven, "dte": dte}
+    return {
+        "width": width,
+        "max_gain": max_gain,
+        "max_loss": max_loss,
+        "breakeven": breakeven,
+        "dte": dte
+    }
 
 def format_money(x):
     try:
@@ -161,20 +164,6 @@ def fetch_short_iv(ticker, short_strike, expiration):
     iv = short_row['impliedVolatility'].values[0] * 100
     return iv
 
-# NEW: Calculate IV30 rank for short strike vs all puts
-def fetch_iv30_rank(ticker, short_strike, expiration):
-    _, puts = get_option_chain(ticker, expiration.isoformat())
-    if puts is None or puts.empty or 'impliedVolatility' not in puts.columns:
-        return None
-    ivs = puts['impliedVolatility'].values * 100
-    strikes = puts['strike'].values
-    short_iv = puts.loc[puts['strike'] == short_strike, 'impliedVolatility'].values
-    if len(short_iv) == 0:
-        return None
-    short_iv_val = short_iv[0] * 100
-    rank = (ivs < short_iv_val).sum() / len(ivs) * 100
-    return rank
-
 def evaluate_rules(trade, derived, current_price, delta, current_iv, short_option_price, long_option_price):
     rule_violations = {"other_rules": False, "iv_rule": False}
     abs_delta = abs(delta) if delta is not None else None
@@ -193,14 +182,13 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
 # ----------------------------- Initialize session & UI -----------------------------
 init_state()
 
-# Add new trade form
 with st.form("add_trade", clear_on_submit=True):
     st.subheader("Add new put credit spread")
     col1, col2, col3 = st.columns([2,2,2])
     with col1:
-        ticker = st.text_input("Ticker (e.g. AAPL)").upper()
-        short_strike = st.number_input("Short strike", min_value=0.0, format="%.2f")
-        long_strike = st.number_input("Long strike", min_value=0.0, format="%.2f")
+        ticker = st.text_input("Ticker (e.g. AAPL)", value="", key="new_ticker").upper()
+        short_strike = st.number_input("Short strike", min_value=0.0, format="%.2f", key="new_short")
+        long_strike = st.number_input("Long strike", min_value=0.0, format="%.2f", key="new_long")
     with col2:
         expiration = st.date_input("Expiration date", value=date.today())
         credit = st.number_input("Credit received (per share)", min_value=0.0, format="%.2f")
@@ -208,6 +196,14 @@ with st.form("add_trade", clear_on_submit=True):
         entry_date = st.date_input("Entry date", value=date.today())
         notes = st.text_input("Notes (optional)")
         st.write("")
+
+    # Auto-fetch short IV for display
+    auto_iv = None
+    if ticker and short_strike > 0:
+        auto_iv = fetch_short_iv(ticker, short_strike, expiration)
+        if auto_iv:
+            st.info(f"Auto-fetched Entry IV: {auto_iv:.1f}%")
+
     submitted = st.form_submit_button("Add trade for monitoring")
     if submitted:
         if not ticker:
@@ -215,8 +211,6 @@ with st.form("add_trade", clear_on_submit=True):
         elif long_strike >= short_strike:
             st.warning("For a put credit spread, long strike should be LOWER than short strike.")
         else:
-            auto_iv = fetch_short_iv(ticker, short_strike, expiration)
-            iv30_rank = fetch_iv30_rank(ticker, short_strike, expiration)
             trade = {
                 "id": f"{ticker}-{short_strike}-{long_strike}-{expiration.isoformat()}",
                 "ticker": ticker,
@@ -226,13 +220,11 @@ with st.form("add_trade", clear_on_submit=True):
                 "credit": credit,
                 "entry_date": entry_date,
                 "entry_iv": auto_iv,
-                "entry_iv30_rank": iv30_rank,
                 "notes": notes,
                 "created_at": datetime.utcnow().isoformat()
             }
             st.session_state.trades.append(trade)
 
-            # Save to Drive if available
             saved_to_drive = False
             if drive_service:
                 try:
@@ -241,14 +233,13 @@ with st.form("add_trade", clear_on_submit=True):
                     saved_to_drive = False
 
             if saved_to_drive:
-                st.success(f"Added {ticker} — saved to Drive. Entry IV: {auto_iv if auto_iv else 'N/A'}, IV30 Rank: {iv30_rank if iv30_rank else 'N/A'}")
+                st.success(f"Added {ticker} — saved to Drive. Entry IV: {auto_iv if auto_iv else 'N/A'}")
             else:
                 st.success(f"Added {ticker} locally. (Drive not configured or save failed)")
 
 st.markdown("---")
-
-# ----------------------------- Active Trades Display -----------------------------
 st.subheader("Active Trades")
+
 if not st.session_state.trades:
     st.info("No trades added yet. Use the form above to add your first spread.")
 else:
@@ -262,14 +253,10 @@ else:
             t, derived, current_price, delta, current_iv, short_option_price, long_option_price
         )
 
-        # Format strings safely
         abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
         spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else "-"
         current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else "-"
         current_price_str = f"{current_price:.2f}" if current_price is not None else "-"
-
-        # IV30 Rank display
-        iv30_rank_display = f"{t.get('entry_iv30_rank'):.1f}%" if isinstance(t.get("entry_iv30_rank"), (int, float)) else (str(t.get("entry_iv30_rank")) or "N/A")
 
         if rule_violations["other_rules"]:
             status_icon = "❌"
@@ -314,27 +301,30 @@ Max Loss: {format_money(derived['max_loss'])}
             else:
                 profit_color = "red"
 
-            if current_iv is None or t.get("entry_iv") is None:
-                iv_color = "black"
-            elif current_iv == t.get("entry_iv"):
-                iv_color = "yellow"
-            elif current_iv > t.get("entry_iv"):
-                iv_color = "red"
+            # IV coloring
+            entry_iv = t.get("entry_iv")
+            current_iv_val = current_iv
+            if entry_iv is None:
+                entry_color = "black"
+            elif current_iv_val is None:
+                entry_color = "black"
+            elif current_iv_val > entry_iv:
+                entry_color = "red"
+            elif current_iv_val == entry_iv:
+                entry_color = "yellow"
             else:
-                iv_color = "green"
+                entry_color = "green"
 
-            # Safe display for IV
-            entry_iv_display = f"{t.get('entry_iv'):.1f}%" if isinstance(t.get("entry_iv"), (int, float)) else (str(t.get("entry_iv")) or "N/A")
-            current_iv_display = f"{current_iv:.1f}%" if isinstance(current_iv, (int, float)) else (str(current_iv) or "N/A")
+            entry_iv_display = f"{entry_iv:.1f}%" if isinstance(entry_iv, (int, float)) else "N/A"
+            current_iv_display = f"{current_iv_val:.1f}%" if isinstance(current_iv_val, (int, float)) else "N/A"
 
             st.markdown(
                 f"""
-Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be ≤ 0.40 <br>
-Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be ≤ 150% of credit <br>
+Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be <= 0.40 <br>
+Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be <= 150% of credit <br>
 DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be > 7 <br>
-Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
-Entry IV: {entry_iv_display} | Current IV: <span style='color:{iv_color}'>{current_iv_display}</span> <br>
-IV30 Rank: {iv30_rank_display}
+Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% target <br>
+Entry IV: <span style='color:{entry_color}'>{entry_iv_display}</span> | Current IV: <span style='color:{entry_color}'>{current_iv_display}</span>
 """, unsafe_allow_html=True)
 
             # PnL chart
@@ -344,14 +334,16 @@ IV30 Rank: {iv30_rank_display}
 
             base_chart = alt.Chart(pnl_df).mark_line(point=True).encode(
                 x=alt.X('DTE', title='Days to Expiration', scale=alt.Scale(domain=(derived["dte"], 0))),
-                y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100)), axis=alt.Axis(tickMinStep=10, tickCount=11))
+                y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100), nice=False),
+                        axis=alt.Axis(tickMinStep=10, tickCount=11))
             ).properties(height=250)
 
             line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(strokeDash=[5,5]).encode(y='y')
             line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(strokeDash=[5,5]).encode(y='y')
             vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(strokeDash=[5,5]).encode(x='DTE')
 
-            st.altair_chart(base_chart + line_50 + line_75 + vline, use_container_width=True)
+            final_chart = base_chart + line_50 + line_75 + vline
+            st.altair_chart(final_chart, use_container_width=True)
 
         if st.button("Remove", key=f"remove_{i}"):
             st.session_state.trades.pop(i)
@@ -364,12 +356,15 @@ IV30 Rank: {iv30_rank_display}
             if saved:
                 st.success("Saved updated trades to Drive.")
             else:
-                st.warning("Removed locally but failed to save to Drive (or Drive not configured).")
-            st.experimental_rerun()
+                st.warning("Removed locally but failed to save to Drive.")
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
 
 st.markdown("---")
 
-# Manual Save/Load (uses persistence API)
+# Manual Save/Load
 colA, colB = st.columns(2)
 with colA:
     if st.button("💾 Save all trades to Google Drive now"):
@@ -395,7 +390,10 @@ with colB:
         if loaded:
             st.session_state.trades = loaded
             st.success("Loaded trades from Drive.")
-            st.experimental_rerun()
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
         else:
             st.info("No trades found on Drive (or load failed).")
 
