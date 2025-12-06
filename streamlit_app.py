@@ -12,7 +12,7 @@ import pandas as pd
 import altair as alt
 
 # Persistence (Google OAuth + Drive) — provided in persistence.py
-from persistence import (
+from persistence.py import (
     ensure_logged_in,
     build_drive_service_from_session,
     save_to_drive,
