@@ -382,8 +382,7 @@ with st.form("add_trade", clear_on_submit=True):
                 st.markdown("<div>IV30 Percent Rank: <strong>N/A</strong> — <em>N/A</em></div>", unsafe_allow_html=True)
             else:
                 st.markdown(
-                    f\"\"\"<div>IV30 Percent Rank: <strong style='color:{iv30_color}'>{iv30_rank:.1f}%</strong>
-&nbsp;&nbsp;<span style='font-weight:600'>({iv30_status})</span></div>\"\"\",
+                    html = f"<div style='color:{iv30_color}'>IV30 Percent Rank: <strong>{iv30_rank:.1f}%</strong></div>",
                     unsafe_allow_html=True
                 )
 
