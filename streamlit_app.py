@@ -1,6 +1,6 @@
-# app.py (patched to use persistence.py)
+# app.py (patched to use persistence.py + IV30 percent rank)
 import streamlit as st
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 import io
 from typing import List, Dict, Any, Optional
@@ -22,6 +22,173 @@ from persistence import (
 
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
+
+# ----------------------------- IV30 Percent Rank helpers -----------------------------
+# Color settings (use same basic green/red as your cards; brighter variants for "hyper" states)
+ELEVATED_COLOR = "green"          # same as card
+HYPER_ELEVATED_COLOR = "#66ff66"  # brighter green
+LOW_COLOR = "red"                 # same as card
+HYPER_LOW_COLOR = "#ff6666"       # brighter red
+
+@st.cache_data(ttl=60 * 30)
+def get_price_simple(ticker: str) -> Optional[float]:
+    """Lightweight price fetch (used by IV computation)."""
+    try:
+        tk = yf.Ticker(ticker)
+        fi = tk.fast_info
+        return float(fi["last_price"])
+    except Exception:
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            if hist is not None and not hist.empty:
+                return float(hist["Close"].iloc[-1])
+        except Exception:
+            pass
+    return None
+
+@st.cache_data(ttl=60 * 30)
+def get_iv30_via_options(ticker: str) -> Optional[float]:
+    """
+    Attempt to compute a 30-day implied volatility by:
+    - Finding the option expiration date closest to 30 days out
+    - Averaging impliedVolatility of ATM-ish calls & puts (within ~2% of spot)
+    Returns IV as a percentage (e.g., 25.3 for 25.3%).
+    """
+    try:
+        tk = yf.Ticker(ticker)
+        opts = tk.options
+        if not opts:
+            return None
+        spot = get_price_simple(ticker)
+        if spot is None:
+            return None
+
+        # find expiration closest to 30 DTE
+        best_exp = None
+        best_diff = None
+        today = date.today()
+        for exp_str in opts:
+            try:
+                exp_date = datetime.fromisoformat(exp_str).date()
+            except Exception:
+                # some expirations may be in different format; try parsing
+                try:
+                    exp_date = pd.to_datetime(exp_str).date()
+                except Exception:
+                    continue
+            dte = (exp_date - today).days
+            diff = abs(dte - 30)
+            if best_diff is None or diff < best_diff:
+                best_diff = diff
+                best_exp = exp_str
+
+        if best_exp is None:
+            return None
+
+        calls, puts = None, None
+        try:
+            opt_chain = tk.option_chain(best_exp)
+            calls, puts = opt_chain.calls, opt_chain.puts
+        except Exception:
+            return None
+
+        if (calls is None or calls.empty) and (puts is None or puts.empty):
+            return None
+
+        # Choose ATM strikes within ~2% of spot
+        low_strike = spot * 0.98
+        high_strike = spot * 1.02
+
+        ivs = []
+        if calls is not None and not calls.empty:
+            atm_calls = calls[(calls["strike"] >= low_strike) & (calls["strike"] <= high_strike)]
+            if atm_calls is None or atm_calls.empty:
+                # if none near ATM, sample median few strikes around median
+                atm_calls = calls.iloc[max(0, len(calls)//2 - 2): min(len(calls), len(calls)//2 + 3)]
+            if 'impliedVolatility' in atm_calls.columns:
+                ivs += [float(x) * 100 for x in atm_calls['impliedVolatility'].dropna().values]
+
+        if puts is not None and not puts.empty:
+            atm_puts = puts[(puts["strike"] >= low_strike) & (puts["strike"] <= high_strike)]
+            if atm_puts is None or atm_puts.empty:
+                atm_puts = puts.iloc[max(0, len(puts)//2 - 2): min(len(puts), len(puts)//2 + 3)]
+            if 'impliedVolatility' in atm_puts.columns:
+                ivs += [float(x) * 100 for x in atm_puts['impliedVolatility'].dropna().values]
+
+        if not ivs:
+            return None
+
+        # Return mean IV
+        return float(np.mean(ivs))
+    except Exception:
+        return None
+
+@st.cache_data(ttl=60 * 60 * 6)
+def get_iv30_percent_rank(ticker: str) -> Optional[float]:
+    """
+    Compute IV30 Percent Rank (0-100).
+    1) Try to get today's IV30 from options (preferred).
+    2) If not available, fall back to a realized 30-day rolling vol proxy.
+    3) Build a 1-year historical series of the same metric and compute percentile rank.
+    """
+    try:
+        # preferred: option-based IV30
+        current_iv30 = get_iv30_via_options(ticker)
+
+        # build historical series (1 year) using realized vol proxy when option IVs aren't available historically
+        tk = yf.Ticker(ticker)
+        prices = tk.history(period="1y", interval="1d")["Close"].dropna()
+        if prices.empty:
+            # if no price history, fallback to option-based current iv only
+            if current_iv30 is not None:
+                # without history we can't compute rank reliably; return None
+                return None
+            return None
+
+        # realized vol proxy: 30-day rolling std (annualized)
+        returns = np.log(prices / prices.shift(1)).dropna()
+        rolling30 = returns.rolling(window=30).std() * np.sqrt(252)  # annualized
+        # Convert to percent
+        rolling30_pct = (rolling30 * 100).dropna()
+
+        # If we don't have a option-based current_iv30, approximate it with the latest realized 30-day vol
+        if current_iv30 is None:
+            if not rolling30_pct.empty:
+                current_iv30 = float(rolling30_pct.iloc[-1])
+            else:
+                return None
+
+        # Percent rank: percentage of historical values below current
+        if rolling30_pct.empty:
+            return None
+
+        rank = float((rolling30_pct < current_iv30).sum() / len(rolling30_pct) * 100)
+        return round(rank, 1)
+    except Exception:
+        return None
+
+def iv_rank_status(rank: Optional[float]) -> str:
+    if rank is None:
+        return "N/A"
+    if rank >= 70:
+        return "Hyper Elevated"
+    if rank >= 50:
+        return "Elevated"
+    if rank >= 30:
+        return "Low"
+    return "Hyper Low"
+
+def iv_rank_color(rank: Optional[float]) -> str:
+    """Return color string/hex for the rank per your specification."""
+    if rank is None:
+        return "black"
+    if rank >= 70:
+        return HYPER_ELEVATED_COLOR
+    if rank >= 50:
+        return ELEVATED_COLOR
+    if rank >= 30:
+        return LOW_COLOR
+    return HYPER_LOW_COLOR
 
 # ----------------------------- App core (UI & logic) -----------------------------
 
@@ -196,6 +363,30 @@ with st.form("add_trade", clear_on_submit=True):
     col1, col2, col3 = st.columns([2,2,2])
     with col1:
         ticker = st.text_input("Ticker (e.g. AAPL)").upper()
+        # show IV30 Rank under the ticker with color coding
+        iv30_rank = None
+        iv30_status = None
+        iv30_color = "black"
+        if ticker:
+            try:
+                iv30_rank = get_iv30_percent_rank(ticker)
+                iv30_status = iv_rank_status(iv30_rank)
+                iv30_color = iv_rank_color(iv30_rank)
+            except Exception:
+                iv30_rank = None
+                iv30_status = "N/A"
+                iv30_color = "black"
+
+            # Color-coded IV30 percent rank display
+            if iv30_rank is None:
+                st.markdown("<div>IV30 Percent Rank: <strong>N/A</strong> — <em>N/A</em></div>", unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    f\"\"\"<div>IV30 Percent Rank: <strong style='color:{iv30_color}'>{iv30_rank:.1f}%</strong>
+&nbsp;&nbsp;<span style='font-weight:600'>({iv30_status})</span></div>\"\"\",
+                    unsafe_allow_html=True
+                )
+
         short_strike = st.number_input("Short strike", min_value=0.0, format="%.2f")
         long_strike = st.number_input("Long strike", min_value=0.0, format="%.2f")
     with col2:
@@ -222,6 +413,8 @@ with st.form("add_trade", clear_on_submit=True):
                 "credit": credit,
                 "entry_date": entry_date,
                 "entry_iv": auto_iv,
+                # store entry IV30 rank
+                "entry_iv30_rank": iv30_rank,
                 "notes": notes,
                 "created_at": datetime.utcnow().isoformat()
             }
@@ -304,17 +497,27 @@ Max Loss: {format_money(derived['max_loss'])}
             else:
                 profit_color = "red"
 
-            if current_iv is None or t["entry_iv"] is None:
+            if current_iv is None or t.get("entry_iv") is None:
                 iv_color = "black"
-            elif current_iv == t["entry_iv"]:
+            elif current_iv == t.get("entry_iv"):
                 iv_color = "yellow"
-            elif current_iv > t["entry_iv"]:
+            elif current_iv > t.get("entry_iv"):
                 iv_color = "red"
             else:
                 iv_color = "green"
 
+            # Entry/Current IV30 Percent Rank display (no special color here per your request)
+            entry_iv30_rank = t.get("entry_iv30_rank", None)
+            try:
+                current_iv30_rank = get_iv30_percent_rank(t["ticker"])
+            except Exception:
+                current_iv30_rank = None
+
+            entry_rank_display = f\"{entry_iv30_rank:.1f}%\" if isinstance(entry_iv30_rank, (int, float)) else (str(entry_iv30_rank) or "N/A")
+            current_rank_display = f\"{current_iv30_rank:.1f}%\" if isinstance(current_iv30_rank, (int, float)) else (str(current_iv30_rank) or "N/A")
+
             # Avoid formatting errors if entry_iv/current_iv is None
-            entry_iv_display = f"{t['entry_iv']:.1f}%" if isinstance(t.get("entry_iv"), (int, float)) else (str(t.get("entry_iv")) or "N/A")
+            entry_iv_display = f"{t.get('entry_iv'):.1f}%" if isinstance(t.get("entry_iv"), (int, float)) else (str(t.get("entry_iv")) or "N/A")
             current_iv_display = f"{current_iv:.1f}%" if isinstance(current_iv, (int, float)) else (str(current_iv) or "N/A")
 
             st.markdown(
@@ -323,6 +526,7 @@ Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be 
 Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
 DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 <br>
 Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
+Entry IV30 Percent Rank: {entry_rank_display} | Current IV30 Percent Rank: <span style='font-weight:600'>{current_rank_display}</span><br>
 Entry IV: {entry_iv_display} | Current IV: <span style='color:{iv_color}'>{current_iv_display}</span>
 """, unsafe_allow_html=True)
 
