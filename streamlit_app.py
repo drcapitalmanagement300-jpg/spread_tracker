@@ -1,7 +1,6 @@
-# app.py (patched with auto-refresh and countdown)
+# app.py (live updating Put Credit Spread Monitor)
 import streamlit as st
 from datetime import date, datetime
-import time
 import json
 import io
 from typing import List, Dict, Any, Optional
@@ -11,6 +10,7 @@ from scipy.stats import norm
 import yfinance as yf
 import pandas as pd
 import altair as alt
+from streamlit_autorefresh import st_autorefresh
 
 # Persistence (Google OAuth + Drive) — provided in persistence.py
 from persistence import (
@@ -21,27 +21,19 @@ from persistence import (
     logout,
 )
 
+# ----------------------------- Streamlit setup -----------------------------
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
-# ------------------- Auto-refresh setup -------------------
-REFRESH_INTERVAL_SECONDS = 600  # 10 minutes
+# ----------------------------- Auto-refresh -----------------------------
+REFRESH_INTERVAL = 1_000  # milliseconds
+st_autorefresh(interval=REFRESH_INTERVAL, key="live_refresh")
 
-if "last_refresh_time" not in st.session_state:
-    st.session_state.last_refresh_time = time.time()
-
-elapsed = time.time() - st.session_state.last_refresh_time
-time_to_next_refresh = max(0, REFRESH_INTERVAL_SECONDS - int(elapsed))
-
-if elapsed >= REFRESH_INTERVAL_SECONDS:
-    st.session_state.last_refresh_time = time.time()
-    st.experimental_rerun()
-
-# ----------------------------- App core (UI & logic) -----------------------------
+# ----------------------------- OAuth & Drive setup -----------------------------
 try:
     ensure_logged_in()
 except Exception:
-    st.warning("Google OAuth successful.")
+    st.warning("Google OAuth could not be completed. Running locally.")
 
 drive_service = None
 try:
@@ -62,7 +54,7 @@ with logout_col:
             except Exception:
                 pass
 
-# ------------------- Helpers -------------------
+# ----------------------------- Helpers -----------------------------
 def init_state():
     if "trades" not in st.session_state:
         loaded = []
@@ -147,18 +139,11 @@ def get_short_leg_data(trade: dict):
         sigma = iv / 100
         r = 0.05
         delta = bsm_delta('put', current_price, float(trade["short_strike"]), T, r, sigma)
-    return delta, iv, short_price
+    return delta, short_price, iv
 
 def get_long_leg_data(trade: dict):
     long_price, _ = get_leg_data(trade["ticker"], trade["expiration"], float(trade["long_strike"]), 'put')
     return long_price
-
-def compute_spread_value(short_option_price, long_option_price, width, credit):
-    if short_option_price is None or long_option_price is None or width - credit <= 0:
-        return None
-    spread_mark = short_option_price - long_option_price
-    max_loss = width - credit
-    return (spread_mark / max_loss) * 100
 
 def compute_current_profit(short_price, long_price, credit, width):
     if short_price is None or long_price is None or credit <= 0:
@@ -167,6 +152,22 @@ def compute_current_profit(short_price, long_price, credit, width):
     current_profit = credit - spread_value
     return max(0, min((current_profit / credit) * 100, 100))
 
+def evaluate_rules(trade, derived, current_price, delta, short_option_price, long_option_price):
+    rule_violations = {"other_rules": False, "iv_rule": False}
+    abs_delta = abs(delta) if delta is not None else None
+    if abs_delta is not None and abs_delta >= 0.40:
+        rule_violations["other_rules"] = True
+    spread_value_percent = None
+    if short_option_price is not None and long_option_price is not None:
+        spread_mark = short_option_price - long_option_price
+        max_loss = derived["width"] - trade["credit"]
+        spread_value_percent = (spread_mark / max_loss) * 100 if max_loss > 0 else None
+        if spread_value_percent is not None and spread_value_percent >= 150:
+            rule_violations["other_rules"] = True
+    if derived["dte"] <= 7:
+        rule_violations["other_rules"] = True
+    return rule_violations, abs_delta, spread_value_percent
+
 def fetch_short_iv(ticker, short_strike, expiration):
     _, puts = get_option_chain(ticker, expiration.isoformat())
     if puts is None or puts.empty:
@@ -174,27 +175,12 @@ def fetch_short_iv(ticker, short_strike, expiration):
     short_row = puts[puts['strike'] == short_strike]
     if short_row.empty or 'impliedVolatility' not in short_row.columns:
         return None
-    iv = short_row['impliedVolatility'].values[0] * 100
-    return iv
+    return short_row['impliedVolatility'].values[0] * 100
 
-def evaluate_rules(trade, derived, current_price, delta, current_iv, short_option_price, long_option_price):
-    rule_violations = {"other_rules": False, "iv_rule": False}
-    abs_delta = abs(delta) if delta is not None else None
-    if abs_delta is not None and abs_delta >= 0.40:
-        rule_violations["other_rules"] = True
-    spread_value_percent = compute_spread_value(short_option_price, long_option_price, derived["width"], trade["credit"])
-    if spread_value_percent is not None and spread_value_percent >= 150:
-        rule_violations["other_rules"] = True
-    if derived["dte"] <= 7:
-        rule_violations["other_rules"] = True
-    entry_iv = trade.get("entry_iv")
-    if entry_iv and current_iv and current_iv > entry_iv:
-        rule_violations["iv_rule"] = True
-    return rule_violations, abs_delta, spread_value_percent
-
-# ----------------------------- Initialize session & UI -----------------------------
+# ----------------------------- Initialize session -----------------------------
 init_state()
 
+# ----------------------------- Add trade form -----------------------------
 with st.form("add_trade", clear_on_submit=True):
     st.subheader("Add new put credit spread")
     col1, col2, col3 = st.columns([2,2,2])
@@ -227,17 +213,17 @@ with st.form("add_trade", clear_on_submit=True):
                 "entry_date": entry_date,
                 "entry_iv": auto_iv,
                 "notes": notes,
-                "created_at": datetime.utcnow().isoformat()
+                "created_at": datetime.utcnow().isoformat(),
+                "last_update": datetime.utcnow(),
+                "cached": {}
             }
             st.session_state.trades.append(trade)
-
             saved_to_drive = False
             if drive_service:
                 try:
                     saved_to_drive = save_to_drive(drive_service, st.session_state.trades)
                 except Exception:
                     saved_to_drive = False
-
             if saved_to_drive:
                 st.success(f"Added {ticker} — saved to Drive. Entry IV: {auto_iv if auto_iv else 'N/A'}")
             else:
@@ -246,36 +232,70 @@ with st.form("add_trade", clear_on_submit=True):
 st.markdown("---")
 st.subheader("Active Trades")
 
+# ----------------------------- Active trades -----------------------------
+UPDATE_INTERVAL = 10*60  # seconds
+now = datetime.utcnow()
+
 if not st.session_state.trades:
     st.info("No trades added yet. Use the form above to add your first spread.")
 else:
     for i, t in enumerate(st.session_state.trades):
         derived = compute_derived(t)
-        current_price = get_price(t['ticker'])
-        delta, current_iv, short_option_price = get_short_leg_data(t)
-        long_option_price = get_long_leg_data(t)
-        current_profit_percent = compute_current_profit(short_option_price, long_option_price, t["credit"], derived["width"])
-        rule_violations, abs_delta, spread_value_percent = evaluate_rules(
-            t, derived, current_price, delta, current_iv, short_option_price, long_option_price
-        )
 
-        abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
+        # Check if we need to refresh data
+        elapsed = (now - t.get("last_update", now)).total_seconds()
+        if elapsed >= UPDATE_INTERVAL or not t.get("cached"):
+            current_price = get_price(t['ticker'])
+            delta, short_option_price, _ = get_short_leg_data(t)
+            long_option_price = get_long_leg_data(t)
+            current_profit_percent = compute_current_profit(short_option_price, long_option_price, t["credit"], derived["width"])
+            rule_violations, abs_delta, spread_value_percent = evaluate_rules(
+                t, derived, current_price, delta, short_option_price, long_option_price
+            )
+            # Cache results
+            t["cached"] = {
+                "current_price": current_price,
+                "delta": delta,
+                "short_option_price": short_option_price,
+                "long_option_price": long_option_price,
+                "current_profit_percent": current_profit_percent,
+                "rule_violations": rule_violations,
+                "spread_value_percent": spread_value_percent
+            }
+            t["last_update"] = now
+        else:
+            cached = t["cached"]
+            current_price = cached["current_price"]
+            delta = cached["delta"]
+            short_option_price = cached["short_option_price"]
+            long_option_price = cached["long_option_price"]
+            current_profit_percent = cached["current_profit_percent"]
+            rule_violations = cached["rule_violations"]
+            spread_value_percent = cached["spread_value_percent"]
+
+        # Countdown
+        seconds_to_next_update = max(0, UPDATE_INTERVAL - (now - t["last_update"]).total_seconds())
+        minutes = int(seconds_to_next_update // 60)
+        seconds = int(seconds_to_next_update % 60)
+
+        trade_container = st.container()
+        countdown_placeholder = trade_container.empty()
+        card_placeholder = trade_container.empty()
+        chart_placeholder = trade_container.empty()
+
+        countdown_placeholder.markdown(f"**Next update in:** {minutes}:{seconds:02d}")
+
+        abs_delta_str = f"{abs(delta):.2f}" if delta is not None else "-"
         spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else ""
         current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else ""
         current_price_str = f"{current_price:.2f}" if current_price is not None else "-"
 
-        if rule_violations["other_rules"]:
-            status_icon = "❌"
-            status_text = "Some critical rules are violated."
-        else:
-            status_icon = "✅"
-            status_text = "All rules are satisfied."
+        status_icon = "❌" if rule_violations["other_rules"] else "✅"
+        status_text = "Some critical rules are violated." if rule_violations["other_rules"] else "All rules are satisfied."
 
-        card_cols = st.columns([3,3])
-        with card_cols[0]:
-            st.markdown(
-                f"""
-<div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px; height:100%'>
+        card_placeholder.markdown(
+            f"""
+<div style='background-color:rgba(0,100,0,0.1); padding:15px; border-radius:10px;'>
 Ticker: {t['ticker']}  <br>
 Underlying Price: {current_price_str}  <br>
 Short Strike: {t['short_strike']}  <br>
@@ -284,103 +304,41 @@ Spread Width: {derived['width']}  <br>
 Expiration Date: {t['expiration']}  <br>
 Current DTE: {derived['dte']}  <br>
 Max Gain: {format_money(derived['max_gain'])}  <br>
-Max Loss: {format_money(derived['max_loss'])}  
+Max Loss: {format_money(derived['max_loss'])}  <br>
+Short Delta: {abs_delta_str} | Must be <= 0.40 <br>
+Spread Value: {spread_value_str} | Must be <= 150% of credit <br>
+DTE: {derived['dte']} | Must be > 7 <br>
+Current Profit: {current_profit_str} | 50-75% max profit target <br>
+Status: {status_icon} {status_text}
 </div>
 """, unsafe_allow_html=True)
-            st.markdown(f"<div style='margin-top:10px; font-size:20px'>{status_icon} {status_text}</div>", unsafe_allow_html=True)
 
-        with card_cols[1]:
-            delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
-            spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
-            dte_color = "red" if derived['dte'] <= 7 else "green"
+        # PnL chart
+        dte_range = list(range(derived["dte"] + 1))
+        profit_values = [current_profit_percent if current_profit_percent is not None else 0]*len(dte_range)
+        pnl_df = pd.DataFrame({"DTE": dte_range, "Profit %": profit_values})
 
-            if current_profit_percent is None:
-                profit_color = "black"
-            elif current_profit_percent < 50:
-                profit_color = "green"
-            elif 50 <= current_profit_percent <= 75:
-                profit_color = "yellow"
-            else:
-                profit_color = "red"
+        base_chart = alt.Chart(pnl_df).mark_line(point=True).encode(
+            x=alt.X('DTE', title='Days to Expiration', scale=alt.Scale(domain=(derived["dte"], 0))),
+            y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100), nice=False),
+                    axis=alt.Axis(tickMinStep=10, tickCount=11))
+        ).properties(height=250)
 
-            st.markdown(
-                f"""
-Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be less than or equal to 0.40 <br>
-Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
-DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 <br>
-Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
-Next update in {time_to_next_refresh//60:02d}:{time_to_next_refresh%60:02d}
-""", unsafe_allow_html=True)
+        line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(y='y')
+        line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(y='y')
+        vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(x='DTE')
 
-            # PnL chart
-            dte_range = list(range(derived["dte"] + 1))
-            profit_values = [current_profit_percent if current_profit_percent is not None else 0]*len(dte_range)
-            pnl_df = pd.DataFrame({"DTE": dte_range, "Profit %": profit_values})
-
-            base_chart = alt.Chart(pnl_df).mark_line(point=True).encode(
-                x=alt.X('DTE', title='Days to Expiration', scale=alt.Scale(domain=(derived["dte"], 0))),
-                y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100), nice=False),
-                        axis=alt.Axis(tickMinStep=10, tickCount=11))
-            ).properties(height=250)
-
-            line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(y='y')
-            line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(y='y')
-            vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(x='DTE')
-
-            final_chart = base_chart + line_50 + line_75 + vline
-            st.altair_chart(final_chart, use_container_width=True)
+        final_chart = base_chart + line_50 + line_75 + vline
+        chart_placeholder.altair_chart(final_chart, use_container_width=True)
 
         if st.button("Remove", key=f"remove_{i}"):
             st.session_state.trades.pop(i)
-            saved = False
             if drive_service:
                 try:
-                    saved = save_to_drive(drive_service, st.session_state.trades)
+                    save_to_drive(drive_service, st.session_state.trades)
                 except Exception:
-                    saved = False
-
-            if saved:
-                st.success("Saved updated trades to Drive.")
-            else:
-                st.warning("Removed locally but failed to save to Drive (or Drive not configured).")
+                    pass
             try:
                 st.experimental_rerun()
             except Exception:
                 pass
-
-st.markdown("---")
-
-# Manual Save/Load (uses persistence API)
-colA, colB = st.columns(2)
-with colA:
-    if st.button("💾 Save all trades to Google Drive now"):
-        saved = False
-        if drive_service:
-            try:
-                saved = save_to_drive(drive_service, st.session_state.trades)
-            except Exception:
-                saved = False
-        if saved:
-            st.success("Saved to Drive successfully.")
-        else:
-            st.error("Failed to save to Drive. Check logs or ensure you're signed in.")
-
-with colB:
-    if st.button("📥 Reload trades from Google Drive"):
-        loaded = []
-        if drive_service:
-            try:
-                loaded = load_from_drive(drive_service) or []
-            except Exception:
-                loaded = []
-        if loaded:
-            st.session_state.trades = loaded
-            st.success("Loaded trades from Drive.")
-            try:
-                st.experimental_rerun()
-            except Exception:
-                pass
-        else:
-            st.info("No trades found on Drive (or load failed).")
-
-st.caption("Spread value uses actual option prices — alerts accurate, delta BSM-based, entry IV auto-captured.")
