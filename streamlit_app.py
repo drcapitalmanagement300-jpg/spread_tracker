@@ -257,8 +257,8 @@ else:
         )
 
         abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
-        spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else "-"
-        current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else "-"
+        spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else ""
+        current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else ""
         current_price_str = f"{current_price:.2f}" if current_price is not None else "-"
 
         if rule_violations["other_rules"]:
@@ -323,7 +323,6 @@ Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be 
 Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
 DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 <br>
 Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
-Entry IV: {entry_iv_display} | Current IV: <span style='color:{iv_color}'>{current_iv_display}</span>
 """, unsafe_allow_html=True)
 
             # PnL chart
@@ -337,9 +336,9 @@ Entry IV: {entry_iv_display} | Current IV: <span style='color:{iv_color}'>{curre
                         axis=alt.Axis(tickMinStep=10, tickCount=11))
             ).properties(height=250)
 
-            line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(strokeDash=[5,5]).encode(y='y')
-            line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(strokeDash=[5,5]).encode(y='y')
-            vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(strokeDash=[5,5]).encode(x='DTE')
+            line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(y='y')
+            line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(y='y')
+            vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(x='DTE')
 
             final_chart = base_chart + line_50 + line_75 + vline
             st.altair_chart(final_chart, use_container_width=True)
