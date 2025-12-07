@@ -1,4 +1,4 @@
-# app.py (patched to use persistence.py)
+# app.py (patched with auto-refresh every 10 minutes)
 import streamlit as st
 from datetime import date, datetime
 import json
@@ -10,6 +10,7 @@ from scipy.stats import norm
 import yfinance as yf
 import pandas as pd
 import altair as alt
+from streamlit_autorefresh import st_autorefresh  # <- auto-refresh import
 
 # Persistence (Google OAuth + Drive) — provided in persistence.py
 from persistence import (
@@ -23,18 +24,16 @@ from persistence import (
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
-# ----------------------------- App core (UI & logic) -----------------------------
+# ------------------- Auto-refresh every 10 minutes -------------------
+# Interval is in milliseconds: 10 minutes = 600,000 ms
+count = st_autorefresh(interval=600_000, key="data_refresh")
 
-# Ensure the user is logged-in via OAuth (this will show sign-in UI and stop the app
-# if the user is not authenticated). We catch exceptions so the app can still run
-# locally if you decide to not sign in.
+# ----------------------------- App core (UI & logic) -----------------------------
+# Ensure the user is logged-in via OAuth
 try:
     ensure_logged_in()
 except Exception:
-    # If ensure_logged_in raised (for example, missing secrets), allow the app to continue
-    # but warn the user.
-    st.warning("Google OAuth successful.")
-    # Do not stop; build_drive_service_from_session will likely return None below.
+    st.warning("Google OAuth not fully configured. Running locally.")
 
 # Build Drive service (may be None if not signed in)
 drive_service = None
@@ -50,7 +49,6 @@ with logout_col:
         try:
             logout()
         except Exception:
-            # If logout fails for any reason, still clear credentials
             st.session_state.pop("credentials", None)
             st.success("Logged out (local). Reload the page to sign in again.")
             try:
@@ -58,7 +56,7 @@ with logout_col:
             except Exception:
                 pass
 
-# ------------------- Helpers (same as your original app) -------------------
+# ------------------- Helpers -------------------
 def init_state():
     if "trades" not in st.session_state:
         loaded = []
@@ -95,7 +93,8 @@ def format_money(x):
     except Exception:
         return "-"
 
-@st.cache_data(ttl=60)
+# ------------------- Cached price / options functions -------------------
+@st.cache_data(ttl=600)  # cache for 10 minutes
 def get_price(ticker: str):
     try:
         data = yf.Ticker(ticker).fast_info
@@ -103,7 +102,7 @@ def get_price(ticker: str):
     except Exception:
         return None
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=600)  # cache for 10 minutes
 def get_option_chain(ticker: str, expiration: str):
     try:
         ticker_obj = yf.Ticker(ticker)
@@ -242,6 +241,7 @@ with st.form("add_trade", clear_on_submit=True):
 
 st.markdown("---")
 
+# ----------------------------- Display active trades -----------------------------
 st.subheader("Active Trades")
 if not st.session_state.trades:
     st.info("No trades added yet. Use the form above to add your first spread.")
@@ -310,7 +310,6 @@ Max Loss: {format_money(derived['max_loss'])}
             else:
                 iv_color = "green"
 
-            # Avoid formatting errors if entry_iv/current_iv is None
             entry_iv_display = f"{t['entry_iv']:.1f}%" if isinstance(t.get("entry_iv"), (int, float)) else (str(t.get("entry_iv")) or "N/A")
             current_iv_display = f"{current_iv:.1f}%" if isinstance(current_iv, (int, float)) else (str(current_iv) or "N/A")
 
@@ -342,7 +341,6 @@ Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> |
 
         if st.button("Remove", key=f"remove_{i}"):
             st.session_state.trades.pop(i)
-            # Try saving updated trades to Drive
             saved = False
             if drive_service:
                 try:
@@ -394,4 +392,4 @@ with colB:
         else:
             st.info("No trades found on Drive (or load failed).")
 
-st.caption("Spread value uses actual option prices — alerts accurate, delta BSM-based, entry IV auto-captured.")
+#END
