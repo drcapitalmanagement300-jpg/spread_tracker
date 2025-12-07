@@ -264,9 +264,6 @@ else:
         if rule_violations["other_rules"]:
             status_icon = "❌"
             status_text = "Some critical rules are violated."
-        elif rule_violations["iv_rule"]:
-            status_icon = "⚠️"
-            status_text = "Current IV exceeds entry IV."
         else:
             status_icon = "✅"
             status_text = "All rules are satisfied."
