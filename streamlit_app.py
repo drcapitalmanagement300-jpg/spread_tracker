@@ -1,10 +1,10 @@
-# app.py (patched to use persistence.py + auto-refresh)
+# app.py (patched with auto-refresh and countdown)
 import streamlit as st
 from datetime import date, datetime
+import time
 import json
 import io
 from typing import List, Dict, Any, Optional
-import time
 
 import numpy as np
 from scipy.stats import norm
@@ -24,16 +24,20 @@ from persistence import (
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 st.title("Put Credit Spread Monitor")
 
-# ---------------- Auto-refresh setup ----------------
-REFRESH_INTERVAL_SEC = 600  # 10 minutes
+# ------------------- Auto-refresh setup -------------------
+REFRESH_INTERVAL_SECONDS = 600  # 10 minutes
+
 if "last_refresh_time" not in st.session_state:
     st.session_state.last_refresh_time = time.time()
 
-# Trigger a full rerun every 10 minutes
-from streamlit_autorefresh import st_autorefresh
-st_autorefresh(interval=REFRESH_INTERVAL_SEC * 1000, key="auto_refresh")
+elapsed = time.time() - st.session_state.last_refresh_time
+time_to_next_refresh = max(0, REFRESH_INTERVAL_SECONDS - int(elapsed))
 
-# ----------------------------- App core -----------------------------
+if elapsed >= REFRESH_INTERVAL_SECONDS:
+    st.session_state.last_refresh_time = time.time()
+    st.experimental_rerun()
+
+# ----------------------------- App core (UI & logic) -----------------------------
 try:
     ensure_logged_in()
 except Exception:
@@ -45,7 +49,6 @@ try:
 except Exception:
     drive_service = None
 
-# Logout button
 _, logout_col = st.columns([9, 1])
 with logout_col:
     if st.button("Log out"):
@@ -184,9 +187,12 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
         rule_violations["other_rules"] = True
     if derived["dte"] <= 7:
         rule_violations["other_rules"] = True
+    entry_iv = trade.get("entry_iv")
+    if entry_iv and current_iv and current_iv > entry_iv:
+        rule_violations["iv_rule"] = True
     return rule_violations, abs_delta, spread_value_percent
 
-# ----------------------------- Initialize session -----------------------------
+# ----------------------------- Initialize session & UI -----------------------------
 init_state()
 
 with st.form("add_trade", clear_on_submit=True):
@@ -254,12 +260,16 @@ else:
         )
 
         abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
-        spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else "-"
-        current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else "-"
+        spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else ""
+        current_profit_str = f"{current_profit_percent:.1f}%" if current_profit_percent is not None else ""
         current_price_str = f"{current_price:.2f}" if current_price is not None else "-"
 
-        status_icon = "❌" if rule_violations["other_rules"] else "✅"
-        status_text = "Some critical rules are violated." if rule_violations["other_rules"] else "All rules are satisfied."
+        if rule_violations["other_rules"]:
+            status_icon = "❌"
+            status_text = "Some critical rules are violated."
+        else:
+            status_icon = "✅"
+            status_text = "All rules are satisfied."
 
         card_cols = st.columns([3,3])
         with card_cols[0]:
@@ -283,15 +293,23 @@ Max Loss: {format_money(derived['max_loss'])}
             delta_color = "red" if abs_delta is not None and abs_delta >= 0.40 else "green"
             spread_color = "red" if spread_value_percent is not None and spread_value_percent >= 150 else "green"
             dte_color = "red" if derived['dte'] <= 7 else "green"
-            profit_color = "black" if current_profit_percent is None else \
-                           ("green" if current_profit_percent < 50 else "yellow" if current_profit_percent <= 75 else "red")
+
+            if current_profit_percent is None:
+                profit_color = "black"
+            elif current_profit_percent < 50:
+                profit_color = "green"
+            elif 50 <= current_profit_percent <= 75:
+                profit_color = "yellow"
+            else:
+                profit_color = "red"
 
             st.markdown(
                 f"""
-Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be ≤ 0.40 <br>
-Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be ≤ 150% of credit <br>
-DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be > 7 <br>
+Short Delta: <span style='color:{delta_color}'>{abs_delta_str}</span> | Must be less than or equal to 0.40 <br>
+Spread Value: <span style='color:{spread_color}'>{spread_value_str}</span> | Must be less than or equal to 150% of credit <br>
+DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater than 7 <br>
 Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
+Next update in {time_to_next_refresh//60:02d}:{time_to_next_refresh%60:02d}
 """, unsafe_allow_html=True)
 
             # PnL chart
@@ -312,13 +330,6 @@ Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> |
             final_chart = base_chart + line_50 + line_75 + vline
             st.altair_chart(final_chart, use_container_width=True)
 
-            # Countdown for next update
-            time_since_refresh = time.time() - st.session_state.last_refresh_time
-            time_remaining = max(0, REFRESH_INTERVAL_SEC - time_since_refresh)
-            minutes = int(time_remaining // 60)
-            seconds = int(time_remaining % 60)
-            st.markdown(f"<div style='text-align:right; font-size:14px; color:gray;'>Next update in {minutes:02d}:{seconds:02d}</div>", unsafe_allow_html=True)
-
         if st.button("Remove", key=f"remove_{i}"):
             st.session_state.trades.pop(i)
             saved = False
@@ -327,10 +338,11 @@ Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> |
                     saved = save_to_drive(drive_service, st.session_state.trades)
                 except Exception:
                     saved = False
+
             if saved:
                 st.success("Saved updated trades to Drive.")
             else:
-                st.warning("Removed locally but failed to save to Drive.")
+                st.warning("Removed locally but failed to save to Drive (or Drive not configured).")
             try:
                 st.experimental_rerun()
             except Exception:
@@ -338,7 +350,7 @@ Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> |
 
 st.markdown("---")
 
-# Manual Save/Load buttons
+# Manual Save/Load (uses persistence API)
 colA, colB = st.columns(2)
 with colA:
     if st.button("💾 Save all trades to Google Drive now"):
@@ -348,7 +360,10 @@ with colA:
                 saved = save_to_drive(drive_service, st.session_state.trades)
             except Exception:
                 saved = False
-        st.success("Saved to Drive successfully." if saved else "Failed to save to Drive.")
+        if saved:
+            st.success("Saved to Drive successfully.")
+        else:
+            st.error("Failed to save to Drive. Check logs or ensure you're signed in.")
 
 with colB:
     if st.button("📥 Reload trades from Google Drive"):
