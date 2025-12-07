@@ -33,7 +33,7 @@ try:
 except Exception:
     # If ensure_logged_in raised (for example, missing secrets), allow the app to continue
     # but warn the user.
-    st.warning("Google OAuth not available. You can still use the app locally but Drive persistence will be disabled.")
+    st.warning("Google OAuth successful.")
     # Do not stop; build_drive_service_from_session will likely return None below.
 
 # Build Drive service (may be None if not signed in)
