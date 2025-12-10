@@ -65,12 +65,26 @@ def init_state():
                 loaded = load_from_drive(drive_service) or []
             except Exception:
                 loaded = []
+
+        # Ensure all loaded trades have pnl_history (backfill if missing)
+        for tr in loaded:
+            if "pnl_history" not in tr:
+                tr["pnl_history"] = []
+
         st.session_state.trades = loaded if loaded else []
 
 def days_to_expiry(expiry_date: date) -> int:
+    # Accept either date or ISO string
+    if isinstance(expiry_date, str):
+        try:
+            expiry_date = date.fromisoformat(expiry_date)
+        except Exception:
+            # fallback: return 0
+            return 0
     return max((expiry_date - date.today()).days, 0)
 
 def compute_derived(trade: dict) -> dict:
+    # Ensure numeric conversion and handle string expiration
     short = float(trade["short_strike"])
     long = float(trade["long_strike"])
     credit = float(trade.get("credit", 0) or 0)
@@ -78,7 +92,17 @@ def compute_derived(trade: dict) -> dict:
     max_gain = credit
     max_loss = max(width - credit, 0)
     breakeven = short + credit
-    dte = days_to_expiry(trade["expiration"])
+
+    # If expiration stored as string, parse
+    expiry = trade["expiration"]
+    if isinstance(expiry, str):
+        try:
+            expiry = date.fromisoformat(expiry)
+        except Exception:
+            # if parsing fails, fallback to today (0 DTE)
+            expiry = date.today()
+
+    dte = days_to_expiry(expiry)
     return {
         "width": width,
         "max_gain": max_gain,
@@ -123,7 +147,9 @@ def bsm_delta(option_type, S, K, T, r, sigma):
         return None
 
 def get_leg_data(ticker: str, expiration: date, strike: float, option_type='put'):
-    _, puts = get_option_chain(ticker, expiration.isoformat())
+    # Accept expiration as date or ISO string
+    exp_str = expiration.isoformat() if isinstance(expiration, date) else str(expiration)
+    _, puts = get_option_chain(ticker, exp_str)
     if puts is None or puts.empty:
         return None, None
     leg_row = puts[puts['strike'] == strike]
@@ -163,7 +189,8 @@ def compute_current_profit(short_price, long_price, credit, width):
     return max(0, min((current_profit / credit) * 100, 100))
 
 def fetch_short_iv(ticker, short_strike, expiration):
-    _, puts = get_option_chain(ticker, expiration.isoformat())
+    exp_str = expiration.isoformat() if isinstance(expiration, date) else str(expiration)
+    _, puts = get_option_chain(ticker, exp_str)
     if puts is None or puts.empty:
         return None
     short_row = puts[puts['strike'] == short_strike]
@@ -186,6 +213,31 @@ def evaluate_rules(trade, derived, current_price, delta, current_iv, short_optio
     if entry_iv and current_iv and current_iv > entry_iv:
         rule_violations["iv_rule"] = True
     return rule_violations, abs_delta, spread_value_percent
+
+### NEW: helper to update pnl history ###
+def update_pnl_history(trade: dict, current_profit_percent: Optional[float], dte: int) -> bool:
+    """
+    Append a new PnL point for today if it doesn't already exist.
+    Returns True if history was modified.
+    """
+    today_iso = date.today().isoformat()
+
+    # Initialize if missing
+    if "pnl_history" not in trade:
+        trade["pnl_history"] = []
+
+    # If today's entry exists, do nothing
+    if any(entry.get("date") == today_iso for entry in trade["pnl_history"]):
+        return False
+
+    # Append a new history item. Store profit as float or None.
+    trade["pnl_history"].append({
+        "date": today_iso,
+        # store the DTE at time of recording as well for reference (not used for plotting)
+        "dte": int(dte) if dte is not None else None,
+        "profit": float(current_profit_percent) if current_profit_percent is not None else None
+    })
+    return True
 
 # ----------------------------- Initialize session & UI -----------------------------
 init_state()
@@ -222,7 +274,8 @@ with st.form("add_trade", clear_on_submit=True):
                 "entry_date": entry_date,
                 "entry_iv": auto_iv,
                 "notes": notes,
-                "created_at": datetime.utcnow().isoformat()
+                "created_at": datetime.utcnow().isoformat(),
+                "pnl_history": []  # NEW: start with empty history
             }
             st.session_state.trades.append(trade)
 
@@ -246,6 +299,9 @@ st.subheader("Active Trades")
 if not st.session_state.trades:
     st.info("No trades added yet. Use the form above to add your first spread.")
 else:
+    # track if we added any pnl history entries so we can save once at the end
+    history_changed = False
+
     for i, t in enumerate(st.session_state.trades):
         derived = compute_derived(t)
         current_price = get_price(t['ticker'])
@@ -255,6 +311,15 @@ else:
         rule_violations, abs_delta, spread_value_percent = evaluate_rules(
             t, derived, current_price, delta, current_iv, short_option_price, long_option_price
         )
+
+        # Update pnl history for today (if not already present)
+        try:
+            changed = update_pnl_history(t, current_profit_percent, derived["dte"])
+            if changed:
+                history_changed = True
+        except Exception:
+            # Fail silently so UI still renders
+            pass
 
         abs_delta_str = f"{abs_delta:.2f}" if abs_delta is not None else "-"
         spread_value_str = f"{spread_value_percent:.0f}%" if spread_value_percent is not None else ""
@@ -301,16 +366,16 @@ Max Loss: {format_money(derived['max_loss'])}
             else:
                 profit_color = "red"
 
-            if current_iv is None or t["entry_iv"] is None:
+            if current_iv is None or t.get("entry_iv") is None:
                 iv_color = "black"
-            elif current_iv == t["entry_iv"]:
+            elif current_iv == t.get("entry_iv"):
                 iv_color = "yellow"
-            elif current_iv > t["entry_iv"]:
+            elif current_iv > t.get("entry_iv"):
                 iv_color = "red"
             else:
                 iv_color = "green"
 
-            entry_iv_display = f"{t['entry_iv']:.1f}%" if isinstance(t.get("entry_iv"), (int, float)) else (str(t.get("entry_iv")) or "N/A")
+            entry_iv_display = f"{t.get('entry_iv'):.1f}%" if isinstance(t.get("entry_iv"), (int, float)) else (str(t.get("entry_iv")) or "N/A")
             current_iv_display = f"{current_iv:.1f}%" if isinstance(current_iv, (int, float)) else (str(current_iv) or "N/A")
 
             st.markdown(
@@ -321,23 +386,47 @@ DTE: <span style='color:{dte_color}'>{derived['dte']}</span> | Must be greater t
 Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> | 50-75% Max profit target <br>
 """, unsafe_allow_html=True)
 
-            # PnL chart
-            dte_range = list(range(derived["dte"] + 1))
-            profit_values = [current_profit_percent if current_profit_percent is not None else 0]*len(dte_range)
-            pnl_df = pd.DataFrame({"DTE": dte_range, "Profit %": profit_values})
+            # ------------------ REAL PnL HISTORY CHART ------------------
+            try:
+                # If there's history use it; otherwise fallback to a single point (today)
+                if t.get("pnl_history"):
+                    pnl_df = pd.DataFrame(t["pnl_history"])
+                    # Ensure date column is datetime
+                    pnl_df["date"] = pd.to_datetime(pnl_df["date"])
+                    # Sort oldest -> newest
+                    pnl_df = pnl_df.sort_values("date")
+                    # If profit column missing or null, fill with 0 for plotting (but keep NaNs handled)
+                    # We'll keep NaNs as-is so gaps are visible; but Altair prefers numbers, so fill to 0 when all null
+                    if "profit" not in pnl_df.columns or pnl_df["profit"].isnull().all():
+                        pnl_df["profit"] = pnl_df.get("profit", pd.Series([None]*len(pnl_df))).fillna(0)
+                else:
+                    # Build a single-row DataFrame for today
+                    pnl_df = pd.DataFrame({
+                        "date": [pd.to_datetime(date.today().isoformat())],
+                        "profit": [float(current_profit_percent) if current_profit_percent is not None else None]
+                    })
 
-            base_chart = alt.Chart(pnl_df).mark_line(point=True).encode(
-                x=alt.X('DTE', title='Days to Expiration', scale=alt.Scale(domain=(derived["dte"], 0))),
-                y=alt.Y('Profit %', title='Current Profit %', scale=alt.Scale(domain=(0,100), nice=False),
-                        axis=alt.Axis(tickMinStep=10, tickCount=11))
-            ).properties(height=250)
+                # Build the line chart
+                chart = (
+                    alt.Chart(pnl_df)
+                    .mark_line(point=True)
+                    .encode(
+                        x=alt.X("date:T", title="Date"),
+                        y=alt.Y("profit:Q", title="Profit %", scale=alt.Scale(domain=[0,100]))
+                    )
+                    .properties(height=250)
+                )
 
-            line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(y='y')
-            line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(y='y')
-            vline = alt.Chart(pd.DataFrame({'DTE':[derived['dte']]})).mark_rule(stroke="green", strokeDash=[5,5]).encode(x='DTE')
+                # Add 50% and 75% horizontal lines
+                line_50 = alt.Chart(pd.DataFrame({'y':[50]})).mark_rule(strokeDash=[5,5]).encode(y='y')
+                line_75 = alt.Chart(pd.DataFrame({'y':[75]})).mark_rule(strokeDash=[5,5]).encode(y='y')
 
-            final_chart = base_chart + line_50 + line_75 + vline
-            st.altair_chart(final_chart, use_container_width=True)
+                final_chart = chart + line_50 + line_75
+                st.altair_chart(final_chart, use_container_width=True)
+            except Exception as e:
+                # Fallback to a simple text if plotting fails
+                st.write("PnL chart unavailable.")
+                st.write(f"Error: {e}")
 
         if st.button("Remove", key=f"remove_{i}"):
             st.session_state.trades.pop(i)
@@ -356,6 +445,14 @@ Current Profit: <span style='color:{profit_color}'>{current_profit_str}</span> |
                 st.experimental_rerun()
             except Exception:
                 pass
+
+    # If any pnl history entries were added during this run, try to persist once
+    if history_changed and drive_service:
+        try:
+            save_to_drive(drive_service, st.session_state.trades)
+        except Exception:
+            # don't raise - persistence failure shouldn't break the UI
+            pass
 
 st.markdown("---")
 
@@ -383,6 +480,10 @@ with colB:
             except Exception:
                 loaded = []
         if loaded:
+            # ensure pnl_history backfill
+            for tr in loaded:
+                if "pnl_history" not in tr:
+                    tr["pnl_history"] = []
             st.session_state.trades = loaded
             st.success("Loaded trades from Drive.")
             try:
@@ -413,5 +514,3 @@ while True:
     if remaining <= 0:
         break
     time.sleep(1)
-
-#END
