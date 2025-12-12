@@ -493,27 +493,25 @@ with colB:
         else:
             st.info("No trades found on Drive (or load failed).")
 
-# ------------------- Countdown until next refresh -------------------
-import time
-
+# ------------------- Countdown until next refresh (non-blocking!) -------------------
 refresh_interval_sec = 600  # 10 minutes
 
-# This container will hold the countdown text
-countdown_placeholder = st.empty()
+# The autorefresh provides a counter in session_state. We use it to compute elapsed time.
+# We simply show time until next refresh, without blocking the script.
+if "last_refresh" not in st.session_state:
+    st.session_state.last_refresh = datetime.utcnow()
 
-# Calculate time since last refresh
-start_time = datetime.utcnow()
+elapsed = (datetime.utcnow() - st.session_state.last_refresh).total_seconds()
+remaining = max(refresh_interval_sec - elapsed, 0)
 
-# Update countdown until refresh (will stop at 0 because Streamlit will refresh)
-while True:
-    elapsed = (datetime.utcnow() - start_time).total_seconds()
-    remaining = max(refresh_interval_sec - elapsed, 0)
-    minutes = int(remaining // 60)
-    seconds = int(remaining % 60)
-    countdown_placeholder.markdown(f"**Time until next refresh: {minutes:02d}:{seconds:02d}**")
-    if remaining <= 0:
-        break
-    time.sleep(1)
+minutes = int(remaining // 60)
+seconds = int(remaining % 60)
+
+st.markdown(f"**Time until next refresh: {minutes:02d}:{seconds:02d}**")
+
+# When the script autorefreshes, this timestamp resets automatically
+if remaining <= 0:
+    st.session_state.last_refresh = datetime.utcnow()
 
 # ------------------- Quick Access (Collapsible Footer) -------------------
 st.markdown("---")
