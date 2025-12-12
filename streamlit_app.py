@@ -496,7 +496,7 @@ with colB:
 # ------------------- Quick Access (Collapsible Footer) -------------------
 st.markdown("---")
 
-with st.expander("Quick Access Links (click to expand)"):
+with st.expander("Quick Access Links"):
 
     st.markdown(
         """
