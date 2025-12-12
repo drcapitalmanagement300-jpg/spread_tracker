@@ -503,8 +503,13 @@ with st.expander("Quick Access Links (click to expand)"):
 **[Wealthsimple](https://my.wealthsimple.com/app/home)**  
 **[Option Screener](https://optionmoves.com/screener?ticker=SPY%2C+NVDA%2C+AAPL%2C+MSFT%2C+GOOG%2C+AMZN%2C+META%2C+BRK.B%2C+TSLA%2C+AVGO%2C+LLY%2C+JPM%2C+UNH%2C+V%2C+MA%2C+JNJ%2C+XOM%2C+CVX%2C+PG%2C+PEP%2C+KO%2C+WMT%2C+BAC%2C+PFE%2C+NFLX%2C+ORCL%2C+ADBE%2C+INTC%2C+COST%2C+ABT%2C+VZ&strategy=put-credit-spread&expiryType=dte&dte=30&deltaStrikeType=delta&delta=0.30&spreadWidth=5)**  
 **[IV Rank Check](https://marketchameleon.com/)**  
-[Trading Plan PDF](./Small Account Put Credit Spread Plan 3.0.pdf)
 """
+with open("Small Account Put Credit Spread Plan 3.0.pdf", "rb") as f:
+    st.download_button(
+        label="Open Trading Plan PDF",
+        data=f,
+        file_name="Small Account Put Credit Spread Plan 3.0.pdf",
+        mime="application/pdf"
     )
 
 # ------------------- Countdown until next refresh -------------------
