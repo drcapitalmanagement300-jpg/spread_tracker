@@ -17,7 +17,7 @@ FILE_ID = os.environ["GDRIVE_FILE_ID"]
 
 def get_drive_service():
     creds = Credentials.from_service_account_info(
-        json.loads(os.environ["GDRIVE_SERVICE_ACCOUNT_JSON"]),
+        json.loads(os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"]),
         scopes=SCOPES
     )
     return build("drive", "v3", credentials=creds)
