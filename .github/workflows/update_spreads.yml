@@ -2,7 +2,7 @@ name: Update Credit Spreads
 
 on:
   schedule:
-    - cron: "*/1 * * * *"   # every minute
+    - cron: "*/5 * * * *"   # every minute
 
 jobs:
   update-spreads:
