@@ -2,7 +2,10 @@ name: Update Credit Spreads
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every minute
+    # Every minute during approx. US market hours (UTC)
+    # Covers 9:30–16:00 ET year-round with slight buffer
+    - cron: "* 13-21 * * 1-5"
+  workflow_dispatch:
 
 jobs:
   update-spreads:
