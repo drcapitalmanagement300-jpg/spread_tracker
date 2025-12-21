@@ -26,6 +26,6 @@ jobs:
       - name: Run spread updater
         env:
           GDRIVE_FILE_ID: ${{ secrets.GDRIVE_FILE_ID }}
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
+          GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
         run: |
           python update_spreads.py
