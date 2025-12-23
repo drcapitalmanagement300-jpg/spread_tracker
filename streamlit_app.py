@@ -1,6 +1,5 @@
 import streamlit as st
 from datetime import date, datetime
-import time
 from typing import Optional
 import pandas as pd
 import altair as alt
@@ -37,18 +36,23 @@ except Exception:
     drive_service = None
 
 # ---------------- Header & Logo ----------------
-header_col1, header_col2, header_col3 = st.columns([2, 6, 1])
+# Adjust columns to keep title left-oriented next to logo
+header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 
 with header_col1:
-    # Displaying the uploaded logo
     try:
-        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.jpg", width=160)
+        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.jpg", width=140)
     except Exception:
         st.write("**DR CAPITAL**")
 
 with header_col2:
-    st.title("Put Credit Spread Monitor")
-    st.caption("Strategic Options Management System")
+    # Using some vertical padding to align text with logo center if needed
+    st.markdown("""
+    <div style='text-align: left; padding-top: 10px;'>
+        <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Put Credit Spread Monitor</h1>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 with header_col3:
     st.write("") # Spacer
@@ -142,7 +146,6 @@ with st.form("add_trade", clear_on_submit=True):
                 "expiration": expiration.isoformat(),
                 "credit": credit,
                 "entry_date": entry_date.isoformat(),
-                # Notes field removed as requested
                 "created_at": datetime.utcnow().isoformat(),
                 "cached": {},
                 "pnl_history": []
@@ -170,6 +173,7 @@ else:
         max_gain = t["credit"]
         max_loss = width - t["credit"]
 
+        # Retrieve cached market data
         current_price = cached.get("current_price")
         abs_delta = cached.get("abs_delta")
         spread_value = cached.get("spread_value_percent")
@@ -182,59 +186,69 @@ else:
 
         status_ok = not rules.get("other_rules", False)
         status_icon = "✅" if status_ok else "⚠️"
-        card_border = "2px solid #e0e0e0" if status_ok else "2px solid #ff4b4b"
+        
+        # Color coding for values
+        # Delta: Red if >= 0.40
+        delta_color = "red" if abs_delta and abs_delta >= 0.40 else "green"
+        delta_val = f"{abs_delta:.2f}" if abs_delta is not None else "-"
 
+        # Spread Value: Red if >= 150
+        spread_color = "red" if spread_value and spread_value >= 150 else "green"
+        spread_val = f"{spread_value:.0f}" if spread_value is not None else "-"
+
+        # DTE: Red if <= 7
+        dte_color = "red" if dte <= 7 else "green"
+
+        # Profit: Green if >= 50, else standard
+        if profit_pct is None:
+            profit_color = "inherit" # standard text color
+            profit_val = "-"
+        else:
+            profit_val = f"{profit_pct:.1f}"
+            if profit_pct >= 50:
+                profit_color = "green"
+            elif profit_pct < 0:
+                profit_color = "red"
+            else:
+                profit_color = "#e6b800" # dark yellow/orange
+
+        # Layout
         cols = st.columns([3, 4])
 
         # -------- LEFT CARD (Details) --------
         with cols[0]:
-            st.markdown(
-                f"""
-                <div style='background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: {card_border}; height: 100%;'>
-                    <h3 style='margin-top:0; color: #333;'>{t['ticker']} <span style='font-size: 16px; color: #666;'>{status_icon}</span></h3>
-                    <div style='display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 14px;'>
-                        <div><strong>Short:</strong> {t['short_strike']}</div>
-                        <div><strong>Long:</strong> {t['long_strike']}</div>
-                        <div><strong>Exp:</strong> {t['expiration']}</div>
-                        <div><strong>DTE:</strong> {dte}</div>
-                        <div><strong>Max Gain:</strong> {format_money(max_gain)}</div>
-                        <div><strong>Max Loss:</strong> {format_money(max_loss)}</div>
-                        <div style='grid-column: span 2; margin-top: 8px;'><strong>Underlying:</strong> {format_money(current_price) if current_price else '-'}</div>
-                    </div>
-                </div>
-                """, 
-                unsafe_allow_html=True
-            )
+            # Simple markdown without the background box for better visibility
+            st.markdown(f"### {t['ticker']} {status_icon}")
+            
+            # Using columns for a clean grid layout of data
+            d1, d2 = st.columns(2)
+            with d1:
+                st.write(f"**Short:** {t['short_strike']}")
+                st.write(f"**Long:** {t['long_strike']}")
+                st.write(f"**Exp:** {t['expiration']}")
+            with d2:
+                st.write(f"**Max Gain:** {format_money(max_gain)}")
+                st.write(f"**Max Loss:** {format_money(max_loss)}")
+                st.write(f"**Underlying:** {format_money(current_price) if current_price else '-'}")
+            
+            st.write(f"**Width:** {width:.2f}")
 
-        # -------- RIGHT CARD (Metrics & Chart) --------
+        # -------- RIGHT CARD (Alerts & Chart) --------
         with cols[1]:
-            # Color logic
-            delta_color = "#d32f2f" if abs_delta and abs_delta >= 0.40 else "#2e7d32"
-            spread_color = "#d32f2f" if spread_value and spread_value >= 150 else "#2e7d32"
-            dte_color = "#d32f2f" if dte <= 7 else "#2e7d32"
-
-            if profit_pct is None:
-                profit_color = "#333"
-            elif profit_pct < 50:
-                profit_color = "#2e7d32"
-            elif profit_pct <= 75:
-                profit_color = "#f9a825"
-            else:
-                profit_color = "#d32f2f"
-
-            # Metrics Row
+            # ALERT SECTION
             st.markdown(
                 f"""
-                <div style='display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 15px;'>
-                    <span>Short Delta: <strong style='color:{delta_color}'>{abs_delta if abs_delta else "-"}</strong></span>
-                    <span>Spread Val: <strong style='color:{spread_color}'>{spread_value if spread_value else "-"}%</strong></span>
-                    <span>Profit: <strong style='color:{profit_color}'>{profit_pct if profit_pct is not None else "-"}%</strong></span>
+                <div style="font-size: 14px; margin-bottom: 15px;">
+                    <div>Short-delta is currently <strong style='color:{delta_color}'>{delta_val}</strong> | Must remain below 0.40.</div>
+                    <div style="margin-top:4px;">Spread value is <strong style='color:{spread_color}'>{spread_val}%</strong> | Must remain below 150–200% of the credit received.</div>
+                    <div style="margin-top:4px;">DTE is <strong style='color:{dte_color}'>{dte}</strong> | Must be sold before 7 DTE.</div>
+                    <div style="margin-top:4px;">Current profit is <strong style='color:{profit_color}'>{profit_val}%</strong> | Must be sold at 50–75% of max profit.</div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
 
-            # -------- PnL CHART --------
+            # PnL CHART
             if t["pnl_history"]:
                 df = pd.DataFrame(t["pnl_history"])
                 df["date"] = pd.to_datetime(df["date"])
@@ -267,9 +281,8 @@ else:
         save_to_drive(drive_service, st.session_state.trades)
 
 st.markdown("---")
-st.caption("Market data is populated externally and stored in Drive JSON.")
 
-# ---------------- Manual Controls (Restored) ----------------
+# ---------------- Manual Controls ----------------
 colA, colB = st.columns(2)
 with colA:
     if st.button("💾 Save all trades to Google Drive now"):
@@ -300,30 +313,3 @@ with colB:
             st.experimental_rerun()
         else:
             st.info("No trades found or load failed.")
-
-# ---------------- Countdown Timer (Restored) ----------------
-# NOTE: This loop runs at the end of the script execution.
-# It provides the visual countdown requested.
-
-refresh_interval_sec = 600  # 10 minutes match st_autorefresh
-countdown_placeholder = st.empty()
-start_time = datetime.utcnow()
-
-while True:
-    elapsed = (datetime.utcnow() - start_time).total_seconds()
-    remaining = max(refresh_interval_sec - elapsed, 0)
-    minutes = int(remaining // 60)
-    seconds = int(remaining % 60)
-    
-    countdown_placeholder.markdown(
-        f"""
-        <div style='text-align: center; color: gray; font-size: 0.9em;'>
-            Next auto-refresh in: <strong>{minutes:02d}:{seconds:02d}</strong>
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
-    
-    if remaining <= 0:
-        break
-    time.sleep(1)
