@@ -368,7 +368,7 @@ else:
 # ---------------- Manual Controls ----------------
 # Updated layout to group buttons closer together
 st.write("### Data Sync")
-ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 5])
+ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 3])
 
 with ctl1:
     if st.button("💾 Save all trades to Google Drive"):
