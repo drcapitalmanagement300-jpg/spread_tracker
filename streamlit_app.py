@@ -80,7 +80,7 @@ def get_entry_dte(entry_date_str, expiry_date_str):
         expiry = date.fromisoformat(expiry_date_str)
         return (expiry - entry).days
     except:
-        return 30 
+        return 30 # fallback
 
 # ---------------- Load Drive State ----------------
 if drive_service:
@@ -92,6 +92,7 @@ else:
 # ---------------- Add Trade ----------------
 with st.form("add_trade", clear_on_submit=True):
     st.subheader("New Position Entry")
+
     c1, c2, c3 = st.columns(3)
     with c1:
         ticker = st.text_input("Ticker").upper()
@@ -112,7 +113,7 @@ with st.form("add_trade", clear_on_submit=True):
             st.warning("Long strike must be lower than short strike.")
         else:
             trade = {
-                "id": f"{ticker}-{short_strike}-{long_strike}-{expiration.isoformat()}-{datetime.utcnow().timestamp()}",
+                "id": f"{ticker}-{short_strike}-{long_strike}-{expiration.isoformat()}",
                 "ticker": ticker,
                 "short_strike": short_strike,
                 "long_strike": long_strike,
@@ -126,7 +127,7 @@ with st.form("add_trade", clear_on_submit=True):
             st.session_state.trades.append(trade)
             if drive_service:
                 save_to_drive(drive_service, st.session_state.trades)
-            st.success(f"Position initialized for {ticker}.")
+            st.success(f"Position initialized for {ticker}. Backend will sync data shortly.")
 
 st.markdown("---")
 
@@ -138,6 +139,7 @@ if not st.session_state.trades:
 else:
     for i, t in enumerate(st.session_state.trades):
         cached = t.get("cached", {})
+
         current_dte = days_to_expiry(t["expiration"])
         entry_dte = get_entry_dte(t["entry_date"], t["expiration"])
         
@@ -147,16 +149,10 @@ else:
 
         # Backend Data
         current_price = cached.get("current_price")
-        price_change_pct = cached.get("daily_change_percent", 0.0) # Pulled by backend script
         abs_delta = cached.get("abs_delta")
         spread_value = cached.get("spread_value_percent")
         profit_pct = cached.get("current_profit_percent")
         rules = cached.get("rule_violations", {})
-
-        # --- Ticker Display with % Change ---
-        change_color = "green" if price_change_pct >= 0 else "#d32f2f"
-        arrow = "↑" if price_change_pct >= 0 else "↓"
-        ticker_display = f"{t['ticker']} <span style='color:{change_color}; font-size:0.8em; margin-left:10px;'>{abs(price_change_pct):.1f}% {arrow}</span>"
 
         # --- Status Logic ---
         status_msg = "Status Nominal"
@@ -165,10 +161,14 @@ else:
 
         if rules.get("other_rules", False):
             status_icon = "⚠️"
-            status_color = "#d32f2f"
-            if abs_delta and abs_delta >= 0.40: status_msg = "Short Delta Exceeded (>0.40)"
-            elif spread_value and spread_value >= 150: status_msg = "Spread Value High (>150%)"
-            elif current_dte <= 7: status_msg = "Expiration Imminent (<7 DTE)"
+            status_color = "#d32f2f" # Red
+            # Determine specific error
+            if abs_delta and abs_delta >= 0.40:
+                status_msg = "Short Delta Exceeded (>0.40)"
+            elif spread_value and spread_value >= 150:
+                status_msg = "Spread Value High (>150%)"
+            elif current_dte <= 7:
+                status_msg = "Expiration Imminent (<7 DTE)"
         
         if profit_pct and profit_pct >= 50:
             status_icon = "💰" 
@@ -177,92 +177,134 @@ else:
 
         # --- Color Coding ---
         delta_color = "#d32f2f" if abs_delta and abs_delta >= 0.40 else "green"
+        delta_val = f"{abs_delta:.2f}" if abs_delta is not None else "Pending"
+
         spread_color = "#d32f2f" if spread_value and spread_value >= 150 else "green"
+        spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
+
         dte_color = "#d32f2f" if current_dte <= 7 else "green"
-        profit_color = "green" if (profit_pct or 0) >= 50 else "#e6b800"
+
+        if profit_pct is None:
+            profit_color = "inherit"
+            profit_val = "Pending"
+        else:
+            profit_val = f"{profit_pct:.1f}"
+            if profit_pct >= 50:
+                profit_color = "green"
+            elif profit_pct < 0:
+                profit_color = "#d32f2f"
+            else:
+                profit_color = "#e6b800"
 
         cols = st.columns([3, 4])
 
         # -------- LEFT CARD (Details) --------
         with cols[0]:
+            # Compact HTML Layout
             st.markdown(f"""
-            <div style="line-height: 1.2; font-size: 15px;">
-                <h3 style="margin-bottom: 2px; padding-bottom:0;">{ticker_display}</h3>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0px;">
+            <div style="line-height: 1.4; font-size: 15px;">
+                <h3 style="margin-bottom: 5px;">{t['ticker']}</h3>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2px;">
                     <div><strong>Short:</strong> {t['short_strike']}</div>
                     <div><strong>Max Gain:</strong> {format_money(max_gain)}</div>
                     <div><strong>Long:</strong> {t['long_strike']}</div>
                     <div><strong>Max Loss:</strong> {format_money(max_loss)}</div>
                     <div><strong>Exp:</strong> {t['expiration']}</div>
-                    <div><strong>Width:</strong> {width:.2f}</div>
+                    <div><strong>Und:</strong> {format_money(current_price) if current_price else '-'}</div>
+                    <div style="grid-column: span 2;"><strong>Width:</strong> {width:.2f}</div>
                 </div>
-                <div style="margin-top: 10px; padding-top: 5px; border-top: 1px solid #eee; color: {status_color}; font-weight: bold;">
+                <div style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; color: {status_color}; font-weight: bold;">
                    {status_icon} {status_msg}
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-            # --- CLOSE / LOG DIALOG ---
-            if st.button("Close Position / Log", key=f"log_btn_{i}"):
-                st.session_state[f"show_log_{i}"] = True
-
-            if st.session_state.get(f"show_log_{i}"):
-                with st.expander("📝 Close Trade Notes", expanded=True):
-                    notes = st.text_area("Reason for closing / Trade notes:", key=f"notes_{i}")
-                    if st.button("Confirm Close & Log", key=f"confirm_{i}"):
-                        # Log Snapshot
-                        closed_trade = t.copy()
-                        closed_trade["closed_at"] = datetime.utcnow().isoformat()
-                        closed_trade["closing_notes"] = notes
-                        # In a real app, save to a 'closed_trades.json' here
-                        
-                        st.session_state.trades.pop(i)
-                        if drive_service:
-                            save_to_drive(drive_service, st.session_state.trades)
-                        st.success("Trade logged and removed.")
-                        st.rerun()
-
         # -------- RIGHT CARD (Alerts & Chart) --------
         with cols[1]:
-            st.markdown(f"""
-                <div style="font-size: 13px; line-height: 1.4;">
-                    <div>Short-delta: <strong style='color:{delta_color}'>{abs_delta or 'Pending'}</strong> <span style='color:gray;'>(Must not exceed 0.40)</span></div>
-                    <div>Spread Value: <strong style='color:{spread_color}'>{spread_value or 'Pending'}%</strong> <span style='color:gray;'>(Must not exceed 150%)</span></div>
-                    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray;'>(Must not be less than 7)</span></div>
-                    <div>Profit: <strong style='color:{profit_color}'>{profit_pct or 'Pending'}%</strong> <span style='color:gray;'>(Must sell between 50-75%)</span></div>
+            st.markdown(
+                f"""
+                <div style="font-size: 14px; margin-bottom: 10px;">
+                    <div>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.9em'>(Max 0.40)</span></div>
+                    <div>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.9em'>(Max 150%)</span></div>
+                    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.9em'>(Min 7)</span></div>
+                    <div>Profit: <strong style='color:{profit_color}'>{profit_val}%</strong> <span style='color:gray; font-size:0.9em'>(Target 50-75%)</span></div>
                 </div>
-                """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True
+            )
 
+            # --- CHART LOGIC (DTE Axis) ---
             if t.get("pnl_history"):
                 df = pd.DataFrame(t["pnl_history"])
-                base = alt.Chart(df).mark_line(point=True).encode(
-                    x=alt.X("dte:Q", title="DTE", scale=alt.Scale(domain=[entry_dte, 0])),
-                    y=alt.Y("profit:Q", title="Profit %"),
-                    tooltip=["dte", "profit"]
-                ).properties(height=150)
-                st.altair_chart(base, use_container_width=True)
+                # We plot 'dte' on X, 'profit' on Y.
+                # Domain: Entry DTE -> 0. (Reversed: High numbers on left, 0 on right)
+                
+                base = alt.Chart(df).mark_line(point=True, strokeWidth=2).encode(
+                    x=alt.X(
+                        "dte:Q", 
+                        title="Days to Expiration (DTE)", 
+                        scale=alt.Scale(domain=[entry_dte, 0])  # Force domain from Entry -> 0
+                    ),
+                    y=alt.Y("profit:Q", scale=alt.Scale(domain=[-100, 100]), title="Profit %"),
+                    tooltip=["dte", "profit", "date"]
+                ).properties(height=200)
 
-        st.markdown("<hr style='margin: 15px 0; border-top: 1px solid #eee;'>", unsafe_allow_html=True)
+                line_50 = alt.Chart(pd.DataFrame({"y": [50]})).mark_rule(color="green", strokeDash=[5,5]).encode(y="y")
+                line_75 = alt.Chart(pd.DataFrame({"y": [75]})).mark_rule(color="green", strokeDash=[5,5]).encode(y="y")
+                line_0 = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="gray", strokeWidth=1).encode(y="y")
+
+                st.altair_chart(base + line_50 + line_75 + line_0, use_container_width=True)
+            else:
+                st.caption("Waiting for market data history...")
+
+            # Remove Button
+            if st.button("Close Position / Remove", key=f"remove_{i}"):
+                st.session_state.trades.pop(i)
+                if drive_service:
+                    save_to_drive(drive_service, st.session_state.trades)
+                st.experimental_rerun()
+
+        # Divider between trades
+        st.markdown("<hr style='margin-top: 20px; margin-bottom: 20px; border: 0; border-top: 1px solid #e0e0e0;'>", unsafe_allow_html=True)
 
 # ---------------- Manual Controls ----------------
-st.subheader("System Sync")
-sync_c1, sync_c2 = st.columns([1, 1])
-with sync_c1:
-    if st.button("💾 Save all trades to Google Drive", use_container_width=True):
-        if drive_service and save_to_drive(drive_service, st.session_state.trades):
-            st.success("Saved.")
-with sync_c2:
-    if st.button("📥 Reload trades from Google Drive", use_container_width=True):
+colA, colB = st.columns(2)
+with colA:
+    if st.button("💾 Save all trades to Google Drive now"):
+        saved = False
         if drive_service:
-            st.session_state.trades = load_from_drive(drive_service) or []
-            st.rerun()
+            try:
+                saved = save_to_drive(drive_service, st.session_state.trades)
+            except Exception:
+                saved = False
+        if saved:
+            st.success("Saved to Drive successfully.")
+        else:
+            st.error("Failed to save to Drive.")
+
+with colB:
+    if st.button("📥 Reload trades from Google Drive"):
+        if drive_service:
+            loaded = load_from_drive(drive_service)
+            if loaded is not None:
+                st.session_state.trades = loaded
+                st.success("Loaded trades from Drive.")
+                st.experimental_rerun()
+            else:
+                st.info("No trades found or load failed.")
 
 st.markdown("---")
 
-# ---------------- External Tools ----------------
+# ---------------- External Tools Section ----------------
 st.subheader("External Tools")
-t1, t2, t3, t4 = st.columns(4)
-t1.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
-t2.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
-t3.link_button("Option Screener", "https://optionmoves.com/screener", use_container_width=True)
-t4.link_button("IV Rank Check", "https://marketchameleon.com/", use_container_width=True)
+tools_c1, tools_c2, tools_c3, tools_c4 = st.columns(4)
+
+with tools_c1:
+    st.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
+with tools_c2:
+    st.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
+with tools_c3:
+    screener_url = "https://optionmoves.com/screener?ticker=SPY%2C+NVDA%2C+AAPL%2C+MSFT%2C+GOOG%2C+AMZN%2C+META%2C+BRK.B%2C+TSLA%2C+AVGO%2C+LLY%2C+JPM%2C+UNH%2C+V%2C+MA%2C+JNJ%2C+XOM%2C+CVX%2C+PG%2C+PEP%2C+KO%2C+WMT%2C+BAC%2C+PFE%2C+NFLX%2C+ORCL%2C+ADBE%2C+INTC%2C+COST%2C+ABT%2C+VZ&strategy=put-credit-spread&expiryType=dte&dte=30&deltaStrikeType=delta&delta=0.30&spreadWidth=5"
+    st.link_button("Option Screener", screener_url, use_container_width=True)
+with tools_c4:
+    st.link_button("IV Rank Check", "https://marketchameleon.com/", use_container_width=True)
