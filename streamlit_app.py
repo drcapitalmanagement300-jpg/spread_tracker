@@ -3,6 +3,7 @@ from datetime import date, datetime
 import pandas as pd
 import altair as alt
 from streamlit_autorefresh import st_autorefresh
+import io
 
 # ---------------- Persistence ----------------
 from persistence import (
@@ -12,6 +13,13 @@ from persistence import (
     load_from_drive,
     logout,
 )
+
+# Try to import Google API helpers for the journal feature
+# (These usually come with the library used in persistence)
+try:
+    from googleapiclient.http import MediaIoBaseUpload
+except ImportError:
+    MediaIoBaseUpload = None
 
 # ---------------- Page config ----------------
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
@@ -30,6 +38,59 @@ try:
     drive_service = build_drive_service_from_session()
 except Exception:
     drive_service = None
+
+# ---------------- Journal Helper ----------------
+def append_to_drive_journal(service, trade_data, notes):
+    """
+    Appends a log entry to 'trading_journal.txt' in the root of the Drive.
+    Creates the file if it doesn't exist.
+    """
+    if not service or not MediaIoBaseUpload:
+        return False
+
+    filename = "trading_journal.txt"
+    log_entry = (
+        f"\n{'='*30}\n"
+        f"DATE: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"ACTION: CLOSED POSITION\n"
+        f"TICKER: {trade_data.get('ticker')}\n"
+        f"STRIKES: -{trade_data.get('short_strike')} / +{trade_data.get('long_strike')}\n"
+        f"EXPIRY: {trade_data.get('expiration')}\n"
+        f"NOTES: {notes}\n"
+        f"{'='*30}\n"
+    )
+
+    try:
+        # 1. Search for existing file
+        query = f"name = '{filename}' and trashed = false"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get("files", [])
+
+        if not files:
+            # Create new file
+            file_metadata = {'name': filename, 'mimeType': 'text/plain'}
+            media = MediaIoBaseUpload(io.BytesIO(log_entry.encode('utf-8')), mimetype='text/plain', resumable=True)
+            service.files().create(body=file_metadata, media_body=media).execute()
+        else:
+            # Update existing file (Append logic is tricky in Drive API, usually requires download->append->upload)
+            # For simplicity in this patch, we will download current content, append string, and update.
+            file_id = files[0]['id']
+            
+            # Download
+            request = service.files().get_media(fileId=file_id)
+            current_content = request.execute()
+            
+            # Append
+            new_content = current_content + log_entry.encode('utf-8')
+            
+            # Upload Update
+            media = MediaIoBaseUpload(io.BytesIO(new_content), mimetype='text/plain', resumable=True)
+            service.files().update(fileId=file_id, media_body=media).execute()
+            
+        return True
+    except Exception as e:
+        print(f"Journal Error: {e}")
+        return False
 
 # ---------------- Header & Logo ----------------
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
@@ -137,6 +198,10 @@ st.subheader("Active Portfolio")
 if not st.session_state.trades:
     st.info("No active trades.")
 else:
+    # Iterate with index using a copy logic if needed, but enumeration is fine if we pop correctly
+    # We use a placeholder for re-rendering issues
+    trades_to_remove = []
+
     for i, t in enumerate(st.session_state.trades):
         cached = t.get("cached", {})
 
@@ -164,11 +229,11 @@ else:
             status_color = "#d32f2f" # Red
             # Determine specific error
             if abs_delta and abs_delta >= 0.40:
-                status_msg = "Short Delta Exceeded (>0.40)"
+                status_msg = "Short Delta High"
             elif spread_value and spread_value >= 150:
-                status_msg = "Spread Value High (>150%)"
+                status_msg = "Spread Value High"
             elif current_dte <= 7:
-                status_msg = "Expiration Imminent (<7 DTE)"
+                status_msg = "Expiration Imminent"
         
         if profit_pct and profit_pct >= 50:
             status_icon = "💰" 
@@ -198,9 +263,9 @@ else:
 
         cols = st.columns([3, 4])
 
-        # -------- LEFT CARD (Details) --------
+        # -------- LEFT CARD (Details + Close Button) --------
         with cols[0]:
-            # Compact HTML Layout
+            # Compact HTML Layout - Updated Text and Removed "Und:"
             st.markdown(f"""
             <div style="line-height: 1.4; font-size: 15px;">
                 <h3 style="margin-bottom: 5px;">{t['ticker']}</h3>
@@ -209,8 +274,7 @@ else:
                     <div><strong>Max Gain:</strong> {format_money(max_gain)}</div>
                     <div><strong>Long:</strong> {t['long_strike']}</div>
                     <div><strong>Max Loss:</strong> {format_money(max_loss)}</div>
-                    <div><strong>Exp:</strong> {t['expiration']}</div>
-                    <div><strong>Und:</strong> {format_money(current_price) if current_price else '-'}</div>
+                    <div style="grid-column: span 2;"><strong>Exp:</strong> {t['expiration']}</div>
                     <div style="grid-column: span 2;"><strong>Width:</strong> {width:.2f}</div>
                 </div>
                 <div style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; color: {status_color}; font-weight: bold;">
@@ -218,16 +282,57 @@ else:
                 </div>
             </div>
             """, unsafe_allow_html=True)
+            
+            st.write("") # Spacer
+            
+            # --- Close / Log Logic ---
+            # Unique key for every button using index
+            if st.button("Close Position / Log", key=f"btn_close_{i}"):
+                st.session_state[f"close_mode_{i}"] = True
+
+            # If close mode is active for this trade
+            if st.session_state.get(f"close_mode_{i}", False):
+                with st.container():
+                    st.markdown("---")
+                    st.info("Log entry for Trading Journal")
+                    with st.form(key=f"close_form_{i}"):
+                        close_notes = st.text_area("Closing Notes / Reason", height=80)
+                        submit_close = st.form_submit_button("Confirm Close & Log")
+                        
+                        if submit_close:
+                            # 1. Log to drive
+                            if drive_service:
+                                saved_journal = append_to_drive_journal(drive_service, t, close_notes)
+                                if saved_journal:
+                                    st.success("Entry added to 'trading_journal.txt'")
+                                else:
+                                    st.error("Could not write to Drive journal.")
+                            
+                            # 2. Remove from session state
+                            st.session_state.trades.pop(i)
+                            
+                            # 3. Save updated list
+                            if drive_service:
+                                save_to_drive(drive_service, st.session_state.trades)
+                            
+                            # 4. Cleanup state and rerun
+                            del st.session_state[f"close_mode_{i}"]
+                            st.experimental_rerun()
+
+                    if st.button("Cancel", key=f"cancel_{i}"):
+                        del st.session_state[f"close_mode_{i}"]
+                        st.experimental_rerun()
 
         # -------- RIGHT CARD (Alerts & Chart) --------
         with cols[1]:
+            # Updated Warning Text
             st.markdown(
                 f"""
                 <div style="font-size: 14px; margin-bottom: 10px;">
-                    <div>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.9em'>(Max 0.40)</span></div>
-                    <div>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.9em'>(Max 150%)</span></div>
-                    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.9em'>(Min 7)</span></div>
-                    <div>Profit: <strong style='color:{profit_color}'>{profit_val}%</strong> <span style='color:gray; font-size:0.9em'>(Target 50-75%)</span></div>
+                    <div>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must not exceed 0.40)</span></div>
+                    <div>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must not exceed 150%)</span></div>
+                    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must not be less than 7)</span></div>
+                    <div>Profit: <strong style='color:{profit_color}'>{profit_val}%</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must sell between 50-75%)</span></div>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -257,20 +362,16 @@ else:
             else:
                 st.caption("Waiting for market data history...")
 
-            # Remove Button
-            if st.button("Close Position / Remove", key=f"remove_{i}"):
-                st.session_state.trades.pop(i)
-                if drive_service:
-                    save_to_drive(drive_service, st.session_state.trades)
-                st.experimental_rerun()
-
         # Divider between trades
         st.markdown("<hr style='margin-top: 20px; margin-bottom: 20px; border: 0; border-top: 1px solid #e0e0e0;'>", unsafe_allow_html=True)
 
 # ---------------- Manual Controls ----------------
-colA, colB = st.columns(2)
-with colA:
-    if st.button("💾 Save all trades to Google Drive now"):
+# Updated layout to group buttons closer together
+st.write("### Data Sync")
+ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 4])
+
+with ctl1:
+    if st.button("💾 Save all trades to Google Drive"):
         saved = False
         if drive_service:
             try:
@@ -278,20 +379,20 @@ with colA:
             except Exception:
                 saved = False
         if saved:
-            st.success("Saved to Drive successfully.")
+            st.success("Saved successfully.")
         else:
-            st.error("Failed to save to Drive.")
+            st.error("Failed to save.")
 
-with colB:
+with ctl2:
     if st.button("📥 Reload trades from Google Drive"):
         if drive_service:
             loaded = load_from_drive(drive_service)
             if loaded is not None:
                 st.session_state.trades = loaded
-                st.success("Loaded trades from Drive.")
+                st.success("Loaded trades.")
                 st.experimental_rerun()
             else:
-                st.info("No trades found or load failed.")
+                st.info("No trades found/failed.")
 
 st.markdown("---")
 
