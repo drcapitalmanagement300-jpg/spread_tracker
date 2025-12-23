@@ -1,12 +1,12 @@
 import streamlit as st
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 import pandas as pd
 import altair as alt
 
 from streamlit_autorefresh import st_autorefresh
 
-# ---------------- Persistence (Drive JSON) ----------------
+# ---------------- Persistence ----------------
 from persistence import (
     ensure_logged_in,
     build_drive_service_from_session,
@@ -19,7 +19,8 @@ from persistence import (
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 
 # ---------------- UI Refresh ----------------
-st_autorefresh(interval=600_000, key="ui_refresh")
+# Refresh every 1 minute (60,000 ms) to pick up changes from the GitHub Action
+st_autorefresh(interval=60_000, key="ui_refresh")
 
 # ---------------- Auth / Drive ----------------
 try:
@@ -38,10 +39,8 @@ header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 
 with header_col1:
     try:
-        # Updated to PNG as requested
         st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=140)
     except Exception:
-        # Fallback if image not found
         st.write("**DR CAPITAL**")
 
 with header_col2:
@@ -78,36 +77,15 @@ def format_money(x):
     except Exception:
         return "-"
 
-def update_pnl_history(trade: dict, profit: Optional[float], dte: int) -> bool:
-    today = date.today().isoformat()
-    trade.setdefault("pnl_history", [])
-    
-    if any(p.get("date") == today for p in trade["pnl_history"]):
-        return False
-        
-    trade["pnl_history"].append({
-        "date": today,
-        "dte": dte,
-        "profit": profit if profit is not None else 0.0
-    })
-    return True
-
 # ---------------- Load Drive State ----------------
-def init_state():
+# We load every run to ensure we display the latest data from the backend script
+if drive_service:
+    st.session_state.trades = load_from_drive(drive_service) or []
+else:
     if "trades" not in st.session_state:
-        trades = []
-        if drive_service:
-            trades = load_from_drive(drive_service) or []
+        st.session_state.trades = []
 
-        for t in trades:
-            t.setdefault("cached", {})
-            t.setdefault("pnl_history", [])
-
-        st.session_state.trades = trades
-
-init_state()
-
-# ---------------- Add Trade (No Notes) ----------------
+# ---------------- Add Trade ----------------
 with st.form("add_trade", clear_on_submit=True):
     st.subheader("New Position Entry")
 
@@ -142,22 +120,23 @@ with st.form("add_trade", clear_on_submit=True):
                 "cached": {},
                 "pnl_history": []
             }
+            # Add to local state
             st.session_state.trades.append(trade)
+            # Push to Drive immediately
             if drive_service:
                 save_to_drive(drive_service, st.session_state.trades)
-            st.success(f"Position initialized for {ticker}.")
+            st.success(f"Position initialized for {ticker}. Backend will sync data shortly.")
 
 st.markdown("---")
 
-# ---------------- Display Trades (CARD UI) ----------------
+# ---------------- Display Trades ----------------
 st.subheader("Active Portfolio")
 
 if not st.session_state.trades:
     st.info("No active trades.")
 else:
-    history_changed = False
-
     for i, t in enumerate(st.session_state.trades):
+        # Data is now strictly pulled from the 'cached' object populated by the backend script
         cached = t.get("cached", {})
 
         dte = days_to_expiry(t["expiration"])
@@ -165,30 +144,28 @@ else:
         max_gain = t["credit"]
         max_loss = width - t["credit"]
 
+        # Backend Data
         current_price = cached.get("current_price")
         abs_delta = cached.get("abs_delta")
         spread_value = cached.get("spread_value_percent")
         profit_pct = cached.get("current_profit_percent")
         rules = cached.get("rule_violations", {})
 
-        if update_pnl_history(t, profit_pct, dte):
-            history_changed = True
-
         status_ok = not rules.get("other_rules", False)
         status_icon = "✅" if status_ok else "⚠️"
         
         # Color coding
         delta_color = "red" if abs_delta and abs_delta >= 0.40 else "green"
-        delta_val = f"{abs_delta:.2f}" if abs_delta is not None else "-"
+        delta_val = f"{abs_delta:.2f}" if abs_delta is not None else "Pending"
 
         spread_color = "red" if spread_value and spread_value >= 150 else "green"
-        spread_val = f"{spread_value:.0f}" if spread_value is not None else "-"
+        spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
 
         dte_color = "red" if dte <= 7 else "green"
 
         if profit_pct is None:
             profit_color = "inherit"
-            profit_val = "-"
+            profit_val = "Pending"
         else:
             profit_val = f"{profit_pct:.1f}"
             if profit_pct >= 50:
@@ -228,13 +205,28 @@ else:
                 unsafe_allow_html=True
             )
 
-            if t["pnl_history"]:
+            # CHART LOGIC
+            # We want the axis to span from Entry Date to Expiration Date
+            try:
+                entry_dt = date.fromisoformat(t["entry_date"])
+                expire_dt = date.fromisoformat(t["expiration"])
+            except:
+                entry_dt = date.today()
+                expire_dt = date.today()
+
+            if t.get("pnl_history"):
                 df = pd.DataFrame(t["pnl_history"])
                 df["date"] = pd.to_datetime(df["date"])
-                df = df.sort_values("date")
-
+                
+                # Chart setup
                 base = alt.Chart(df).mark_line(point=True, strokeWidth=2).encode(
-                    x=alt.X("date:T", title=None, axis=alt.Axis(format="%b %d")),
+                    x=alt.X(
+                        "date:T", 
+                        title=None, 
+                        axis=alt.Axis(format="%b %d"),
+                        # FORCE the domain to be the full trade duration
+                        scale=alt.Scale(domain=[pd.to_datetime(entry_dt), pd.to_datetime(expire_dt)])
+                    ),
                     y=alt.Y("profit:Q", scale=alt.Scale(domain=[-100, 100]), title="Profit %"),
                     tooltip=["date", "profit"]
                 ).properties(height=200)
@@ -247,14 +239,12 @@ else:
             else:
                 st.caption("Waiting for market data history...")
 
+            # Remove Button
             if st.button("Close Position / Remove", key=f"remove_{i}"):
                 st.session_state.trades.pop(i)
                 if drive_service:
                     save_to_drive(drive_service, st.session_state.trades)
                 st.experimental_rerun()
-
-    if history_changed and drive_service:
-        save_to_drive(drive_service, st.session_state.trades)
 
 st.markdown("---")
 
@@ -275,20 +265,15 @@ with colA:
 
 with colB:
     if st.button("📥 Reload trades from Google Drive"):
-        loaded = []
+        # Explicit reload logic
         if drive_service:
-            try:
-                loaded = load_from_drive(drive_service) or []
-            except Exception:
-                loaded = []
-        if loaded:
-            for tr in loaded:
-                tr.setdefault("pnl_history", [])
-            st.session_state.trades = loaded
-            st.success("Loaded trades from Drive.")
-            st.experimental_rerun()
-        else:
-            st.info("No trades found or load failed.")
+            loaded = load_from_drive(drive_service)
+            if loaded is not None:
+                st.session_state.trades = loaded
+                st.success("Loaded trades from Drive.")
+                st.experimental_rerun()
+            else:
+                st.info("No trades found or load failed.")
 
 st.markdown("---")
 
