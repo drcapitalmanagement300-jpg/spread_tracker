@@ -78,16 +78,6 @@ def get_entry_dte(entry_date_str, expiry_date_str):
     except Exception:
         return 30
 
-def save_closed_trade_snapshot(drive_service, trade, notes):
-    snapshot = {
-        "closed_at": datetime.utcnow().isoformat(),
-        "notes": notes,
-        "trade_snapshot": trade,
-    }
-    if drive_service:
-        filename = f"closed_trade_{trade['id']}_{datetime.utcnow().isoformat()}.json"
-        save_to_drive(drive_service, snapshot, filename_override=filename)
-
 # ---------------- Load Drive State ----------------
 if drive_service:
     st.session_state.trades = load_from_drive(drive_service) or []
@@ -109,9 +99,7 @@ with st.form("add_trade", clear_on_submit=True):
         entry_date = st.date_input("Entry Date")
         credit = st.number_input("Credit Received", min_value=0.0, format="%.2f")
 
-    submitted = st.form_submit_button("Initialize Position")
-
-    if submitted:
+    if st.form_submit_button("Initialize Position"):
         if not ticker:
             st.warning("Ticker required.")
         elif long_strike >= short_strike:
@@ -153,13 +141,13 @@ for i, t in enumerate(st.session_state.trades):
     profit_pct = cached.get("current_profit_percent")
     day_change = cached.get("day_change_pct")
 
-    # Intraday change formatting
+    # Intraday % change
     if day_change is None:
         day_change_html = ""
     else:
         arrow = "▲" if day_change >= 0 else "▼"
         color = "green" if day_change >= 0 else "#d32f2f"
-        day_change_html = f"<span style='color:{color}; font-size:16px;'> {day_change:.1f}% {arrow}</span>"
+        day_change_html = f"<span style='color:{color}; font-size:15px;'> {day_change:.1f}% {arrow}</span>"
 
     cols = st.columns([3, 4])
 
@@ -179,18 +167,11 @@ for i, t in enumerate(st.session_state.trades):
         </div>
         """, unsafe_allow_html=True)
 
-        # --- Close Position / Log ---
-        if st.button("Close Position / Log", key=f"log_{i}"):
-            st.session_state[f"closing_{i}"] = True
-
-        if st.session_state.get(f"closing_{i}"):
-            notes = st.text_area("Closing Notes / Reason", key=f"notes_{i}")
-            if st.button("Submit Close Log", key=f"submit_{i}"):
-                save_closed_trade_snapshot(drive_service, t, notes)
-                st.session_state.trades.pop(i)
-                if drive_service:
-                    save_to_drive(drive_service, st.session_state.trades)
-                st.experimental_rerun()
+        if st.button("Close Position / Log", key=f"remove_{i}"):
+            st.session_state.trades.pop(i)
+            if drive_service:
+                save_to_drive(drive_service, st.session_state.trades)
+            st.experimental_rerun()
 
     # -------- RIGHT CARD --------
     with cols[1]:
