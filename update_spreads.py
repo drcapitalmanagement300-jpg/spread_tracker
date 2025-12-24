@@ -2,6 +2,7 @@ import json
 import io
 import os
 import logging
+import requests
 from datetime import datetime, date, timedelta, timezone
 
 import numpy as np
@@ -18,9 +19,37 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-# Ensure these env vars are set in your GitHub Action
+# Secrets from GitHub Environment
 FILE_ID = os.environ.get("GDRIVE_FILE_ID")
 CREDS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+
+# -------------------- Discord Notification --------------------
+def send_discord_alert(ticker, description, color=15158332):
+    """
+    Sends a formatted alert to Discord.
+    Colors: Red (Risk) = 15158332, Green (Profit) = 3066993
+    """
+    if not DISCORD_WEBHOOK_URL:
+        logger.warning("Discord Webhook URL not set. Skipping notification.")
+        return
+
+    payload = {
+        "username": "DR Capital Monitor",
+        "embeds": [{
+            "title": f"🔔 Position Alert: {ticker}",
+            "description": description,
+            "color": color,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "System running on GitHub Actions"}
+        }]
+    }
+
+    try:
+        resp = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.error(f"Failed to send Discord alert: {e}")
 
 # -------------------- Google Drive --------------------
 def get_drive_service():
@@ -44,7 +73,7 @@ def download_json(service):
     try:
         return json.load(fh)
     except json.JSONDecodeError:
-        return [] # Return empty list if file is empty
+        return []
 
 def upload_json(service, data):
     logger.info("Uploading updated JSON to Drive...")
@@ -63,64 +92,39 @@ def days_to_expiry(expiry_str):
     return max((expiry - date.today()).days, 0)
 
 def bsm_delta(option_type, S, K, T, r, sigma):
-    """
-    S: Spot Price
-    K: Strike Price
-    T: Time to expiry (in years)
-    r: Risk-free rate (decimal, e.g., 0.05)
-    sigma: Implied Volatility (decimal, e.g., 0.20)
-    """
     if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
         return 0.0
-    
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    
     if option_type == "put":
         return norm.cdf(d1) - 1
-    # call
     return norm.cdf(d1)
 
 def get_option_data(ticker, expiration_str, short_strike, long_strike):
-    """
-    Fetches the specific option chain for the expiration date.
-    Returns: short_price, short_iv, long_price
-    """
     try:
         t = yf.Ticker(ticker)
-        
-        # yfinance requires expiration strings to match their available dates exactly.
-        # We try to find a close match if the user input formatted it differently.
         avail_dates = t.options
         if expiration_str not in avail_dates:
-            logger.warning(f"{ticker}: Expiration {expiration_str} not found in {avail_dates}")
             return None, None, None
 
         chain = t.option_chain(expiration_str)
         puts = chain.puts
-
-        # Filter for strikes
         short_row = puts[puts['strike'] == short_strike]
         long_row = puts[puts['strike'] == long_strike]
 
         if short_row.empty or long_row.empty:
-            logger.warning(f"{ticker}: Strikes {short_strike}/{long_strike} not found.")
             return None, None, None
 
-        # Extract data (using lastPrice as a proxy for mark, or (bid+ask)/2 if you prefer)
-        # Using lastPrice is often more stable for free data, though less accurate for illiquid options.
         short_price = float(short_row['lastPrice'].values[0])
-        short_iv = float(short_row['impliedVolatility'].values[0]) # Decimal format from yf
+        short_iv = float(short_row['impliedVolatility'].values[0]) 
         long_price = float(long_row['lastPrice'].values[0])
 
         return short_price, short_iv, long_price
-
     except Exception as e:
         logger.error(f"Error fetching data for {ticker}: {e}")
         return None, None, None
 
 # -------------------- Core Update Logic --------------------
 def update_trade(trade):
-    # 1. Basic Setup
     ticker = trade.get("ticker")
     expiry_str = trade.get("expiration")
     
@@ -129,70 +133,63 @@ def update_trade(trade):
         long_strike = float(trade.get("long_strike", 0))
         credit_received = float(trade.get("credit", 0))
     except ValueError:
-        return trade # Skip malformed trades
+        return trade 
 
-    width = abs(short_strike - long_strike)
-    max_loss = width - credit_received
-
-    # 2. Fetch Underlying Price
+    # 1. Fetch Market Data
     try:
         ticker_obj = yf.Ticker(ticker)
-        # fast_info is usually faster/more reliable for current price
         current_price = ticker_obj.fast_info.get("last_price") or ticker_obj.history(period="1d")['Close'].iloc[-1]
     except Exception:
         current_price = None
 
-    # 3. Fetch Option Legs
     short_price, short_iv, long_price = get_option_data(ticker, expiry_str, short_strike, long_strike)
-
-    # 4. Calculate Delta (Short Leg)
-    # yfinance IV is usually decimal (0.25). BSM needs decimal.
-    # Time must be in years.
-    delta = None
     dte = days_to_expiry(expiry_str)
-    
-    if current_price and short_iv and dte > 0:
-        T_years = dte / 365.0
-        # Assuming 5% risk free rate
-        delta = bsm_delta("put", current_price, short_strike, T_years, 0.05, short_iv)
 
-    # 5. Calculate Metrics
-    # Profit % = (Credit - CurrentSpreadValue) / MaxGain
-    # CurrentSpreadValue = ShortOption - LongOption
+    # 2. Delta Calc
+    delta = None
+    if current_price and short_iv and dte > 0:
+        delta = bsm_delta("put", current_price, short_strike, dte/365.0, 0.05, short_iv)
+
+    # 3. Metrics
     profit_pct = None
     spread_val_pct = None
-
-    if short_price is not None and long_price is not None:
+    if short_price is not None and long_price is not None and credit_received > 0:
         current_spread_cost = short_price - long_price
-        
-        # Calculate Profit % of Max Gain
-        if credit_received > 0:
-            current_profit = credit_received - current_spread_cost
-            profit_pct = (current_profit / credit_received) * 100
-            
-        # Calculate Spread Value % (Cost to close / Credit Received) ? 
-        # OR (Cost to close / Max Loss)? 
-        # User requirement: "Must remain below 150-200% of the credit received"
-        if credit_received > 0:
-            spread_val_pct = (current_spread_cost / credit_received) * 100
+        profit_pct = ((credit_received - current_spread_cost) / credit_received) * 100
+        spread_val_pct = (current_spread_cost / credit_received) * 100
 
-    # 6. Check Rules
+    # 4. Violation Logic
     rule_violations = { "other_rules": False, "iv_rule": False }
-    
-    # Delta Rule (< 0.40) (Check abs value because put delta is negative)
-    if delta is not None and abs(delta) >= 0.40:
-        rule_violations["other_rules"] = True
-    
-    # Spread Value Rule (< 150% of credit)
-    if spread_val_pct is not None and spread_val_pct >= 150:
-        rule_violations["other_rules"] = True
-        
-    # DTE Rule (> 7 days)
-    if dte <= 7:
-        rule_violations["other_rules"] = True
+    notif_msg = ""
+    notif_color = 15158332 # Red
 
-    # 7. Update Trade Object
-    # We update the 'cached' dictionary. App reads from here.
+    if profit_pct is not None and profit_pct >= 50:
+        notif_msg = f"✅ **Target Reached**: {profit_pct:.1f}% profit."
+        notif_color = 3066993 # Green
+    elif delta is not None and abs(delta) >= 0.40:
+        rule_violations["other_rules"] = True
+        notif_msg = f"⚠️ **Delta Breach**: {abs(delta):.2f} (Limit 0.40)"
+    elif spread_val_pct is not None and spread_val_pct >= 150:
+        rule_violations["other_rules"] = True
+        notif_msg = f"⚠️ **Spread Value High**: {spread_val_pct:.0f}% of credit."
+    elif dte <= 7:
+        rule_violations["other_rules"] = True
+        notif_msg = f"⚠️ **Low DTE**: Only {dte} days remaining."
+
+    # 5. Cooldown Check & Notification
+    if notif_msg:
+        last_sent_str = trade.get("last_alert_sent")
+        should_send = True
+        if last_sent_str:
+            last_sent = datetime.fromisoformat(last_sent_str).replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - last_sent < timedelta(hours=20):
+                should_send = False
+        
+        if should_send:
+            send_discord_alert(ticker, notif_msg, notif_color)
+            trade["last_alert_sent"] = datetime.now(timezone.utc).isoformat()
+
+    # 6. Final Object Update
     trade["cached"] = {
         "current_price": current_price,
         "abs_delta": abs(delta) if delta is not None else None, 
@@ -204,27 +201,16 @@ def update_trade(trade):
         "last_updated": datetime.now(timezone.utc).isoformat()
     }
 
-    # 8. Update History (PnL Tracking)
-    # Logic: Only add one entry per day.
+    # PnL History Update
     today_str = date.today().isoformat()
-    if "pnl_history" not in trade:
-        trade["pnl_history"] = []
-
-    # Check if today exists
+    if "pnl_history" not in trade: trade["pnl_history"] = []
     existing_entry = next((item for item in trade["pnl_history"] if item["date"] == today_str), None)
-    
     if profit_pct is not None:
         if existing_entry:
-            # Update today's entry with latest run
             existing_entry["profit"] = profit_pct
             existing_entry["dte"] = dte
         else:
-            # Create new entry
-            trade["pnl_history"].append({
-                "date": today_str,
-                "dte": dte,
-                "profit": profit_pct
-            })
+            trade["pnl_history"].append({"date": today_str, "dte": dte, "profit": profit_pct})
 
     return trade
 
@@ -232,21 +218,12 @@ def main():
     try:
         service = get_drive_service()
         trades = download_json(service)
-        
-        if not trades:
-            logger.info("No trades found in JSON.")
-            return
-
-        updated_trades = []
-        for trade in trades:
-            logger.info(f"Updating {trade.get('ticker')}...")
-            updated_trades.append(update_trade(trade))
-
+        if not trades: return
+        updated_trades = [update_trade(trade) for trade in trades]
         upload_json(service, updated_trades)
-        logger.info("Update complete.")
-        
+        logger.info("Update and Notifications complete.")
     except Exception as e:
-        logger.error(f"Fatal error in main loop: {e}")
+        logger.error(f"Fatal error: {e}")
         raise
 
 if __name__ == "__main__":
