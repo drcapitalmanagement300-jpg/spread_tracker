@@ -38,14 +38,68 @@ try:
 except Exception:
     drive_service = None
 
+# ---------------- Helpers ----------------
+def days_to_expiry(expiry) -> int:
+    if isinstance(expiry, str):
+        try:
+            expiry = date.fromisoformat(expiry)
+        except:
+            return 0
+    return max((expiry - date.today()).days, 0)
+
+def format_money(x):
+    try:
+        return f"${float(x):.2f}"
+    except Exception:
+        return "-"
+
+def get_entry_dte(entry_date_str, expiry_date_str):
+    try:
+        entry = date.fromisoformat(entry_date_str)
+        expiry = date.fromisoformat(expiry_date_str)
+        return (expiry - entry).days
+    except:
+        return 30 # fallback
+
 # ---------------- Journal Helper ----------------
 def append_to_drive_journal(service, trade_data, notes):
     """
     Appends a log entry to 'trading_journal.txt' in the root of the Drive.
-    Creates the file if it doesn't exist.
+    Includes PnL and Breached Conditions.
     """
     if not service or not MediaIoBaseUpload:
         return False
+
+    # Extract cached data for logging
+    cached = trade_data.get("cached", {})
+    profit_pct = cached.get("current_profit_percent")
+    
+    # Determine Profit/Loss String
+    if profit_pct is not None:
+        pnl_str = f"{profit_pct:.2f}%"
+    else:
+        pnl_str = "N/A (Data missing)"
+
+    # Determine Breached Conditions
+    conditions = []
+    rules = cached.get("rule_violations", {})
+    abs_delta = cached.get("abs_delta")
+    spread_val = cached.get("spread_value_percent")
+    current_dte = days_to_expiry(trade_data["expiration"])
+
+    if profit_pct and profit_pct >= 50:
+        conditions.append("PROFIT TARGET REACHED")
+    
+    if rules.get("other_rules", False):
+        if abs_delta and abs_delta >= 0.40:
+            conditions.append(f"DELTA BREACH ({abs_delta:.2f} >= 0.40)")
+        if spread_val and spread_val >= 150:
+            conditions.append(f"SPREAD VALUE BREACH ({spread_val:.0f}% >= 150%)")
+        if current_dte <= 7:
+             conditions.append(f"DTE LOW ({current_dte} <= 7)")
+
+    if not conditions:
+        conditions.append("None (Manual Close)")
 
     filename = "trading_journal.txt"
     log_entry = (
@@ -55,6 +109,8 @@ def append_to_drive_journal(service, trade_data, notes):
         f"TICKER: {trade_data.get('ticker')}\n"
         f"STRIKES: -{trade_data.get('short_strike')} / +{trade_data.get('long_strike')}\n"
         f"EXPIRY: {trade_data.get('expiration')}\n"
+        f"FINAL P/L: {pnl_str}\n"
+        f"CONDITIONS: {', '.join(conditions)}\n"
         f"NOTES: {notes}\n"
         f"{'='*30}\n"
     )
@@ -110,29 +166,6 @@ with header_col3:
         st.experimental_rerun()
 
 st.markdown("---")
-
-# ---------------- Helpers ----------------
-def days_to_expiry(expiry) -> int:
-    if isinstance(expiry, str):
-        try:
-            expiry = date.fromisoformat(expiry)
-        except:
-            return 0
-    return max((expiry - date.today()).days, 0)
-
-def format_money(x):
-    try:
-        return f"${float(x):.2f}"
-    except Exception:
-        return "-"
-
-def get_entry_dte(entry_date_str, expiry_date_str):
-    try:
-        entry = date.fromisoformat(entry_date_str)
-        expiry = date.fromisoformat(expiry_date_str)
-        return (expiry - entry).days
-    except:
-        return 30 # fallback
 
 # ---------------- Load Drive State ----------------
 if drive_service:
