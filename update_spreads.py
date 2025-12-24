@@ -19,17 +19,12 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-# Secrets from GitHub Environment
 FILE_ID = os.environ.get("GDRIVE_FILE_ID")
 CREDS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 # -------------------- Discord Notification --------------------
 def send_discord_alert(ticker, description, color=15158332):
-    """
-    Sends a formatted alert to Discord.
-    Colors: Red (Risk) = 15158332, Green (Profit) = 3066993
-    """
     if not DISCORD_WEBHOOK_URL:
         logger.warning("Discord Webhook URL not set. Skipping notification.")
         return
@@ -37,11 +32,11 @@ def send_discord_alert(ticker, description, color=15158332):
     payload = {
         "username": "DR Capital Monitor",
         "embeds": [{
-            "title": f"🔔 Position Alert: {ticker}",
+            "title": f"🔔 {ticker}",
             "description": description,
             "color": color,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "footer": {"text": "System running on GitHub Actions"}
+            "footer": {"text": "DR Capital Portfolio System"}
         }]
     }
 
@@ -50,6 +45,39 @@ def send_discord_alert(ticker, description, color=15158332):
         resp.raise_for_status()
     except Exception as e:
         logger.error(f"Failed to send Discord alert: {e}")
+
+# -------------------- Heartbeat Logic --------------------
+def handle_heartbeat(updated_trades):
+    """
+    Sends a daily status summary at approx 9:00 AM Eastern.
+    Uses UTC 13:00/14:00 window as a trigger.
+    """
+    now_utc = datetime.now(timezone.utc)
+    # 9:00 AM ET is 13:00 UTC (Daylight) or 14:00 UTC (Standard)
+    # We trigger if it's within the 13:00 or 14:00 hour
+    if now_utc.hour in [13, 14]:
+        # Check a 'global' flag in the first trade object to see if heartbeat sent today
+        # If no trades exist, we can't store state, but main() handles that
+        if not updated_trades: return
+        
+        last_hb = updated_trades[0].get("last_heartbeat_date")
+        today_str = date.today().isoformat()
+        
+        if last_hb != today_str:
+            total = len(updated_trades)
+            breaches = sum(1 for t in updated_trades if t.get("cached", {}).get("rule_violations", {}).get("other_rules"))
+            
+            summary = (
+                f"☀️ **Morning System Check (9:00 AM ET)**\n"
+                f"✅ **Status:** Online\n"
+                f"📊 **Positions:** {total}\n"
+                f"🚨 **Breaches:** {breaches}\n"
+                f"All systems operational."
+            )
+            send_discord_alert("System Heartbeat", summary, color=3447003) # Blue
+            
+            # Save state to the first trade to prevent multiple heartbeats in the same hour
+            updated_trades[0]["last_heartbeat_date"] = today_str
 
 # -------------------- Google Drive --------------------
 def get_drive_service():
@@ -135,7 +163,6 @@ def update_trade(trade):
     except ValueError:
         return trade 
 
-    # 1. Fetch Market Data
     try:
         ticker_obj = yf.Ticker(ticker)
         current_price = ticker_obj.fast_info.get("last_price") or ticker_obj.history(period="1d")['Close'].iloc[-1]
@@ -145,12 +172,10 @@ def update_trade(trade):
     short_price, short_iv, long_price = get_option_data(ticker, expiry_str, short_strike, long_strike)
     dte = days_to_expiry(expiry_str)
 
-    # 2. Delta Calc
     delta = None
     if current_price and short_iv and dte > 0:
         delta = bsm_delta("put", current_price, short_strike, dte/365.0, 0.05, short_iv)
 
-    # 3. Metrics
     profit_pct = None
     spread_val_pct = None
     if short_price is not None and long_price is not None and credit_received > 0:
@@ -158,7 +183,6 @@ def update_trade(trade):
         profit_pct = ((credit_received - current_spread_cost) / credit_received) * 100
         spread_val_pct = (current_spread_cost / credit_received) * 100
 
-    # 4. Violation Logic
     rule_violations = { "other_rules": False, "iv_rule": False }
     notif_msg = ""
     notif_color = 15158332 # Red
@@ -176,7 +200,6 @@ def update_trade(trade):
         rule_violations["other_rules"] = True
         notif_msg = f"⚠️ **Low DTE**: Only {dte} days remaining."
 
-    # 5. Cooldown Check & Notification
     if notif_msg:
         last_sent_str = trade.get("last_alert_sent")
         should_send = True
@@ -186,10 +209,9 @@ def update_trade(trade):
                 should_send = False
         
         if should_send:
-            send_discord_alert(ticker, notif_msg, notif_color)
+            send_discord_alert(f"Position Alert: {ticker}", notif_msg, notif_color)
             trade["last_alert_sent"] = datetime.now(timezone.utc).isoformat()
 
-    # 6. Final Object Update
     trade["cached"] = {
         "current_price": current_price,
         "abs_delta": abs(delta) if delta is not None else None, 
@@ -201,7 +223,6 @@ def update_trade(trade):
         "last_updated": datetime.now(timezone.utc).isoformat()
     }
 
-    # PnL History Update
     today_str = date.today().isoformat()
     if "pnl_history" not in trade: trade["pnl_history"] = []
     existing_entry = next((item for item in trade["pnl_history"] if item["date"] == today_str), None)
@@ -219,9 +240,14 @@ def main():
         service = get_drive_service()
         trades = download_json(service)
         if not trades: return
+        
         updated_trades = [update_trade(trade) for trade in trades]
+        
+        # Patch: Handle the Heartbeat Check
+        handle_heartbeat(updated_trades)
+        
         upload_json(service, updated_trades)
-        logger.info("Update and Notifications complete.")
+        logger.info("Update complete.")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         raise
