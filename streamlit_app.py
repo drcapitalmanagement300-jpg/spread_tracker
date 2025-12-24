@@ -373,7 +373,7 @@ else:
 
 # ---------------- Manual Controls ----------------
 st.write("### Data Sync")
-ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 4])
+ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 3.5])
 
 with ctl1:
     if st.button("💾 Save all trades to Google Drive"):
