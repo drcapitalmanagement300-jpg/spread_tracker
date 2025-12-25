@@ -152,6 +152,7 @@ else:
         # Backend Data
         current_price = cached.get("current_price")
         
+        # Support both old "abs_delta" and new "net_delta" structures
         abs_delta = cached.get("abs_delta") 
         if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
@@ -251,6 +252,7 @@ else:
             if st.button("Close Position / Log", key=f"btn_close_{i}"):
                 st.session_state[f"close_mode_{i}"] = True
 
+            # If close mode is active for this trade
             if st.session_state.get(f"close_mode_{i}", False):
                 with st.container():
                     st.markdown("---")
@@ -273,7 +275,7 @@ else:
                                 "Debit Paid ($)", 
                                 min_value=0.0, 
                                 value=float(f"{default_debit:.2f}"), 
-                                step=0.01
+                                step=0.01,
                                 help="Enter the price you paid to buy back the spread (positive number)."
                             )
                         
