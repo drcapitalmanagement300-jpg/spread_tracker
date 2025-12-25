@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import io
 import os
+import csv  # Added for CSV logging
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
@@ -336,11 +337,6 @@ def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
             lock.acquire()
             
         # 2. SMART MERGE STRATEGY
-        # Problem: 'trades' (from frontend) might have stale Delta/Price data
-        # because the backend updated the file while the user was staring at the screen.
-        # Solution: Download the LIVE file from Drive, and overlay the Frontend's 
-        # structure (Additions/Removals) onto the Backend's data.
-        
         # Download latest from Drive (Source of Truth for Prices/Deltas)
         latest_drive_trades = load_from_drive(service)
         drive_map = {t['id']: t for t in latest_drive_trades if 'id' in t}
@@ -359,7 +355,6 @@ def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
                     user_trade['cached'] = drive_trade['cached']
                 if 'pnl_history' in drive_trade:
                     user_trade['pnl_history'] = drive_trade['pnl_history']
-                # (Optional) If you want to sync heartbeat dates etc
                 if 'last_heartbeat_date' in drive_trade:
                     user_trade['last_heartbeat_date'] = drive_trade['last_heartbeat_date']
             
@@ -385,3 +380,99 @@ def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
     finally:
         if lock:
             lock.release()
+
+# ----------------------------- CSV Journaling -----------------------------
+
+def log_trade_to_csv(service, trade_data: Dict[str, Any], debit_paid: float, notes: str) -> bool:
+    """
+    Logs a closed trade to 'trade_journal.csv' on Drive.
+    Calculates Realized PnL and other metrics automatically.
+    """
+    FILENAME = "trade_journal.csv"
+    
+    # 1. Calculate Metrics
+    try:
+        credit = float(trade_data.get("credit", 0))
+        # PnL Calculation: (Credit Received - Debit Paid) * 100
+        # Assumes 1 contract sizing per entry
+        pnl_val = (credit - debit_paid) * 100
+        
+        entry_date_str = trade_data.get("entry_date", date.today().isoformat())
+        # Handle timestamp strings if they include time components
+        if isinstance(entry_date_str, str) and "T" in entry_date_str:
+            entry_date = datetime.fromisoformat(entry_date_str).date()
+        elif isinstance(entry_date_str, (date, datetime)):
+             entry_date = entry_date_str if isinstance(entry_date_str, date) else entry_date_str.date()
+        else:
+            entry_date = date.fromisoformat(entry_date_str)
+            
+        close_date = date.today()
+        days_held = (close_date - entry_date).days
+        
+        # Win/Loss Flag
+        if pnl_val > 0:
+            result = "WIN"
+        elif pnl_val < 0:
+            result = "LOSS"
+        else:
+            result = "BREAK-EVEN"
+        
+    except Exception as e:
+        print(f"Error calculating metrics: {e}")
+        pnl_val = 0
+        days_held = 0
+        result = "UNKNOWN"
+        credit = 0
+
+    # 2. Prepare Row Data
+    new_row = [
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), # Timestamp
+        trade_data.get("ticker"),                     # Ticker
+        "Put Credit Spread",                          # Type
+        trade_data.get("short_strike"),               # Short Strike
+        trade_data.get("long_strike"),                # Long Strike
+        trade_data.get("expiration"),                 # Expiry
+        entry_date_str,                               # Entry Date
+        days_held,                                    # Days Held
+        f"{credit:.2f}",                              # Credit (Entry)
+        f"{debit_paid:.2f}",                          # Debit (Exit)
+        f"{pnl_val:.2f}",                             # Realized PnL ($)
+        result,                                       # Result
+        notes                                         # User Notes
+    ]
+    
+    headers = [
+        "Timestamp", "Ticker", "Type", "Short Strike", "Long Strike", 
+        "Expiry", "Entry Date", "Days Held", "Credit", "Debit", 
+        "PnL", "Result", "Notes"
+    ]
+
+    # 3. Download Existing CSV (if any) to append
+    file_id = _find_file_id(service, FILENAME)
+    existing_content = ""
+    
+    if file_id:
+        existing_content = _download_file(service, file_id)
+    
+    # 4. Construct CSV Content
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    final_csv_str = ""
+    if not existing_content:
+        # New File: Write Headers + Row
+        writer.writerow(headers)
+        writer.writerow(new_row)
+        final_csv_str = output.getvalue()
+    else:
+        # Existing File: Append Row
+        # Ensure it ends with a newline before appending
+        if not existing_content.endswith("\n"):
+            existing_content += "\n"
+        
+        writer.writerow(new_row)
+        new_row_str = output.getvalue()
+        final_csv_str = existing_content + new_row_str
+
+    # 5. Upload
+    return _upload_file(service, FILENAME, final_csv_str)
