@@ -35,12 +35,12 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 class MarketDataManager:
     """
     Handles fetching market data with caching and retry logic.
-    Prevents redundant API calls when multiple trades share the same ticker/expiry.
     """
     def __init__(self):
-        self._price_cache = {}    # {ticker: (price, change_pct)}
-        self._chain_cache = {}    # {(ticker, expiry_date): option_chain_obj}
-        self._ticker_objs = {}    # {ticker: yf.Ticker}
+        # Cache stores tuple: (price, change_pct, history_list)
+        self._price_cache = {}    
+        self._chain_cache = {}    
+        self._ticker_objs = {}    
 
     def _get_yf_ticker(self, ticker):
         if ticker not in self._ticker_objs:
@@ -49,50 +49,52 @@ class MarketDataManager:
 
     def get_price_data(self, ticker):
         """
-        Fetches current price AND daily percentage change.
-        Returns: (price, change_percent)
+        Fetches:
+        1. Current Price
+        2. Daily Change %
+        3. 30-Day Price History (List of dicts)
         """
-        # Check cache
         if ticker in self._price_cache:
             return self._price_cache[ticker]
 
         ticker_obj = self._get_yf_ticker(ticker)
         price = None
         change_pct = 0.0
+        history_list = []
         
-        # Retry loop
         for attempt in range(3):
             try:
-                # fast_info provides both last_price and previous_close efficiently
-                info = ticker_obj.fast_info
-                price = info.get("last_price")
-                prev_close = info.get("previous_close")
+                # Fetch 1 month of history for the chart
+                hist = ticker_obj.history(period="1mo")
                 
-                # Check if data is valid
-                if price is not None and prev_close is not None and prev_close > 0:
-                    change_pct = ((price - prev_close) / prev_close) * 100
-                    break
-                
-                # Fallback to history if fast_info fails (e.g. sometimes on indices)
-                if price is None:
-                    hist = ticker_obj.history(period="2d")
-                    if not hist.empty:
-                        price = hist['Close'].iloc[-1]
-                        if len(hist) >= 2:
-                            prev_close = hist['Close'].iloc[-2]
+                if not hist.empty:
+                    # 1. Current Price (Last Close)
+                    price = hist['Close'].iloc[-1]
+                    
+                    # 2. Change % (Compare last close to previous close)
+                    if len(hist) >= 2:
+                        prev_close = hist['Close'].iloc[-2]
+                        if prev_close > 0:
                             change_pct = ((price - prev_close) / prev_close) * 100
-                
-                if price is not None:
+                    
+                    # 3. History List (Minimizing data size for JSON)
+                    hist_reset = hist.reset_index()
+                    history_list = []
+                    for _, row in hist_reset.iterrows():
+                        # Handle different yfinance date formats
+                        d_str = row['Date'].strftime('%Y-%m-%d')
+                        history_list.append({"date": d_str, "close": round(row['Close'], 2)})
+                    
                     break
             except Exception as e:
-                logger.warning(f"[Attempt {attempt+1}/3] Price data failed for {ticker}: {e}")
+                logger.warning(f"[Attempt {attempt+1}/3] Data fetch failed for {ticker}: {e}")
                 time.sleep(2 * (attempt + 1))
 
         if price:
-            self._price_cache[ticker] = (price, change_pct)
-            return price, change_pct
+            self._price_cache[ticker] = (price, change_pct, history_list)
+            return price, change_pct, history_list
         
-        return None, None
+        return None, None, []
 
     def get_chain(self, ticker, expiration):
         """Fetches option chain with caching and retries."""
@@ -103,14 +105,12 @@ class MarketDataManager:
         ticker_obj = self._get_yf_ticker(ticker)
         chain = None
 
-        # Quick check if date is valid
         try:
             if expiration not in ticker_obj.options:
                 return None
         except Exception:
             pass 
 
-        # Retry loop
         for attempt in range(3):
             try:
                 chain = ticker_obj.option_chain(expiration)
@@ -151,7 +151,6 @@ def send_discord_alert(ticker, description, color=15158332):
 # -------------------- Heartbeat Logic --------------------
 def handle_heartbeat(updated_trades):
     now_utc = datetime.now(timezone.utc)
-    # Trigger window: 13:00 or 14:00 UTC
     if now_utc.hour in [13, 14]:
         if not updated_trades: return
         
@@ -248,6 +247,40 @@ def calculate_greeks(option_type, S, K, T, r, sigma):
         "theta": theta_daily
     }
 
+def calculate_price_for_delta(target_delta, option_type, K, T, r, sigma):
+    """
+    Inverts the Black-Scholes Delta formula to find the Stock Price (S)
+    that would result in the 'target_delta'.
+    
+    Target Delta should be absolute (e.g., 0.40).
+    """
+    if T <= 0 or sigma <= 0 or K <= 0:
+        return None
+
+    try:
+        # For a Put: Delta = N(d1) - 1  --->  N(d1) = 1 + Delta (negative)
+        # We work with absolute delta for inputs
+        if option_type == "put":
+            # Real Put Delta is negative (e.g. -0.40). 
+            # N(d1) - 1 = -0.40  --->  N(d1) = 0.60
+            target_prob = 1.0 - abs(target_delta)
+        else:
+            # Call: N(d1) = 0.40
+            target_prob = abs(target_delta)
+
+        # Inverse CDF (norm.ppf) to find d1
+        d1 = norm.ppf(target_prob)
+
+        # Solve for S derived from d1 formula:
+        # d1 = (ln(S/K) + (r + 0.5*sigma^2)*T) / (sigma*sqrt(T))
+        # ln(S/K) = d1 * sigma * sqrt(T) - (r + 0.5*sigma^2)*T
+        ln_s_k = d1 * sigma * np.sqrt(T) - (r + 0.5 * sigma**2) * T
+        
+        S = K * np.exp(ln_s_k)
+        return S
+    except Exception:
+        return None
+
 def get_option_data(data_manager, ticker, expiration_str, short_strike, long_strike):
     """
     Uses the MarketDataManager to retrieve cached chain data.
@@ -258,7 +291,6 @@ def get_option_data(data_manager, ticker, expiration_str, short_strike, long_str
             return None, None, None, None
 
         puts = chain.puts
-        
         short_row = puts[puts['strike'] == short_strike]
         long_row = puts[puts['strike'] == long_strike]
 
@@ -287,10 +319,10 @@ def update_trade(trade, data_manager):
     except ValueError:
         return trade 
 
-    # 1. Fetch Price & Change (Cached/Retried)
-    current_price, day_change_pct = data_manager.get_price_data(ticker)
+    # 1. Fetch Price, Change, AND History
+    current_price, day_change_pct, price_history = data_manager.get_price_data(ticker)
 
-    # 2. Fetch Option Data (Cached/Retried)
+    # 2. Fetch Option Data
     short_price, long_price, short_iv, long_iv = get_option_data(
         data_manager, ticker, expiry_str, short_strike, long_strike
     )
@@ -298,17 +330,22 @@ def update_trade(trade, data_manager):
     dte = days_to_expiry(expiry_str)
     T_years = dte / 365.0
 
-    # 3. Calculate Greeks
+    # 3. Calculate Greeks & Risk Levels
     short_leg_greeks = {"delta": 0, "gamma": 0, "theta": 0}
     long_leg_greeks = {"delta": 0, "gamma": 0, "theta": 0}
     
+    # NEW: Calculate the Price at which Delta hits 0.40
+    critical_price_040 = None
+
     if current_price and dte > 0:
         if short_iv:
             short_leg_greeks = calculate_greeks("put", current_price, short_strike, T_years, 0.05, short_iv)
+            # Calculate the "Greek Driven Stop Loss" price
+            critical_price_040 = calculate_price_for_delta(0.40, "put", short_strike, T_years, 0.05, short_iv)
+
         if long_iv:
             long_leg_greeks = calculate_greeks("put", current_price, long_strike, T_years, 0.05, long_iv)
 
-    # Net Position Greeks (Short Put Spread = Short the Short, Long the Long)
     net_delta = (-1 * short_leg_greeks["delta"]) + (1 * long_leg_greeks["delta"])
     net_gamma = (-1 * short_leg_greeks["gamma"]) + (1 * long_leg_greeks["gamma"])
     net_theta = (-1 * short_leg_greeks["theta"]) + (1 * long_leg_greeks["theta"])
@@ -326,7 +363,7 @@ def update_trade(trade, data_manager):
     notif_msg = ""
     notif_color = 15158332 # Red
 
-    short_abs_delta = abs(short_leg_greeks["delta"]) # For assignment risk
+    short_abs_delta = abs(short_leg_greeks["delta"]) 
 
     if profit_pct is not None and profit_pct >= 50:
         notif_msg = f"✅ **Target Reached**: {profit_pct:.1f}% profit."
@@ -355,7 +392,9 @@ def update_trade(trade, data_manager):
 
     trade["cached"] = {
         "current_price": current_price,
-        "day_change_percent": day_change_pct, # <--- Stored here
+        "day_change_percent": day_change_pct,
+        "price_history": price_history,           # <--- History stored here
+        "critical_price_040": critical_price_040, # <--- Stop Loss Price
         "short_option_price": short_price,
         "long_option_price": long_price,
         "abs_delta": short_abs_delta, 
