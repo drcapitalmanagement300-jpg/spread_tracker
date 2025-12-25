@@ -6,6 +6,9 @@ import pandas as pd
 import altair as alt
 from streamlit_autorefresh import st_autorefresh
 import io
+import html
+def esc(x):
+    return html.escape(str(x)) if x is not None else ""
 
 # ---------------- Persistence ----------------
 from persistence import (
