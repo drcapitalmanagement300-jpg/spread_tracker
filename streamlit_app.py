@@ -152,7 +152,7 @@ else:
         # Backend Data
         current_price = cached.get("current_price")
         
-        # Support both old and new delta keys
+        # Support both old "abs_delta" and new "net_delta" structures
         abs_delta = cached.get("abs_delta") 
         if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
@@ -213,11 +213,11 @@ else:
             if day_change is None: day_change = 0.0
             
             if day_change > 0:
-                change_color = "#4caf50" 
+                change_color = "green" # MATCHES 'status_color'
                 arrow = "▲"
                 change_str = f"{day_change:.2f}%"
             elif day_change < 0:
-                change_color = "#f44336" 
+                change_color = "#d32f2f" # MATCHES ERROR RED
                 arrow = "▼"
                 change_str = f"{abs(day_change):.2f}%" 
             else:
