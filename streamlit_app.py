@@ -316,28 +316,41 @@ else:
         cols = st.columns([3, 4])
 
         # -------- LEFT CARD (Details + Close Button) --------
-        with cols[0]:
-            # Updated HTML Layout: Ticker + Price + Change Arrow
-            st.markdown(f"""
-            <div style="line-height: 1.4; font-size: 15px;">
-                <div style="display: flex; align-items: baseline; margin-bottom: 8px;">
-                    <h3 style="margin: 0; padding: 0;">{t['ticker']}</h3>
-                    {price_html}
+with cols[0]:
+    st.markdown(
+        f"""
+        <div style="line-height: 1.4; font-size: 15px;">
+            <div style="display: flex; align-items: baseline; margin-bottom: 8px;">
+                <h3 style="margin: 0; padding: 0;">{esc(t['ticker'])}</h3>
+                {price_html}
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2px;">
+                <div><strong>Short:</strong> {esc(t['short_strike'])}</div>
+                <div><strong>Max Gain:</strong> {esc(format_money(max_gain))}</div>
+                <div><strong>Long:</strong> {esc(t['long_strike'])}</div>
+                <div><strong>Max Loss:</strong> {esc(format_money(max_loss))}</div>
+                <div style="grid-column: span 2;">
+                    <strong>Exp:</strong> {esc(t['expiration'])}
                 </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2px;">
-                    <div><strong>Short:</strong> {t['short_strike']}</div>
-                    <div><strong>Max Gain:</strong> {format_money(max_gain)}</div>
-                    <div><strong>Long:</strong> {t['long_strike']}</div>
-                    <div><strong>Max Loss:</strong> {format_money(max_loss)}</div>
-                    <div style="grid-column: span 2;"><strong>Exp:</strong> {t['expiration']}</div>
-                    <div style="grid-column: span 2;"><strong>Width:</strong> {width:.2f}</div>
-                </div>
-                <div style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; color: {status_color}; font-weight: bold;">
-                   {status_icon} {status_msg}
+                <div style="grid-column: span 2;">
+                    <strong>Width:</strong> {esc(f"{width:.2f}")}
                 </div>
             </div>
-            """, unsafe_allow_html=True)
-            
+
+            <div style="
+                margin-top: 15px;
+                padding-top: 10px;
+                border-top: 1px solid #eee;
+                color: {status_color};
+                font-weight: bold;
+            ">
+                {esc(status_icon)} {esc(status_msg)}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
             st.write("") # Spacer
             
             # --- Close / Log Logic ---
