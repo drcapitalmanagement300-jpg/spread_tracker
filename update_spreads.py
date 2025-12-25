@@ -13,13 +13,10 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-# Import the Lock Manager
-# Assumes google_drive.py is in the same directory (repo root)
+# Import Lock Manager (Safe fallback)
 try:
     from google_drive import DriveLockManager
 except ImportError:
-    # Fallback if running in an environment where local imports are tricky,
-    # though usually unnecessary if files are side-by-side.
     logging.warning("Could not import DriveLockManager. Running without locks.")
     DriveLockManager = None
 
@@ -58,16 +55,8 @@ def send_discord_alert(ticker, description, color=15158332):
 
 # -------------------- Heartbeat Logic --------------------
 def handle_heartbeat(updated_trades):
-    """
-    Sends a daily status summary at approx 9:00 AM Eastern.
-    Uses UTC 13:00/14:00 window as a trigger.
-    """
     now_utc = datetime.now(timezone.utc)
-    # 9:00 AM ET is 13:00 UTC (Daylight) or 14:00 UTC (Standard)
-    # We trigger if it's within the 13:00 or 14:00 hour
     if now_utc.hour in [13, 14]:
-        # Check a 'global' flag in the first trade object to see if heartbeat sent today
-        # If no trades exist, we can't store state, but main() handles that
         if not updated_trades: return
         
         last_hb = updated_trades[0].get("last_heartbeat_date")
@@ -84,9 +73,7 @@ def handle_heartbeat(updated_trades):
                 f"🚨 **Breaches:** {breaches}\n"
                 f"All systems operational."
             )
-            send_discord_alert("System Heartbeat", summary, color=3447003) # Blue
-            
-            # Save state to the first trade to prevent multiple heartbeats in the same hour
+            send_discord_alert("System Heartbeat", summary, color=3447003) 
             updated_trades[0]["last_heartbeat_date"] = today_str
 
 # -------------------- Google Drive --------------------
@@ -119,7 +106,7 @@ def upload_json(service, data):
     media = MediaIoBaseUpload(fh, mimetype="application/json", resumable=False)
     service.files().update(fileId=FILE_ID, media_body=media).execute()
 
-# -------------------- Math & Financials --------------------
+# -------------------- Math & Financials (Upgraded) --------------------
 def days_to_expiry(expiry_str):
     if not expiry_str: 
         return 0
@@ -129,37 +116,82 @@ def days_to_expiry(expiry_str):
         return 0
     return max((expiry - date.today()).days, 0)
 
-def bsm_delta(option_type, S, K, T, r, sigma):
+def calculate_greeks(option_type, S, K, T, r, sigma):
+    """
+    Calculates Delta, Gamma, and Theta using Black-Scholes-Merton.
+    Returns a dictionary of values.
+    """
+    # Safety checks to prevent division by zero
     if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
-        return 0.0
+        return {"delta": 0.0, "gamma": 0.0, "theta": 0.0}
+
+    # d1 and d2 calculations
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    if option_type == "put":
-        return norm.cdf(d1) - 1
-    return norm.cdf(d1)
+    d2 = d1 - sigma * np.sqrt(T)
+
+    # PDF and CDF of standard normal distribution
+    pdf_d1 = norm.pdf(d1)
+    cdf_d1 = norm.cdf(d1)
+    cdf_d2 = norm.cdf(d2)
+
+    # --- Delta ---
+    if option_type == "call":
+        delta = cdf_d1
+    else: # put
+        delta = cdf_d1 - 1
+
+    # --- Gamma ---
+    # Gamma is the same for Calls and Puts
+    gamma = pdf_d1 / (S * sigma * np.sqrt(T))
+
+    # --- Theta ---
+    # Annual Theta. Usually divided by 365 for daily decay.
+    term1 = -(S * pdf_d1 * sigma) / (2 * np.sqrt(T))
+    
+    if option_type == "call":
+        theta_annual = term1 - r * K * np.exp(-r * T) * norm.cdf(d2)
+    else: # put
+        # Put Theta formula
+        theta_annual = term1 + r * K * np.exp(-r * T) * norm.cdf(-d2)
+
+    # Convert annual theta to daily theta
+    theta_daily = theta_annual / 365.0
+
+    return {
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta_daily
+    }
 
 def get_option_data(ticker, expiration_str, short_strike, long_strike):
     try:
         t = yf.Ticker(ticker)
         avail_dates = t.options
         if expiration_str not in avail_dates:
-            return None, None, None
+            return None, None, None, None
 
         chain = t.option_chain(expiration_str)
         puts = chain.puts
+        
         short_row = puts[puts['strike'] == short_strike]
         long_row = puts[puts['strike'] == long_strike]
 
         if short_row.empty or long_row.empty:
-            return None, None, None
+            return None, None, None, None
 
+        # Extract Prices
         short_price = float(short_row['lastPrice'].values[0])
-        short_iv = float(short_row['impliedVolatility'].values[0]) 
         long_price = float(long_row['lastPrice'].values[0])
+        
+        # Extract IVs
+        # Note: yfinance IVs can sometimes be 0 or erratic. 
+        short_iv = float(short_row['impliedVolatility'].values[0])
+        long_iv = float(long_row['impliedVolatility'].values[0])
 
-        return short_price, short_iv, long_price
+        return short_price, long_price, short_iv, long_iv
     except Exception as e:
         logger.error(f"Error fetching data for {ticker}: {e}")
-        return None, None, None
+        return None, None, None, None
 
 # -------------------- Core Update Logic --------------------
 def update_trade(trade):
@@ -179,13 +211,29 @@ def update_trade(trade):
     except Exception:
         current_price = None
 
-    short_price, short_iv, long_price = get_option_data(ticker, expiry_str, short_strike, long_strike)
+    # Fetch data (Now gets both IVs)
+    short_price, long_price, short_iv, long_iv = get_option_data(ticker, expiry_str, short_strike, long_strike)
     dte = days_to_expiry(expiry_str)
+    T_years = dte / 365.0
 
-    delta = None
-    if current_price and short_iv and dte > 0:
-        delta = bsm_delta("put", current_price, short_strike, dte/365.0, 0.05, short_iv)
+    # Initialize Greeks
+    short_leg_greeks = {"delta": 0, "gamma": 0, "theta": 0}
+    long_leg_greeks = {"delta": 0, "gamma": 0, "theta": 0}
+    
+    # Calculate Greeks if data is valid
+    if current_price and dte > 0:
+        if short_iv:
+            short_leg_greeks = calculate_greeks("put", current_price, short_strike, T_years, 0.05, short_iv)
+        if long_iv:
+            long_leg_greeks = calculate_greeks("put", current_price, long_strike, T_years, 0.05, long_iv)
 
+    # --- Calculate Net Position Greeks ---
+    # Position: Short (-1) the Short Put, Long (+1) the Long Put
+    net_delta = (-1 * short_leg_greeks["delta"]) + (1 * long_leg_greeks["delta"])
+    net_gamma = (-1 * short_leg_greeks["gamma"]) + (1 * long_leg_greeks["gamma"])
+    net_theta = (-1 * short_leg_greeks["theta"]) + (1 * long_leg_greeks["theta"])
+
+    # Profit & Spread Value
     profit_pct = None
     spread_val_pct = None
     if short_price is not None and long_price is not None and credit_received > 0:
@@ -193,16 +241,20 @@ def update_trade(trade):
         profit_pct = ((credit_received - current_spread_cost) / credit_received) * 100
         spread_val_pct = (current_spread_cost / credit_received) * 100
 
+    # Rules Engine
     rule_violations = { "other_rules": False, "iv_rule": False }
     notif_msg = ""
     notif_color = 15158332 # Red
 
+    # Use SHORT LEG Delta for risk check (standard assignment risk check)
+    short_abs_delta = abs(short_leg_greeks["delta"])
+
     if profit_pct is not None and profit_pct >= 50:
         notif_msg = f"✅ **Target Reached**: {profit_pct:.1f}% profit."
         notif_color = 3066993 # Green
-    elif delta is not None and abs(delta) >= 0.40:
+    elif short_abs_delta >= 0.40:
         rule_violations["other_rules"] = True
-        notif_msg = f"⚠️ **Delta Breach**: {abs(delta):.2f} (Limit 0.40)"
+        notif_msg = f"⚠️ **Delta Breach**: {short_abs_delta:.2f} (Limit 0.40)"
     elif spread_val_pct is not None and spread_val_pct >= 150:
         rule_violations["other_rules"] = True
         notif_msg = f"⚠️ **Spread Value High**: {spread_val_pct:.0f}% of credit."
@@ -222,11 +274,20 @@ def update_trade(trade):
             send_discord_alert(f"Position Alert: {ticker}", notif_msg, notif_color)
             trade["last_alert_sent"] = datetime.now(timezone.utc).isoformat()
 
+    # --- Cache Data ---
     trade["cached"] = {
         "current_price": current_price,
-        "abs_delta": abs(delta) if delta is not None else None, 
         "short_option_price": short_price,
         "long_option_price": long_price,
+        
+        # Risk Metrics
+        "abs_delta": short_abs_delta, # Kept for backward compatibility/alerts
+        
+        # New Net Greeks
+        "net_delta": net_delta,
+        "net_gamma": net_gamma,
+        "net_theta": net_theta,
+        
         "current_profit_percent": profit_pct,
         "spread_value_percent": spread_val_pct,
         "rule_violations": rule_violations,
@@ -240,8 +301,14 @@ def update_trade(trade):
         if existing_entry:
             existing_entry["profit"] = profit_pct
             existing_entry["dte"] = dte
+            existing_entry["net_theta"] = net_theta
         else:
-            trade["pnl_history"].append({"date": today_str, "dte": dte, "profit": profit_pct})
+            trade["pnl_history"].append({
+                "date": today_str, 
+                "dte": dte, 
+                "profit": profit_pct,
+                "net_theta": net_theta
+            })
 
     return trade
 
@@ -249,23 +316,17 @@ def main():
     try:
         service = get_drive_service()
         
-        # --- LOCKING MECHANISM START ---
         lock = None
         if DriveLockManager:
             lock = DriveLockManager(service, FILE_ID)
             lock.acquire()
         
         try:
-            # Critical Section: Download -> Process -> Upload
             trades = download_json(service)
-            if not trades: 
-                # If empty, we just exit, but finally block will release lock
-                return 
+            if not trades: return 
             
             updated_trades = [update_trade(trade) for trade in trades]
-            
             handle_heartbeat(updated_trades)
-            
             upload_json(service, updated_trades)
             logger.info("Update complete.")
             
@@ -273,10 +334,8 @@ def main():
             logger.error(f"Error during update processing: {inner_e}")
             raise
         finally:
-            # Always release lock even if update_trade crashes
             if lock:
                 lock.release()
-        # --- LOCKING MECHANISM END ---
 
     except Exception as e:
         logger.error(f"Fatal error: {e}")
