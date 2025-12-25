@@ -323,26 +323,53 @@ else:
                 unsafe_allow_html=True
             )
 
-            # --- CHART LOGIC ---
-            if t.get("pnl_history"):
-                df = pd.DataFrame(t["pnl_history"])
-                base = alt.Chart(df).mark_line(point=True, strokeWidth=2).encode(
-                    x=alt.X(
-                        "dte:Q", 
-                        title="Days to Expiration (DTE)", 
-                        scale=alt.Scale(domain=[entry_dte, 0])
-                    ),
-                    y=alt.Y("profit:Q", scale=alt.Scale(domain=[-100, 100]), title="Profit %"),
-                    tooltip=["dte", "profit", "date"]
-                ).properties(height=200)
+            # --- CHART LOGIC: Risk & Price Analysis ---
+            price_hist = t.get("cached", {}).get("price_history", [])
+            crit_price = t.get("cached", {}).get("critical_price_040")
+            
+            if price_hist:
+                df_price = pd.DataFrame(price_hist)
+                
+                # 1. Main Price Line
+                chart_base = alt.Chart(df_price).mark_line(color="#2196f3").encode(
+                    x=alt.X("date:T", axis=alt.Axis(title=None, format="%b %d", labels=False)), 
+                    y=alt.Y("close:Q", scale=alt.Scale(zero=False), title="Price"),
+                    tooltip=["date", "close"]
+                )
 
-                line_50 = alt.Chart(pd.DataFrame({"y": [50]})).mark_rule(color="green", strokeDash=[5,5]).encode(y="y")
-                line_75 = alt.Chart(pd.DataFrame({"y": [75]})).mark_rule(color="green", strokeDash=[5,5]).encode(y="y")
-                line_0 = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="gray", strokeWidth=1).encode(y="y")
+                # 2. Current Price (Point)
+                curr_point = alt.Chart(df_price.iloc[[-1]]).mark_point(color="#2196f3", filled=True).encode(
+                    x="date:T", y="close:Q"
+                )
 
-                st.altair_chart(base + line_50 + line_75 + line_0, use_container_width=True)
+                # 3. Horizontal Rule: Short Strike (Red Dashed)
+                rule_strike = alt.Chart(pd.DataFrame({'y': [t['short_strike']]})).mark_rule(
+                    color="red", strokeDash=[5, 5]
+                ).encode(y='y')
+                
+                # 4. Horizontal Rule: 0.40 Delta "Stop Loss" (Orange Dotted)
+                layers = [chart_base, curr_point, rule_strike]
+                
+                if crit_price:
+                    rule_crit = alt.Chart(pd.DataFrame({'y': [crit_price]})).mark_rule(
+                        color="orange", strokeDash=[2, 2]
+                    ).encode(y='y')
+                    layers.append(rule_crit)
+
+                # Render Combined Chart
+                st.altair_chart(alt.layer(*layers).properties(height=200), use_container_width=True)
+                
+                # Legend
+                if crit_price:
+                    st.caption(f"🔵 Price | 🔴 Strike (${t['short_strike']}) | 🟠 Risk (${crit_price:.2f})")
+                else:
+                    st.caption(f"🔵 Price | 🔴 Strike (${t['short_strike']})")
+            
+            # Fallback for old history format if backend hasn't run yet
+            elif t.get("pnl_history"):
+                st.caption("Chart updating... (Run backend sync)")
             else:
-                st.caption("Waiting for market data history...")
+                st.caption("Initializing market data...")
 
         # Divider between trades
         st.markdown("<hr style='margin-top: 20px; margin-bottom: 20px; border: 0; border-top: 1px solid #e0e0e0;'>", unsafe_allow_html=True)
