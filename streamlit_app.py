@@ -351,7 +351,7 @@ with cols[0]:
         """,
         unsafe_allow_html=True,
     )
-    st.write("") # Spacer
+st.write("") # Spacer
             
             # --- Close / Log Logic ---
             if st.button("Close Position / Log", key=f"btn_close_{i}"):
