@@ -271,51 +271,50 @@ else:
         else:
             price_html = "<span style='font-size: 14px; color: gray; margin-left: 8px;'>Loading...</span>"
 
+# --- Status Logic ---
+status_msg = "Status Nominal"
+status_icon = "✅"
+status_color = "green"
 
-        # --- Status Logic ---
-        status_msg = "Status Nominal"
-        status_icon = "✅"
-        status_color = "green"
+if rules.get("other_rules", False):
+    status_icon = "⚠️"
+    status_color = "#d32f2f"  # Red
+    if abs_delta and abs_delta >= 0.40:
+        status_msg = "Short Delta High"
+    elif spread_value and spread_value >= 150:
+        status_msg = "Spread Value High"
+    elif current_dte <= 7:
+        status_msg = "Expiration Imminent"
 
-        if rules.get("other_rules", False):
-            status_icon = "⚠️"
-            status_color = "#d32f2f" # Red
-            if abs_delta and abs_delta >= 0.40:
-                status_msg = "Short Delta High"
-            elif spread_value and spread_value >= 150:
-                status_msg = "Spread Value High"
-            elif current_dte <= 7:
-                status_msg = "Expiration Imminent"
-        
-        if profit_pct and profit_pct >= 50:
-            status_icon = "💰" 
-            status_msg = "Profit Target Reached"
-            status_color = "green"
+if profit_pct and profit_pct >= 50:
+    status_icon = "💰"
+    status_msg = "Profit Target Reached"
+    status_color = "green"
 
-        # --- Color Coding ---
-        delta_color = "#d32f2f" if abs_delta and abs_delta >= 0.40 else "green"
-        delta_val = f"{abs_delta:.2f}" if abs_delta is not None else "Pending"
+# --- Color Coding ---
+delta_color = "#d32f2f" if abs_delta and abs_delta >= 0.40 else "green"
+delta_val = f"{abs_delta:.2f}" if abs_delta is not None else "Pending"
 
-        spread_color = "#d32f2f" if spread_value and spread_value >= 150 else "green"
-        spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
+spread_color = "#d32f2f" if spread_value and spread_value >= 150 else "green"
+spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
 
-        dte_color = "#d32f2f" if current_dte <= 7 else "green"
+dte_color = "#d32f2f" if current_dte <= 7 else "green"
 
-        if profit_pct is None:
-            profit_color = "inherit"
-            profit_val = "Pending"
-        else:
-            profit_val = f"{profit_pct:.1f}"
-            if profit_pct >= 50:
-                profit_color = "green"
-            elif profit_pct < 0:
-                profit_color = "#d32f2f"
-            else:
-                profit_color = "#e6b800"
+if profit_pct is None:
+    profit_color = "inherit"
+    profit_val = "Pending"
+else:
+    profit_val = f"{profit_pct:.1f}"
+    if profit_pct >= 50:
+        profit_color = "green"
+    elif profit_pct < 0:
+        profit_color = "#d32f2f"
+    else:
+        profit_color = "#e6b800"
 
-        cols = st.columns([3, 4])
+cols = st.columns([3, 4])
 
-        # -------- LEFT CARD (Details + Close Button) --------
+# -------- LEFT CARD (Details + Close Button) --------
 with cols[0]:
     st.markdown(
         f"""
@@ -351,76 +350,119 @@ with cols[0]:
         """,
         unsafe_allow_html=True,
     )
-st.write("") # Spacer
-            
-            # --- Close / Log Logic ---
-            if st.button("Close Position / Log", key=f"btn_close_{i}"):
-                st.session_state[f"close_mode_{i}"] = True
 
-            if st.session_state.get(f"close_mode_{i}", False):
-                with st.container():
-                    st.markdown("---")
-                    st.info("Log entry for Trading Journal")
-                    with st.form(key=f"close_form_{i}"):
-                        close_notes = st.text_area("Closing Notes / Reason", height=80)
-                        submit_close = st.form_submit_button("Confirm Close & Log")
-                        
-                        if submit_close:
-                            if drive_service:
-                                saved_journal = append_to_drive_journal(drive_service, t, close_notes)
-                                if saved_journal:
-                                    st.success("Entry added to 'trading_journal.txt'")
-                                else:
-                                    st.error("Could not write to Drive journal.")
-                            
-                            st.session_state.trades.pop(i)
-                            if drive_service:
-                                save_to_drive(drive_service, st.session_state.trades)
-                            
-                            del st.session_state[f"close_mode_{i}"]
-                            st.experimental_rerun()
+    st.write("")  # Spacer
 
-                    if st.button("Cancel", key=f"cancel_{i}"):
-                        del st.session_state[f"close_mode_{i}"]
-                        st.experimental_rerun()
+    # --- Close / Log Logic ---
+    if st.button("Close Position / Log", key=f"btn_close_{i}"):
+        st.session_state[f"close_mode_{i}"] = True
 
-        # -------- RIGHT CARD (Alerts & Chart) --------
-        with cols[1]:
-            st.markdown(
-                f"""
-                <div style="font-size: 14px; margin-bottom: 10px;">
-                    <div>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must not exceed 0.40)</span></div>
-                    <div>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must not exceed 150%)</span></div>
-                    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must not be less than 7)</span></div>
-                    <div>Profit: <strong style='color:{profit_color}'>{profit_val}%</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must sell between 50-75%)</span></div>
-                </div>
-                """,
-                unsafe_allow_html=True
+    if st.session_state.get(f"close_mode_{i}", False):
+        with st.container():
+            st.markdown("---")
+            st.info("Log entry for Trading Journal")
+
+            with st.form(key=f"close_form_{i}"):
+                close_notes = st.text_area("Closing Notes / Reason", height=80)
+                submit_close = st.form_submit_button("Confirm Close & Log")
+
+                if submit_close:
+                    if drive_service:
+                        saved_journal = append_to_drive_journal(
+                            drive_service, t, close_notes
+                        )
+                        if saved_journal:
+                            st.success("Entry added to 'trading_journal.txt'")
+                        else:
+                            st.error("Could not write to Drive journal.")
+
+                    st.session_state.trades.pop(i)
+                    if drive_service:
+                        save_to_drive(drive_service, st.session_state.trades)
+
+                    del st.session_state[f"close_mode_{i}"]
+                    st.experimental_rerun()
+
+            if st.button("Cancel", key=f"cancel_{i}"):
+                del st.session_state[f"close_mode_{i}"]
+                st.experimental_rerun()
+
+# -------- RIGHT CARD (Alerts & Chart) --------
+with cols[1]:
+    st.markdown(
+        f"""
+        <div style="font-size: 14px; margin-bottom: 10px;">
+            <div>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong>
+                <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>
+                    (Must not exceed 0.40)
+                </span>
+            </div>
+
+            <div>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong>
+                <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>
+                    (Must not exceed 150%)
+                </span>
+            </div>
+
+            <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong>
+                <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>
+                    (Must not be less than 7)
+                </span>
+            </div>
+
+            <div>Profit: <strong style='color:{profit_color}'>{profit_val}%</strong>
+                <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>
+                    (Must sell between 50–75%)
+                </span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # --- CHART LOGIC (DTE Axis) ---
+    if t.get("pnl_history"):
+        df = pd.DataFrame(t["pnl_history"])
+
+        base = (
+            alt.Chart(df)
+            .mark_line(point=True, strokeWidth=2)
+            .encode(
+                x=alt.X(
+                    "dte:Q",
+                    title="Days to Expiration (DTE)",
+                    scale=alt.Scale(domain=[entry_dte, 0]),
+                ),
+                y=alt.Y(
+                    "profit:Q",
+                    scale=alt.Scale(domain=[-100, 100]),
+                    title="Profit %",
+                ),
+                tooltip=["dte", "profit", "date"],
             )
+            .properties(height=200)
+        )
 
-            # --- CHART LOGIC (DTE Axis) ---
-            if t.get("pnl_history"):
-                df = pd.DataFrame(t["pnl_history"])
-                
-                base = alt.Chart(df).mark_line(point=True, strokeWidth=2).encode(
-                    x=alt.X(
-                        "dte:Q", 
-                        title="Days to Expiration (DTE)", 
-                        scale=alt.Scale(domain=[entry_dte, 0])
-                    ),
-                    y=alt.Y("profit:Q", scale=alt.Scale(domain=[-100, 100]), title="Profit %"),
-                    tooltip=["dte", "profit", "date"]
-                ).properties(height=200)
+        line_50 = alt.Chart(pd.DataFrame({"y": [50]})).mark_rule(
+            color="green", strokeDash=[5, 5]
+        ).encode(y="y")
 
-                line_50 = alt.Chart(pd.DataFrame({"y": [50]})).mark_rule(color="green", strokeDash=[5,5]).encode(y="y")
-                line_75 = alt.Chart(pd.DataFrame({"y": [75]})).mark_rule(color="green", strokeDash=[5,5]).encode(y="y")
-                line_0 = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="gray", strokeWidth=1).encode(y="y")
+        line_75 = alt.Chart(pd.DataFrame({"y": [75]})).mark_rule(
+            color="green", strokeDash=[5, 5]
+        ).encode(y="y")
 
-                st.altair_chart(base + line_50 + line_75 + line_0, use_container_width=True)
-            else:
-                st.caption("Waiting for market data history...")
+        line_0 = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
+            color="gray", strokeWidth=1
+        ).encode(y="y")
 
-        st.markdown("<hr style='margin-top: 20px; margin-bottom: 20px; border: 0; border-top: 1px solid #e0e0e0;'>", unsafe_allow_html=True)
+        st.altair_chart(base + line_50 + line_75 + line_0, use_container_width=True)
+    else:
+        st.caption("Waiting for market data history...")
+
+st.markdown(
+    "<hr style='margin-top: 20px; margin-bottom: 20px; border: 0; border-top: 1px solid #e0e0e0;'>",
+    unsafe_allow_html=True,
+)
 
 # ---------------- Manual Controls ----------------
 st.write("### Data Sync")
