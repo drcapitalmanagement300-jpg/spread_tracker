@@ -1,4 +1,4 @@
-#streamlit_app.py Dec 24 2025 8:19
+#streamlit_app.py Dec 24 2025 8:02
 
 import streamlit as st
 from datetime import date, datetime
@@ -17,6 +17,7 @@ from persistence import (
 )
 
 # Try to import Google API helpers for the journal feature
+# (These usually come with the library used in persistence)
 try:
     from googleapiclient.http import MediaIoBaseUpload
 except ImportError:
@@ -40,68 +41,14 @@ try:
 except Exception:
     drive_service = None
 
-# ---------------- Helpers ----------------
-def days_to_expiry(expiry) -> int:
-    if isinstance(expiry, str):
-        try:
-            expiry = date.fromisoformat(expiry)
-        except:
-            return 0
-    return max((expiry - date.today()).days, 0)
-
-def format_money(x):
-    try:
-        return f"${float(x):.2f}"
-    except Exception:
-        return "-"
-
-def get_entry_dte(entry_date_str, expiry_date_str):
-    try:
-        entry = date.fromisoformat(entry_date_str)
-        expiry = date.fromisoformat(expiry_date_str)
-        return (expiry - entry).days
-    except:
-        return 30 # fallback
-
 # ---------------- Journal Helper ----------------
 def append_to_drive_journal(service, trade_data, notes):
     """
     Appends a log entry to 'trading_journal.txt' in the root of the Drive.
-    Includes PnL and Breached Conditions.
+    Creates the file if it doesn't exist.
     """
     if not service or not MediaIoBaseUpload:
         return False
-
-    # Extract cached data for logging
-    cached = trade_data.get("cached", {})
-    profit_pct = cached.get("current_profit_percent")
-    
-    # Determine Profit/Loss String
-    if profit_pct is not None:
-        pnl_str = f"{profit_pct:.2f}%"
-    else:
-        pnl_str = "N/A (Data missing)"
-
-    # Determine Breached Conditions
-    conditions = []
-    rules = cached.get("rule_violations", {})
-    abs_delta = cached.get("abs_delta")
-    spread_val = cached.get("spread_value_percent")
-    current_dte = days_to_expiry(trade_data["expiration"])
-
-    if profit_pct and profit_pct >= 50:
-        conditions.append("PROFIT TARGET REACHED")
-    
-    if rules.get("other_rules", False):
-        if abs_delta and abs_delta >= 0.40:
-            conditions.append(f"DELTA BREACH ({abs_delta:.2f} >= 0.40)")
-        if spread_val and spread_val >= 150:
-            conditions.append(f"SPREAD VALUE BREACH ({spread_val:.0f}% >= 150%)")
-        if current_dte <= 7:
-             conditions.append(f"DTE LOW ({current_dte} <= 7)")
-
-    if not conditions:
-        conditions.append("None (Manual Close)")
 
     filename = "trading_journal.txt"
     log_entry = (
@@ -111,8 +58,6 @@ def append_to_drive_journal(service, trade_data, notes):
         f"TICKER: {trade_data.get('ticker')}\n"
         f"STRIKES: -{trade_data.get('short_strike')} / +{trade_data.get('long_strike')}\n"
         f"EXPIRY: {trade_data.get('expiration')}\n"
-        f"FINAL P/L: {pnl_str}\n"
-        f"CONDITIONS: {', '.join(conditions)}\n"
         f"NOTES: {notes}\n"
         f"{'='*30}\n"
     )
@@ -129,13 +74,21 @@ def append_to_drive_journal(service, trade_data, notes):
             media = MediaIoBaseUpload(io.BytesIO(log_entry.encode('utf-8')), mimetype='text/plain', resumable=True)
             service.files().create(body=file_metadata, media_body=media).execute()
         else:
-            # Update existing file
+            # Update existing file (Append logic is tricky in Drive API, usually requires download->append->upload)
+            # For simplicity in this patch, we will download current content, append string, and update.
             file_id = files[0]['id']
+            
+            # Download
             request = service.files().get_media(fileId=file_id)
             current_content = request.execute()
+            
+            # Append
             new_content = current_content + log_entry.encode('utf-8')
+            
+            # Upload Update
             media = MediaIoBaseUpload(io.BytesIO(new_content), mimetype='text/plain', resumable=True)
             service.files().update(fileId=file_id, media_body=media).execute()
+            
         return True
     except Exception as e:
         print(f"Journal Error: {e}")
@@ -168,6 +121,29 @@ with header_col3:
         st.experimental_rerun()
 
 st.markdown("---")
+
+# ---------------- Helpers ----------------
+def days_to_expiry(expiry) -> int:
+    if isinstance(expiry, str):
+        try:
+            expiry = date.fromisoformat(expiry)
+        except:
+            return 0
+    return max((expiry - date.today()).days, 0)
+
+def format_money(x):
+    try:
+        return f"${float(x):.2f}"
+    except Exception:
+        return "-"
+
+def get_entry_dte(entry_date_str, expiry_date_str):
+    try:
+        entry = date.fromisoformat(entry_date_str)
+        expiry = date.fromisoformat(expiry_date_str)
+        return (expiry - entry).days
+    except:
+        return 30 # fallback
 
 # ---------------- Load Drive State ----------------
 if drive_service:
@@ -224,6 +200,10 @@ st.subheader("Active Portfolio")
 if not st.session_state.trades:
     st.info("No active trades.")
 else:
+    # Iterate with index using a copy logic if needed, but enumeration is fine if we pop correctly
+    # We use a placeholder for re-rendering issues
+    trades_to_remove = []
+
     for i, t in enumerate(st.session_state.trades):
         cached = t.get("cached", {})
 
@@ -236,38 +216,10 @@ else:
 
         # Backend Data
         current_price = cached.get("current_price")
-        # Attempt to get daily change. Default to 0.0 if missing.
-        daily_change_pct = cached.get("daily_change_percent", 0.0) 
-
         abs_delta = cached.get("abs_delta")
         spread_value = cached.get("spread_value_percent")
         profit_pct = cached.get("current_profit_percent")
         rules = cached.get("rule_violations", {})
-
-        # --- Price Display Logic ---
-        if current_price is not None:
-            price_display = f"${current_price:.2f}"
-            
-            # Change logic (Arrow and Color)
-            if daily_change_pct is None: 
-                daily_change_pct = 0.0
-            
-            if daily_change_pct >= 0:
-                change_color = "green"
-                change_arrow = "▲"
-                change_display = f"{daily_change_pct:.2f}%"
-            else:
-                change_color = "#d32f2f" # Red
-                change_arrow = "▼"
-                change_display = f"{abs(daily_change_pct):.2f}%"
-                
-            price_html = f"""
-                <span style="font-size: 16px; font-weight: 500; color: #333; margin-left: 8px;">{price_display}</span>
-                <span style="font-size: 14px; color: {change_color}; margin-left: 6px;">{change_arrow} {change_display}</span>
-            """
-        else:
-            price_html = "<span style='font-size: 14px; color: gray; margin-left: 8px;'>Loading...</span>"
-
 
         # --- Status Logic ---
         status_msg = "Status Nominal"
@@ -277,6 +229,7 @@ else:
         if rules.get("other_rules", False):
             status_icon = "⚠️"
             status_color = "#d32f2f" # Red
+            # Determine specific error
             if abs_delta and abs_delta >= 0.40:
                 status_msg = "Short Delta High"
             elif spread_value and spread_value >= 150:
@@ -314,13 +267,10 @@ else:
 
         # -------- LEFT CARD (Details + Close Button) --------
         with cols[0]:
-            # Updated HTML Layout: Ticker + Price + Change Arrow
+            # Compact HTML Layout - Updated Text and Removed "Und:"
             st.markdown(f"""
             <div style="line-height: 1.4; font-size: 15px;">
-                <div style="display: flex; align-items: baseline; margin-bottom: 8px;">
-                    <h3 style="margin: 0; padding: 0;">{t['ticker']}</h3>
-                    {price_html}
-                </div>
+                <h3 style="margin-bottom: 5px;">{t['ticker']}</h3>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2px;">
                     <div><strong>Short:</strong> {t['short_strike']}</div>
                     <div><strong>Max Gain:</strong> {format_money(max_gain)}</div>
@@ -338,9 +288,11 @@ else:
             st.write("") # Spacer
             
             # --- Close / Log Logic ---
+            # Unique key for every button using index
             if st.button("Close Position / Log", key=f"btn_close_{i}"):
                 st.session_state[f"close_mode_{i}"] = True
 
+            # If close mode is active for this trade
             if st.session_state.get(f"close_mode_{i}", False):
                 with st.container():
                     st.markdown("---")
@@ -350,6 +302,7 @@ else:
                         submit_close = st.form_submit_button("Confirm Close & Log")
                         
                         if submit_close:
+                            # 1. Log to drive
                             if drive_service:
                                 saved_journal = append_to_drive_journal(drive_service, t, close_notes)
                                 if saved_journal:
@@ -357,10 +310,14 @@ else:
                                 else:
                                     st.error("Could not write to Drive journal.")
                             
+                            # 2. Remove from session state
                             st.session_state.trades.pop(i)
+                            
+                            # 3. Save updated list
                             if drive_service:
                                 save_to_drive(drive_service, st.session_state.trades)
                             
+                            # 4. Cleanup state and rerun
                             del st.session_state[f"close_mode_{i}"]
                             st.experimental_rerun()
 
@@ -370,6 +327,7 @@ else:
 
         # -------- RIGHT CARD (Alerts & Chart) --------
         with cols[1]:
+            # Updated Warning Text
             st.markdown(
                 f"""
                 <div style="font-size: 14px; margin-bottom: 10px;">
@@ -385,12 +343,14 @@ else:
             # --- CHART LOGIC (DTE Axis) ---
             if t.get("pnl_history"):
                 df = pd.DataFrame(t["pnl_history"])
+                # We plot 'dte' on X, 'profit' on Y.
+                # Domain: Entry DTE -> 0. (Reversed: High numbers on left, 0 on right)
                 
                 base = alt.Chart(df).mark_line(point=True, strokeWidth=2).encode(
                     x=alt.X(
                         "dte:Q", 
                         title="Days to Expiration (DTE)", 
-                        scale=alt.Scale(domain=[entry_dte, 0])
+                        scale=alt.Scale(domain=[entry_dte, 0])  # Force domain from Entry -> 0
                     ),
                     y=alt.Y("profit:Q", scale=alt.Scale(domain=[-100, 100]), title="Profit %"),
                     tooltip=["dte", "profit", "date"]
@@ -404,11 +364,13 @@ else:
             else:
                 st.caption("Waiting for market data history...")
 
+        # Divider between trades
         st.markdown("<hr style='margin-top: 20px; margin-bottom: 20px; border: 0; border-top: 1px solid #e0e0e0;'>", unsafe_allow_html=True)
 
 # ---------------- Manual Controls ----------------
+# Updated layout to group buttons closer together
 st.write("### Data Sync")
-ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 3.5])
+ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 5])
 
 with ctl1:
     if st.button("💾 Save all trades to Google Drive"):
