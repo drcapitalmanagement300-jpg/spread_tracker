@@ -1,6 +1,7 @@
 import json
 import io
 import os
+import time
 import logging
 import requests
 from datetime import datetime, date, timedelta, timezone
@@ -30,10 +31,90 @@ FILE_ID = os.environ.get("GDRIVE_FILE_ID")
 CREDS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
+# -------------------- Data Reliability Layer --------------------
+class MarketDataManager:
+    """
+    Handles fetching market data with caching and retry logic.
+    Prevents redundant API calls when multiple trades share the same ticker/expiry.
+    """
+    def __init__(self):
+        self._price_cache = {}    # {ticker: price}
+        self._chain_cache = {}    # {(ticker, expiry_date): option_chain_obj}
+        self._ticker_objs = {}    # {ticker: yf.Ticker}
+
+    def _get_yf_ticker(self, ticker):
+        if ticker not in self._ticker_objs:
+            self._ticker_objs[ticker] = yf.Ticker(ticker)
+        return self._ticker_objs[ticker]
+
+    def get_current_price(self, ticker):
+        """Fetches current stock price with caching and retries."""
+        if ticker in self._price_cache:
+            return self._price_cache[ticker]
+
+        ticker_obj = self._get_yf_ticker(ticker)
+        price = None
+        
+        # Retry loop
+        for attempt in range(3):
+            try:
+                # Try fast_info first (lighter)
+                price = ticker_obj.fast_info.get("last_price")
+                
+                # Fallback to history if None
+                if price is None:
+                    hist = ticker_obj.history(period="1d")
+                    if not hist.empty:
+                        price = hist['Close'].iloc[-1]
+                
+                if price is not None:
+                    break
+            except Exception as e:
+                logger.warning(f"[Attempt {attempt+1}/3] Price fetch failed for {ticker}: {e}")
+                time.sleep(2 * (attempt + 1)) # Backoff: 2s, 4s, 6s
+
+        if price:
+            self._price_cache[ticker] = price
+            return price
+        
+        return None
+
+    def get_chain(self, ticker, expiration):
+        """Fetches option chain with caching and retries."""
+        cache_key = (ticker, expiration)
+        if cache_key in self._chain_cache:
+            return self._chain_cache[cache_key]
+
+        ticker_obj = self._get_yf_ticker(ticker)
+        chain = None
+
+        # Quick check if date is valid (caches available dates internally in yfinance)
+        try:
+            if expiration not in ticker_obj.options:
+                return None
+        except Exception:
+            pass # Continue to try fetching anyway in case list is stale
+
+        # Retry loop
+        for attempt in range(3):
+            try:
+                chain = ticker_obj.option_chain(expiration)
+                if chain is not None:
+                    break
+            except Exception as e:
+                logger.warning(f"[Attempt {attempt+1}/3] Chain fetch failed for {ticker} {expiration}: {e}")
+                time.sleep(2 * (attempt + 1))
+
+        if chain:
+            self._chain_cache[cache_key] = chain
+            return chain
+        
+        return None
+
 # -------------------- Discord Notification --------------------
 def send_discord_alert(ticker, description, color=15158332):
     if not DISCORD_WEBHOOK_URL:
-        logger.warning("Discord Webhook URL not set. Skipping notification.")
+        # Silently skip if not configured
         return
 
     payload = {
@@ -106,7 +187,7 @@ def upload_json(service, data):
     media = MediaIoBaseUpload(fh, mimetype="application/json", resumable=False)
     service.files().update(fileId=FILE_ID, media_body=media).execute()
 
-# -------------------- Math & Financials (Upgraded) --------------------
+# -------------------- Math & Financials --------------------
 def days_to_expiry(expiry_str):
     if not expiry_str: 
         return 0
@@ -119,82 +200,71 @@ def days_to_expiry(expiry_str):
 def calculate_greeks(option_type, S, K, T, r, sigma):
     """
     Calculates Delta, Gamma, and Theta using Black-Scholes-Merton.
-    Returns a dictionary of values.
     """
-    # Safety checks to prevent division by zero
     if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
         return {"delta": 0.0, "gamma": 0.0, "theta": 0.0}
 
-    # d1 and d2 calculations
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
 
-    # PDF and CDF of standard normal distribution
     pdf_d1 = norm.pdf(d1)
     cdf_d1 = norm.cdf(d1)
     cdf_d2 = norm.cdf(d2)
 
-    # --- Delta ---
     if option_type == "call":
         delta = cdf_d1
     else: # put
         delta = cdf_d1 - 1
 
-    # --- Gamma ---
-    # Gamma is the same for Calls and Puts
     gamma = pdf_d1 / (S * sigma * np.sqrt(T))
 
-    # --- Theta ---
-    # Annual Theta. Usually divided by 365 for daily decay.
+    # Theta (Annual)
     term1 = -(S * pdf_d1 * sigma) / (2 * np.sqrt(T))
-    
     if option_type == "call":
         theta_annual = term1 - r * K * np.exp(-r * T) * norm.cdf(d2)
     else: # put
-        # Put Theta formula
         theta_annual = term1 + r * K * np.exp(-r * T) * norm.cdf(-d2)
-
-    # Convert annual theta to daily theta
-    theta_daily = theta_annual / 365.0
 
     return {
         "delta": delta,
         "gamma": gamma,
-        "theta": theta_daily
+        "theta": theta_daily(theta_annual)
     }
 
-def get_option_data(ticker, expiration_str, short_strike, long_strike):
+def theta_daily(theta_annual):
+    return theta_annual / 365.0
+
+def get_option_data(data_manager, ticker, expiration_str, short_strike, long_strike):
+    """
+    Uses the MarketDataManager to retrieve cached chain data.
+    """
     try:
-        t = yf.Ticker(ticker)
-        avail_dates = t.options
-        if expiration_str not in avail_dates:
+        chain = data_manager.get_chain(ticker, expiration_str)
+        if chain is None:
             return None, None, None, None
 
-        chain = t.option_chain(expiration_str)
         puts = chain.puts
         
+        # Filter logic
         short_row = puts[puts['strike'] == short_strike]
         long_row = puts[puts['strike'] == long_strike]
 
         if short_row.empty or long_row.empty:
             return None, None, None, None
 
-        # Extract Prices
+        # Extract
         short_price = float(short_row['lastPrice'].values[0])
         long_price = float(long_row['lastPrice'].values[0])
-        
-        # Extract IVs
-        # Note: yfinance IVs can sometimes be 0 or erratic. 
         short_iv = float(short_row['impliedVolatility'].values[0])
         long_iv = float(long_row['impliedVolatility'].values[0])
 
         return short_price, long_price, short_iv, long_iv
     except Exception as e:
-        logger.error(f"Error fetching data for {ticker}: {e}")
+        logger.error(f"Error processing option data for {ticker}: {e}")
         return None, None, None, None
 
 # -------------------- Core Update Logic --------------------
-def update_trade(trade):
+def update_trade(trade, data_manager):
     ticker = trade.get("ticker")
     expiry_str = trade.get("expiration")
     
@@ -205,35 +275,33 @@ def update_trade(trade):
     except ValueError:
         return trade 
 
-    try:
-        ticker_obj = yf.Ticker(ticker)
-        current_price = ticker_obj.fast_info.get("last_price") or ticker_obj.history(period="1d")['Close'].iloc[-1]
-    except Exception:
-        current_price = None
+    # 1. Fetch Price (Cached/Retried)
+    current_price = data_manager.get_current_price(ticker)
 
-    # Fetch data (Now gets both IVs)
-    short_price, long_price, short_iv, long_iv = get_option_data(ticker, expiry_str, short_strike, long_strike)
+    # 2. Fetch Option Data (Cached/Retried)
+    short_price, long_price, short_iv, long_iv = get_option_data(
+        data_manager, ticker, expiry_str, short_strike, long_strike
+    )
+    
     dte = days_to_expiry(expiry_str)
     T_years = dte / 365.0
 
-    # Initialize Greeks
+    # 3. Calculate Greeks
     short_leg_greeks = {"delta": 0, "gamma": 0, "theta": 0}
     long_leg_greeks = {"delta": 0, "gamma": 0, "theta": 0}
     
-    # Calculate Greeks if data is valid
     if current_price and dte > 0:
         if short_iv:
             short_leg_greeks = calculate_greeks("put", current_price, short_strike, T_years, 0.05, short_iv)
         if long_iv:
             long_leg_greeks = calculate_greeks("put", current_price, long_strike, T_years, 0.05, long_iv)
 
-    # --- Calculate Net Position Greeks ---
-    # Position: Short (-1) the Short Put, Long (+1) the Long Put
+    # Net Position Greeks (Short Put Spread = Short the Short, Long the Long)
     net_delta = (-1 * short_leg_greeks["delta"]) + (1 * long_leg_greeks["delta"])
     net_gamma = (-1 * short_leg_greeks["gamma"]) + (1 * long_leg_greeks["gamma"])
     net_theta = (-1 * short_leg_greeks["theta"]) + (1 * long_leg_greeks["theta"])
 
-    # Profit & Spread Value
+    # 4. PnL Stats
     profit_pct = None
     spread_val_pct = None
     if short_price is not None and long_price is not None and credit_received > 0:
@@ -241,13 +309,12 @@ def update_trade(trade):
         profit_pct = ((credit_received - current_spread_cost) / credit_received) * 100
         spread_val_pct = (current_spread_cost / credit_received) * 100
 
-    # Rules Engine
+    # 5. Rules & Alerts
     rule_violations = { "other_rules": False, "iv_rule": False }
     notif_msg = ""
     notif_color = 15158332 # Red
 
-    # Use SHORT LEG Delta for risk check (standard assignment risk check)
-    short_abs_delta = abs(short_leg_greeks["delta"])
+    short_abs_delta = abs(short_leg_greeks["delta"]) # For assignment risk
 
     if profit_pct is not None and profit_pct >= 50:
         notif_msg = f"✅ **Target Reached**: {profit_pct:.1f}% profit."
@@ -274,20 +341,14 @@ def update_trade(trade):
             send_discord_alert(f"Position Alert: {ticker}", notif_msg, notif_color)
             trade["last_alert_sent"] = datetime.now(timezone.utc).isoformat()
 
-    # --- Cache Data ---
     trade["cached"] = {
         "current_price": current_price,
         "short_option_price": short_price,
         "long_option_price": long_price,
-        
-        # Risk Metrics
-        "abs_delta": short_abs_delta, # Kept for backward compatibility/alerts
-        
-        # New Net Greeks
+        "abs_delta": short_abs_delta, 
         "net_delta": net_delta,
         "net_gamma": net_gamma,
         "net_theta": net_theta,
-        
         "current_profit_percent": profit_pct,
         "spread_value_percent": spread_val_pct,
         "rule_violations": rule_violations,
@@ -316,6 +377,7 @@ def main():
     try:
         service = get_drive_service()
         
+        # --- LOCK ACQUIRE ---
         lock = None
         if DriveLockManager:
             lock = DriveLockManager(service, FILE_ID)
@@ -323,9 +385,14 @@ def main():
         
         try:
             trades = download_json(service)
-            if not trades: return 
+            if not trades: return
             
-            updated_trades = [update_trade(trade) for trade in trades]
+            # --- INIT MARKET DATA MANAGER ---
+            market_data = MarketDataManager()
+            
+            # Pass manager to update_trade
+            updated_trades = [update_trade(t, market_data) for t in trades]
+            
             handle_heartbeat(updated_trades)
             upload_json(service, updated_trades)
             logger.info("Update complete.")
@@ -334,6 +401,7 @@ def main():
             logger.error(f"Error during update processing: {inner_e}")
             raise
         finally:
+            # --- LOCK RELEASE ---
             if lock:
                 lock.release()
 
