@@ -13,6 +13,16 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
+# Import the Lock Manager
+# Assumes google_drive.py is in the same directory (repo root)
+try:
+    from google_drive import DriveLockManager
+except ImportError:
+    # Fallback if running in an environment where local imports are tricky,
+    # though usually unnecessary if files are side-by-side.
+    logging.warning("Could not import DriveLockManager. Running without locks.")
+    DriveLockManager = None
+
 # -------------------- Config & Setup --------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -238,16 +248,36 @@ def update_trade(trade):
 def main():
     try:
         service = get_drive_service()
-        trades = download_json(service)
-        if not trades: return
         
-        updated_trades = [update_trade(trade) for trade in trades]
+        # --- LOCKING MECHANISM START ---
+        lock = None
+        if DriveLockManager:
+            lock = DriveLockManager(service, FILE_ID)
+            lock.acquire()
         
-        # Patch: Handle the Heartbeat Check
-        handle_heartbeat(updated_trades)
-        
-        upload_json(service, updated_trades)
-        logger.info("Update complete.")
+        try:
+            # Critical Section: Download -> Process -> Upload
+            trades = download_json(service)
+            if not trades: 
+                # If empty, we just exit, but finally block will release lock
+                return 
+            
+            updated_trades = [update_trade(trade) for trade in trades]
+            
+            handle_heartbeat(updated_trades)
+            
+            upload_json(service, updated_trades)
+            logger.info("Update complete.")
+            
+        except Exception as inner_e:
+            logger.error(f"Error during update processing: {inner_e}")
+            raise
+        finally:
+            # Always release lock even if update_trade crashes
+            if lock:
+                lock.release()
+        # --- LOCKING MECHANISM END ---
+
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         raise
