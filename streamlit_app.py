@@ -15,7 +15,6 @@ from persistence import (
     logout,
 )
 
-# Try to import Google API helpers for the journal feature
 try:
     from googleapiclient.http import MediaIoBaseUpload
 except ImportError:
@@ -64,9 +63,6 @@ def get_entry_dte(entry_date_str, expiry_date_str):
 
 # ---------------- Journal Helper ----------------
 def append_to_drive_journal(service, trade_data, notes):
-    """
-    Appends a log entry to 'trading_journal.txt' on Google Drive.
-    """
     if not service or not MediaIoBaseUpload:
         return False
 
@@ -92,7 +88,6 @@ def append_to_drive_journal(service, trade_data, notes):
         f"\n{'='*30}\n"
         f"DATE: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"TICKER: {trade_data.get('ticker')}\n"
-        f"STRIKES: -{trade_data.get('short_strike')} / +{trade_data.get('long_strike')}\n"
         f"FINAL P/L: {pnl_str}\n"
         f"CONDITIONS: {', '.join(conditions) if conditions else 'Manual Close'}\n"
         f"NOTES: {notes}\n"
@@ -116,21 +111,14 @@ def append_to_drive_journal(service, trade_data, notes):
             service.files().update(fileId=file_id, media_body=media).execute()
         return True
     except Exception as e:
-        st.error(f"Journal Error: {e}")
         return False
 
 # ---------------- Header ----------------
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
-
 with header_col1:
     st.write("### DR CAPITAL")
-
 with header_col2:
-    st.markdown("""
-        <h1 style='margin-bottom: 0px;'>Put Credit Spread Monitor</h1>
-        <p style='color: gray; font-size: 18px;'>Strategic Options Management System</p>
-    """, unsafe_allow_html=True)
-
+    st.markdown("<h1>Put Credit Spread Monitor</h1><p style='color: gray;'>Strategic Options Management System</p>", unsafe_allow_html=True)
 with header_col3:
     if st.button("Log out"):
         logout()
@@ -145,7 +133,7 @@ elif "trades" not in st.session_state:
     st.session_state.trades = []
 
 # ---------------- Add Trade ----------------
-with st.expander("➕ Open New Position", expanded=False):
+with st.expander("➕ Open New Position"):
     with st.form("add_trade", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -162,149 +150,110 @@ with st.expander("➕ Open New Position", expanded=False):
             if ticker and short_strike > long_strike:
                 trade = {
                     "id": f"{ticker}-{datetime.now().timestamp()}",
-                    "ticker": ticker,
-                    "short_strike": short_strike,
-                    "long_strike": long_strike,
-                    "expiration": expiration.isoformat(),
-                    "credit": credit,
-                    "entry_date": entry_date.isoformat(),
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "cached": {},
-                    "pnl_history": []
+                    "ticker": ticker, "short_strike": short_strike, "long_strike": long_strike,
+                    "expiration": expiration.isoformat(), "credit": credit, "entry_date": entry_date.isoformat(),
+                    "cached": {}, "pnl_history": []
                 }
                 st.session_state.trades.append(trade)
-                if drive_service:
-                    save_to_drive(drive_service, st.session_state.trades)
-                st.success(f"Position for {ticker} added.")
+                if drive_service: save_to_drive(drive_service, st.session_state.trades)
                 st.experimental_rerun()
 
-st.markdown("---")
-
 # ---------------- Display Trades ----------------
-if not st.session_state.trades:
-    st.info("No active trades in portfolio.")
-else:
-    for i, t in enumerate(st.session_state.trades):
-        cached = t.get("cached", {})
-        current_dte = days_to_expiry(t["expiration"])
-        entry_dte = get_entry_dte(t["entry_date"], t["expiration"])
-        width = abs(t["short_strike"] - t["long_strike"])
+for i, t in enumerate(st.session_state.trades):
+    cached = t.get("cached", {})
+    current_dte = days_to_expiry(t["expiration"])
+    entry_dte = get_entry_dte(t["entry_date"], t["expiration"])
+    width = abs(t["short_strike"] - t["long_strike"])
+    
+    price = cached.get("current_price", 0.0)
+    change = cached.get("daily_change_percent", 0.0)
+    delta = cached.get("abs_delta")
+    spread_val = cached.get("spread_value_percent")
+    profit_pct = cached.get("current_profit_percent")
+    rules = cached.get("rule_violations", {})
+
+    status_icon, status_msg, status_color = ("✅", "Status Nominal", "green")
+    if rules.get("other_rules"):
+        status_icon, status_color = ("⚠️", "#d32f2f")
+        if delta and delta >= 0.40: status_msg = "Delta Breach"
+        elif spread_val and spread_val >= 150: status_msg = "Spread High"
+        elif current_dte <= 7: status_msg = "Low DTE"
+    if profit_pct and profit_pct >= 50:
+        status_icon, status_msg, status_color = ("💰", "Target Reached", "green")
+
+    # Layout Container
+    st.markdown(f"""<div style="border: 1px solid #ddd; border-radius: 8px; padding: 15px; margin-bottom: 20px;">""", unsafe_allow_html=True)
+    
+    cols = st.columns([4, 6])
+    
+    with cols[0]:
+        c_arrow = "▲" if change >= 0 else "▼"
+        c_color = "green" if change >= 0 else "#d32f2f"
         
-        # Market Data
-        price = cached.get("current_price")
-        change = cached.get("daily_change_percent", 0.0)
-        delta = cached.get("abs_delta")
-        spread_val = cached.get("spread_value_percent")
-        profit_pct = cached.get("current_profit_percent")
-        rules = cached.get("rule_violations", {})
+        # This fixes the raw HTML issue by ensuring Markdown handles the render
+        st.markdown(f"""
+            <div style="display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px;">
+                <h2 style="margin:0;">{t['ticker']}</h2>
+                <span style="font-size: 20px; font-weight: bold;">${price:.2f}</span>
+                <span style="color: {c_color}; font-size: 16px;">{c_arrow} {abs(change):.2f}%</span>
+            </div>
+        """, unsafe_allow_html=True)
 
-        # Status Logic
-        status_icon, status_msg, status_color = ("✅", "Status Nominal", "green")
-        if rules.get("other_rules"):
-            status_icon, status_color = ("⚠️", "#d32f2f")
-            if delta and delta >= 0.40: status_msg = "Delta Breach"
-            elif spread_val and spread_val >= 150: status_msg = "Spread Value High"
-            elif current_dte <= 7: status_msg = "Low DTE"
-        
-        if profit_pct and profit_pct >= 50:
-            status_icon, status_msg, status_color = ("💰", "Profit Target Reached", "green")
+        d1, d2 = st.columns(2)
+        d1.write(f"**Short:** {t['short_strike']}")
+        d1.write(f"**Long:** {t['long_strike']}")
+        d1.write(f"**Exp:** {t['expiration']}")
+        d2.write(f"**Gain:** {format_money(t['credit'])}")
+        d2.write(f"**Loss:** {format_money(width - t['credit'])}")
+        d2.write(f"**Width:** {width:.2f}")
 
-        # --- THE FIX: Contained Grid ---
-        with st.container():
-            st.markdown(f"""<div style="border: 1px solid #e6e6e6; border-radius: 10px; padding: 20px; margin-bottom: 25px; background-color: #ffffff;">""", unsafe_allow_html=True)
-            
-            card_cols = st.columns([4, 6])
-            
-            # LEFT: Data & Controls
-            with card_cols[0]:
-                # Price Header
-                c_arrow = "▲" if change >= 0 else "▼"
-                c_color = "green" if change >= 0 else "#d32f2f"
-                st.markdown(f"""
-                    <div style="display: flex; align-items: baseline; gap: 12px;">
-                        <h2 style="margin:0;">{t['ticker']}</h2>
-                        <span style="font-size: 20px; font-weight: bold;">${price:.2f}</span>
-                        <span style="color: {c_color}; font-size: 16px;">{c_arrow} {abs(change):.2f}%</span>
-                    </div>
-                    <hr style="margin: 10px 0;">
-                """, unsafe_allow_html=True)
+        st.markdown(f"""
+            <div style="background: #f9f9f9; padding: 10px; border-radius: 5px; margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-size: 13px; border-left: 4px solid {status_color};">
+                <div>Delta: <b style="color:{'red' if delta and delta >= 0.4 else 'green'}">{f"{delta:.2f}" if delta else 'Pending'}</b></div>
+                <div>Spread: <b style="color:{'red' if spread_val and spread_val >= 150 else 'green'}">{f"{spread_val:.0f}%" if spread_val else 'Pending'}</b></div>
+                <div>DTE: <b style="color:{'red' if current_dte <= 7 else 'green'}">{current_dte}</b></div>
+                <div>Profit: <b style="color:{status_color}">{f"{profit_pct:.1f}%" if profit_pct else 'Pending'}</b></div>
+            </div>
+            <div style="margin-top: 10px; font-weight: bold; color: {status_color};">{status_icon} {status_msg}</div>
+        """, unsafe_allow_html=True)
 
-                # Core Info
-                info1, info2 = st.columns(2)
-                info1.write(f"**Short Strike:** {t['short_strike']}")
-                info1.write(f"**Long Strike:** {t['long_strike']}")
-                info1.write(f"**Exp Date:** {t['expiration']}")
-                
-                info2.write(f"**Max Gain:** {format_money(t['credit'])}")
-                info2.write(f"**Max Loss:** {format_money(width - t['credit'])}")
-                info2.write(f"**Width:** {width:.2f}")
+        if st.button("Close Position", key=f"btn_{i}", use_container_width=True):
+            st.session_state[f"m_{i}"] = True
 
-                # Metrics Box
-                st.markdown(f"""
-                    <div style="background: #fcfcfc; border: 1px solid #eee; padding: 12px; border-radius: 8px; margin-top: 15px;">
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 14px;">
-                            <div>Delta: <b style="color:{'red' if delta and delta >= 0.4 else 'green'}">{delta if delta else '...'}</b></div>
-                            <div>Spread: <b style="color:{'red' if spread_val and spread_val >= 150 else 'green'}">{f"{spread_val:.0f}%" if spread_val else '...'}</b></div>
-                            <div>DTE: <b style="color:{'red' if current_dte <= 7 else 'green'}">{current_dte}</b></div>
-                            <div>Profit: <b style="color:{status_color}">{f"{profit_pct:.1f}%" if profit_pct else '...'}</b></div>
-                        </div>
-                        <div style="margin-top: 10px; border-top: 1px solid #eee; padding-top: 8px; font-weight: bold; color: {status_color};">
-                            {status_icon} {status_msg}
-                        </div>
-                    </div>
-                """, unsafe_allow_html=True)
+    with cols[1]:
+        if t.get("pnl_history"):
+            df = pd.DataFrame(t["pnl_history"])
+            line = alt.Chart(df).mark_line(point=True).encode(
+                x=alt.X("dte:Q", title="DTE", scale=alt.Scale(domain=[entry_dte, 0])),
+                y=alt.Y("profit:Q", title="Profit %", scale=alt.Scale(domain=[-100, 100])),
+                tooltip=["date", "dte", "profit"]
+            ).properties(height=250)
+            st.altair_chart(line, use_container_width=True)
+        else:
+            st.info("Performance history pending backend update...")
 
-                st.write("")
-                if st.button("Close & Log Position", key=f"close_{i}", use_container_width=True):
-                    st.session_state[f"confirm_{i}"] = True
+    if st.session_state.get(f"m_{i}"):
+        with st.form(f"form_{i}"):
+            notes = st.text_area("Notes")
+            if st.form_submit_button("Confirm Close"):
+                if drive_service: append_to_drive_journal(drive_service, t, notes)
+                st.session_state.trades.pop(i)
+                if drive_service: save_to_drive(drive_service, st.session_state.trades)
+                st.experimental_rerun()
+        if st.button("Cancel", key=f"can_{i}"):
+            del st.session_state[f"m_{i}"]
+            st.experimental_rerun()
 
-            # RIGHT: Charting
-            with card_cols[1]:
-                if t.get("pnl_history"):
-                    df = pd.DataFrame(t["pnl_history"])
-                    line = alt.Chart(df).mark_line(point=True, color="#1f77b4").encode(
-                        x=alt.X("dte:Q", title="Days to Expiration", scale=alt.Scale(domain=[entry_dte, 0])),
-                        y=alt.Y("profit:Q", title="Profit %", scale=alt.Scale(domain=[-100, 100])),
-                        tooltip=["date", "dte", "profit"]
-                    ).properties(height=300)
-                    
-                    # Profit Target Reference Lines
-                    targets = alt.Chart(pd.DataFrame({'y': [0, 50, 75]})).mark_rule(strokeDash=[4,4]).encode(
-                        y='y', color=alt.condition(alt.datum.y == 0, alt.value('gray'), alt.value('green'))
-                    )
-                    st.altair_chart(line + targets, use_container_width=True)
-                else:
-                    st.info("📊 History data will populate after the next backend sync.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-            # Confirmation Logic
-            if st.session_state.get(f"confirm_{i}"):
-                with st.form(f"form_close_{i}"):
-                    notes = st.text_area("Closing Notes (Why are you closing?)")
-                    if st.form_submit_button("Confirm Permanent Close"):
-                        if drive_service:
-                            append_to_drive_journal(drive_service, t, notes)
-                        st.session_state.trades.pop(i)
-                        if drive_service:
-                            save_to_drive(drive_service, st.session_state.trades)
-                        del st.session_state[f"confirm_{i}"]
-                        st.experimental_rerun()
-                if st.button("Cancel", key=f"cancel_{i}"):
-                    del st.session_state[f"confirm_{i}"]
-                    st.experimental_rerun()
-
-            st.markdown("</div>", unsafe_allow_html=True)
-
-# ---------------- Manual Sync ----------------
-st.sidebar.subheader("System Control")
-if st.sidebar.button("💾 Force Save (G-Drive)"):
-    if drive_service and save_to_drive(drive_service, st.session_state.trades):
-        st.sidebar.success("Manual save successful")
-if st.sidebar.button("📥 Force Reload (G-Drive)"):
+# ---------------- Footer ----------------
+st.sidebar.subheader("System Sync")
+if st.sidebar.button("💾 Save Trades"):
+    if drive_service: save_to_drive(drive_service, st.session_state.trades)
+if st.sidebar.button("📥 Reload Trades"):
     st.experimental_rerun()
 
-st.markdown("---")
-# ---------------- External Link Tools ----------------
-st.subheader("Analysis Tools")
+st.subheader("External Tools")
 t1, t2, t3, t4 = st.columns(4)
 t1.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
 t2.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
