@@ -38,7 +38,7 @@ class MarketDataManager:
     Prevents redundant API calls when multiple trades share the same ticker/expiry.
     """
     def __init__(self):
-        self._price_cache = {}    # {ticker: price}
+        self._price_cache = {}    # {ticker: (price, change_pct)}
         self._chain_cache = {}    # {(ticker, expiry_date): option_chain_obj}
         self._ticker_objs = {}    # {ticker: yf.Ticker}
 
@@ -47,37 +47,52 @@ class MarketDataManager:
             self._ticker_objs[ticker] = yf.Ticker(ticker)
         return self._ticker_objs[ticker]
 
-    def get_current_price(self, ticker):
-        """Fetches current stock price with caching and retries."""
+    def get_price_data(self, ticker):
+        """
+        Fetches current price AND daily percentage change.
+        Returns: (price, change_percent)
+        """
+        # Check cache
         if ticker in self._price_cache:
             return self._price_cache[ticker]
 
         ticker_obj = self._get_yf_ticker(ticker)
         price = None
+        change_pct = 0.0
         
         # Retry loop
         for attempt in range(3):
             try:
-                # Try fast_info first (lighter)
-                price = ticker_obj.fast_info.get("last_price")
+                # fast_info provides both last_price and previous_close efficiently
+                info = ticker_obj.fast_info
+                price = info.get("last_price")
+                prev_close = info.get("previous_close")
                 
-                # Fallback to history if None
+                # Check if data is valid
+                if price is not None and prev_close is not None and prev_close > 0:
+                    change_pct = ((price - prev_close) / prev_close) * 100
+                    break
+                
+                # Fallback to history if fast_info fails (e.g. sometimes on indices)
                 if price is None:
-                    hist = ticker_obj.history(period="1d")
+                    hist = ticker_obj.history(period="2d")
                     if not hist.empty:
                         price = hist['Close'].iloc[-1]
+                        if len(hist) >= 2:
+                            prev_close = hist['Close'].iloc[-2]
+                            change_pct = ((price - prev_close) / prev_close) * 100
                 
                 if price is not None:
                     break
             except Exception as e:
-                logger.warning(f"[Attempt {attempt+1}/3] Price fetch failed for {ticker}: {e}")
-                time.sleep(2 * (attempt + 1)) # Backoff: 2s, 4s, 6s
+                logger.warning(f"[Attempt {attempt+1}/3] Price data failed for {ticker}: {e}")
+                time.sleep(2 * (attempt + 1))
 
         if price:
-            self._price_cache[ticker] = price
-            return price
+            self._price_cache[ticker] = (price, change_pct)
+            return price, change_pct
         
-        return None
+        return None, None
 
     def get_chain(self, ticker, expiration):
         """Fetches option chain with caching and retries."""
@@ -88,12 +103,12 @@ class MarketDataManager:
         ticker_obj = self._get_yf_ticker(ticker)
         chain = None
 
-        # Quick check if date is valid (caches available dates internally in yfinance)
+        # Quick check if date is valid
         try:
             if expiration not in ticker_obj.options:
                 return None
         except Exception:
-            pass # Continue to try fetching anyway in case list is stale
+            pass 
 
         # Retry loop
         for attempt in range(3):
@@ -114,7 +129,6 @@ class MarketDataManager:
 # -------------------- Discord Notification --------------------
 def send_discord_alert(ticker, description, color=15158332):
     if not DISCORD_WEBHOOK_URL:
-        # Silently skip if not configured
         return
 
     payload = {
@@ -137,6 +151,7 @@ def send_discord_alert(ticker, description, color=15158332):
 # -------------------- Heartbeat Logic --------------------
 def handle_heartbeat(updated_trades):
     now_utc = datetime.now(timezone.utc)
+    # Trigger window: 13:00 or 14:00 UTC
     if now_utc.hour in [13, 14]:
         if not updated_trades: return
         
@@ -199,7 +214,7 @@ def days_to_expiry(expiry_str):
 
 def calculate_greeks(option_type, S, K, T, r, sigma):
     """
-    Calculates Delta, Gamma, and Theta using Black-Scholes-Merton.
+    Calculates Delta, Gamma, and Theta (Daily) using Black-Scholes.
     """
     if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
         return {"delta": 0.0, "gamma": 0.0, "theta": 0.0}
@@ -225,14 +240,13 @@ def calculate_greeks(option_type, S, K, T, r, sigma):
     else: # put
         theta_annual = term1 + r * K * np.exp(-r * T) * norm.cdf(-d2)
 
+    theta_daily = theta_annual / 365.0
+
     return {
         "delta": delta,
         "gamma": gamma,
-        "theta": theta_daily(theta_annual)
+        "theta": theta_daily
     }
-
-def theta_daily(theta_annual):
-    return theta_annual / 365.0
 
 def get_option_data(data_manager, ticker, expiration_str, short_strike, long_strike):
     """
@@ -245,14 +259,12 @@ def get_option_data(data_manager, ticker, expiration_str, short_strike, long_str
 
         puts = chain.puts
         
-        # Filter logic
         short_row = puts[puts['strike'] == short_strike]
         long_row = puts[puts['strike'] == long_strike]
 
         if short_row.empty or long_row.empty:
             return None, None, None, None
 
-        # Extract
         short_price = float(short_row['lastPrice'].values[0])
         long_price = float(long_row['lastPrice'].values[0])
         short_iv = float(short_row['impliedVolatility'].values[0])
@@ -275,8 +287,8 @@ def update_trade(trade, data_manager):
     except ValueError:
         return trade 
 
-    # 1. Fetch Price (Cached/Retried)
-    current_price = data_manager.get_current_price(ticker)
+    # 1. Fetch Price & Change (Cached/Retried)
+    current_price, day_change_pct = data_manager.get_price_data(ticker)
 
     # 2. Fetch Option Data (Cached/Retried)
     short_price, long_price, short_iv, long_iv = get_option_data(
@@ -343,6 +355,7 @@ def update_trade(trade, data_manager):
 
     trade["cached"] = {
         "current_price": current_price,
+        "day_change_percent": day_change_pct, # <--- Stored here
         "short_option_price": short_price,
         "long_option_price": long_price,
         "abs_delta": short_abs_delta, 
@@ -377,7 +390,6 @@ def main():
     try:
         service = get_drive_service()
         
-        # --- LOCK ACQUIRE ---
         lock = None
         if DriveLockManager:
             lock = DriveLockManager(service, FILE_ID)
@@ -387,10 +399,7 @@ def main():
             trades = download_json(service)
             if not trades: return
             
-            # --- INIT MARKET DATA MANAGER ---
             market_data = MarketDataManager()
-            
-            # Pass manager to update_trade
             updated_trades = [update_trade(t, market_data) for t in trades]
             
             handle_heartbeat(updated_trades)
@@ -401,7 +410,6 @@ def main():
             logger.error(f"Error during update processing: {inner_e}")
             raise
         finally:
-            # --- LOCK RELEASE ---
             if lock:
                 lock.release()
 
