@@ -152,7 +152,6 @@ else:
         # Backend Data
         current_price = cached.get("current_price")
         
-        # Support both old "abs_delta" and new "net_delta" structures
         abs_delta = cached.get("abs_delta") 
         if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
@@ -209,15 +208,14 @@ else:
             # --- Ticker & Change Logic ---
             day_change = cached.get("day_change_percent", 0.0)
             
-            # Formatting (Green Up, Red Down)
             if day_change is None: day_change = 0.0
             
             if day_change > 0:
-                change_color = "green" # MATCHES 'status_color'
+                change_color = "green" 
                 arrow = "▲"
                 change_str = f"{day_change:.2f}%"
             elif day_change < 0:
-                change_color = "#d32f2f" # MATCHES ERROR RED
+                change_color = "#d32f2f"
                 arrow = "▼"
                 change_str = f"{abs(day_change):.2f}%" 
             else:
@@ -253,7 +251,6 @@ else:
             if st.button("Close Position / Log", key=f"btn_close_{i}"):
                 st.session_state[f"close_mode_{i}"] = True
 
-            # If close mode is active for this trade
             if st.session_state.get(f"close_mode_{i}", False):
                 with st.container():
                     st.markdown("---")
@@ -276,7 +273,7 @@ else:
                                 "Debit Paid ($)", 
                                 min_value=0.0, 
                                 value=float(f"{default_debit:.2f}"), 
-                                step=0.01,
+                                step=0.01
                                 help="Enter the price you paid to buy back the spread (positive number)."
                             )
                         
@@ -309,7 +306,7 @@ else:
                         del st.session_state[f"close_mode_{i}"]
                         st.experimental_rerun()
 
-        # -------- RIGHT CARD (Alerts & Chart) --------
+        # -------- RIGHT CARD (Chart) --------
         with cols[1]:
             st.markdown(
                 f"""
@@ -323,51 +320,76 @@ else:
                 unsafe_allow_html=True
             )
 
-            # --- CHART LOGIC: Risk & Price Analysis ---
+            # --- CHART LOGIC: Candlesticks & Risk ---
             price_hist = t.get("cached", {}).get("price_history", [])
             crit_price = t.get("cached", {}).get("critical_price_040")
             
-            if price_hist:
+            # Ensure we have OHLC data (Backward compatibility check)
+            has_ohlc = price_hist and "open" in price_hist[0]
+
+            if has_ohlc:
                 df_price = pd.DataFrame(price_hist)
                 
-                # 1. Main Price Line
-                chart_base = alt.Chart(df_price).mark_line(color="#2196f3").encode(
-                    x=alt.X("date:T", axis=alt.Axis(title=None, format="%b %d", labels=False)), 
-                    y=alt.Y("close:Q", scale=alt.Scale(zero=False), title="Price"),
-                    tooltip=["date", "close"]
+                # Rule for Candle Colors
+                open_close_color = alt.condition(
+                    "datum.open <= datum.close",
+                    alt.value("#06982d"), # Green Candle
+                    alt.value("#ae1325")  # Red Candle
                 )
 
-                # 2. Current Price (Point)
-                curr_point = alt.Chart(df_price.iloc[[-1]]).mark_point(color="#2196f3", filled=True).encode(
-                    x="date:T", y="close:Q"
+                base = alt.Chart(df_price).encode(
+                    x=alt.X('date:T', axis=alt.Axis(format='%b %d', title='Date', labelAngle=-45))
                 )
 
-                # 3. Horizontal Rule: Short Strike (Red Dashed)
-                rule_strike = alt.Chart(pd.DataFrame({'y': [t['short_strike']]})).mark_rule(
+                # Wick
+                rule = base.mark_rule().encode(
+                    y=alt.Y('low:Q', title='Price', scale=alt.Scale(zero=False)),
+                    y2='high:Q',
+                    color=alt.value("black") 
+                )
+
+                # Body
+                bar = base.mark_bar().encode(
+                    y='open:Q',
+                    y2='close:Q',
+                    color=open_close_color,
+                    tooltip=["date", "open", "high", "low", "close"]
+                )
+
+                # Strikes & Risk Levels
+                # Short Strike = Red
+                rule_short = alt.Chart(pd.DataFrame({'y': [t['short_strike']]})).mark_rule(
                     color="red", strokeDash=[5, 5]
                 ).encode(y='y')
                 
-                # 4. Horizontal Rule: 0.40 Delta "Stop Loss" (Orange Dotted)
-                layers = [chart_base, curr_point, rule_strike]
+                # Long Strike = Blue
+                rule_long = alt.Chart(pd.DataFrame({'y': [t['long_strike']]})).mark_rule(
+                    color="blue", strokeDash=[5, 5]
+                ).encode(y='y')
                 
+                layers = [rule, bar, rule_short, rule_long]
+
+                # Dynamic Short Delta Stop Loss
                 if crit_price:
                     rule_crit = alt.Chart(pd.DataFrame({'y': [crit_price]})).mark_rule(
                         color="orange", strokeDash=[2, 2]
                     ).encode(y='y')
                     layers.append(rule_crit)
 
-                # Render Combined Chart
-                st.altair_chart(alt.layer(*layers).properties(height=200), use_container_width=True)
+                st.altair_chart(alt.layer(*layers).properties(height=300), use_container_width=True)
                 
                 # Legend
                 if crit_price:
-                    st.caption(f"🔵 Price | 🔴 Strike (${t['short_strike']}) | 🟠 Risk (${crit_price:.2f})")
+                    st.caption(f"🔵 Long Strike (${t['long_strike']}) | 🔴 Short Strike (${t['short_strike']}) | 🟠 Dynamic Short Delta Stop Loss (${crit_price:.2f})")
                 else:
-                    st.caption(f"🔵 Price | 🔴 Strike (${t['short_strike']})")
+                    st.caption(f"🔵 Long Strike (${t['long_strike']}) | 🔴 Short Strike (${t['short_strike']})")
             
-            # Fallback for old history format if backend hasn't run yet
-            elif t.get("pnl_history"):
-                st.caption("Chart updating... (Run backend sync)")
+            # Fallback for old history (Line Chart)
+            elif price_hist:
+                 # Standard line chart fallback if OHLC missing
+                 df_price = pd.DataFrame(price_hist)
+                 line = alt.Chart(df_price).mark_line().encode(x='date:T', y='close:Q')
+                 st.altair_chart(line.properties(height=200), use_container_width=True)
             else:
                 st.caption("Initializing market data...")
 
