@@ -1,5 +1,3 @@
-#streamlit_app.py Dec 25 2025 11:57
-
 import streamlit as st
 from datetime import date, datetime
 import pandas as pd
@@ -13,15 +11,9 @@ from persistence import (
     build_drive_service_from_session,
     save_to_drive,
     load_from_drive,
+    log_trade_to_csv, # <--- NEW: Imported the smart journaling function
     logout,
 )
-
-# Try to import Google API helpers for the journal feature
-# (These usually come with the library used in persistence)
-try:
-    from googleapiclient.http import MediaIoBaseUpload
-except ImportError:
-    MediaIoBaseUpload = None
 
 # ---------------- Page config ----------------
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
@@ -40,59 +32,6 @@ try:
     drive_service = build_drive_service_from_session()
 except Exception:
     drive_service = None
-
-# ---------------- Journal Helper ----------------
-def append_to_drive_journal(service, trade_data, notes):
-    """
-    Appends a log entry to 'trading_journal.txt' in the root of the Drive.
-    Creates the file if it doesn't exist.
-    """
-    if not service or not MediaIoBaseUpload:
-        return False
-
-    filename = "trading_journal.txt"
-    log_entry = (
-        f"\n{'='*30}\n"
-        f"DATE: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"ACTION: CLOSED POSITION\n"
-        f"TICKER: {trade_data.get('ticker')}\n"
-        f"STRIKES: -{trade_data.get('short_strike')} / +{trade_data.get('long_strike')}\n"
-        f"EXPIRY: {trade_data.get('expiration')}\n"
-        f"NOTES: {notes}\n"
-        f"{'='*30}\n"
-    )
-
-    try:
-        # 1. Search for existing file
-        query = f"name = '{filename}' and trashed = false"
-        results = service.files().list(q=query, fields="files(id, name)").execute()
-        files = results.get("files", [])
-
-        if not files:
-            # Create new file
-            file_metadata = {'name': filename, 'mimeType': 'text/plain'}
-            media = MediaIoBaseUpload(io.BytesIO(log_entry.encode('utf-8')), mimetype='text/plain', resumable=True)
-            service.files().create(body=file_metadata, media_body=media).execute()
-        else:
-            # Update existing file (Append logic is tricky in Drive API, usually requires download->append->upload)
-            # For simplicity in this patch, we will download current content, append string, and update.
-            file_id = files[0]['id']
-            
-            # Download
-            request = service.files().get_media(fileId=file_id)
-            current_content = request.execute()
-            
-            # Append
-            new_content = current_content + log_entry.encode('utf-8')
-            
-            # Upload Update
-            media = MediaIoBaseUpload(io.BytesIO(new_content), mimetype='text/plain', resumable=True)
-            service.files().update(fileId=file_id, media_body=media).execute()
-            
-        return True
-    except Exception as e:
-        print(f"Journal Error: {e}")
-        return False
 
 # ---------------- Header & Logo ----------------
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
@@ -200,10 +139,6 @@ st.subheader("Active Portfolio")
 if not st.session_state.trades:
     st.info("No active trades.")
 else:
-    # Iterate with index using a copy logic if needed, but enumeration is fine if we pop correctly
-    # We use a placeholder for re-rendering issues
-    trades_to_remove = []
-
     for i, t in enumerate(st.session_state.trades):
         cached = t.get("cached", {})
 
@@ -216,7 +151,12 @@ else:
 
         # Backend Data
         current_price = cached.get("current_price")
-        abs_delta = cached.get("abs_delta")
+        
+        # Support both old "abs_delta" and new "net_delta" structures gracefully
+        abs_delta = cached.get("abs_delta") 
+        if abs_delta is None and cached.get("delta"): # Handle legacy
+             abs_delta = abs(cached.get("delta"))
+
         spread_value = cached.get("spread_value_percent")
         profit_pct = cached.get("current_profit_percent")
         rules = cached.get("rule_violations", {})
@@ -267,7 +207,6 @@ else:
 
         # -------- LEFT CARD (Details + Close Button) --------
         with cols[0]:
-            # Compact HTML Layout - Updated Text and Removed "Und:"
             st.markdown(f"""
             <div style="line-height: 1.4; font-size: 15px;">
                 <h3 style="margin-bottom: 5px;">{t['ticker']}</h3>
@@ -288,7 +227,6 @@ else:
             st.write("") # Spacer
             
             # --- Close / Log Logic ---
-            # Unique key for every button using index
             if st.button("Close Position / Log", key=f"btn_close_{i}"):
                 st.session_state[f"close_mode_{i}"] = True
 
@@ -296,30 +234,61 @@ else:
             if st.session_state.get(f"close_mode_{i}", False):
                 with st.container():
                     st.markdown("---")
-                    st.info("Log entry for Trading Journal")
+                    st.info("📉 Closing Position & Logging to Journal")
+                    
                     with st.form(key=f"close_form_{i}"):
-                        close_notes = st.text_area("Closing Notes / Reason", height=80)
+                        col_log1, col_log2 = st.columns(2)
+                        with col_log1:
+                            # Auto-Calculate Price: Try to pre-fill the debit box with current value
+                            default_debit = 0.0
+                            current_short = t.get("cached", {}).get("short_option_price")
+                            current_long = t.get("cached", {}).get("long_option_price")
+                            
+                            # If we have live data, suggest the mid-price or cost
+                            if current_short is not None and current_long is not None:
+                                est_price = current_short - current_long
+                                if est_price > 0:
+                                    default_debit = est_price
+
+                            debit_paid = st.number_input(
+                                "Debit Paid ($)", 
+                                min_value=0.0, 
+                                value=float(f"{default_debit:.2f}"), 
+                                step=0.01,
+                                help="Enter the price you paid to buy back the spread (positive number)."
+                            )
+                        
+                        with col_log2:
+                            close_notes = st.text_area("Notes / Reason", height=70, placeholder="e.g. 50% profit target hit...")
+                        
                         submit_close = st.form_submit_button("Confirm Close & Log")
                         
                         if submit_close:
-                            # 1. Log to drive
+                            success = False
+                            
+                            # 1. Log to CSV (Smart Journal)
                             if drive_service:
-                                saved_journal = append_to_drive_journal(drive_service, t, close_notes)
-                                if saved_journal:
-                                    st.success("Entry added to 'trading_journal.txt'")
+                                success = log_trade_to_csv(drive_service, t, debit_paid, close_notes)
+                                
+                                if success:
+                                    st.success(f"Logged {t['ticker']} to 'trade_journal.csv'")
                                 else:
                                     st.error("Could not write to Drive journal.")
+                            else:
+                                st.warning("Drive service not active. Removing without log.")
+                                success = True 
                             
-                            # 2. Remove from session state
-                            st.session_state.trades.pop(i)
-                            
-                            # 3. Save updated list
-                            if drive_service:
-                                save_to_drive(drive_service, st.session_state.trades)
-                            
-                            # 4. Cleanup state and rerun
-                            del st.session_state[f"close_mode_{i}"]
-                            st.experimental_rerun()
+                            if success:
+                                # 2. Remove from session state
+                                st.session_state.trades.pop(i)
+                                
+                                # 3. Save updated list
+                                if drive_service:
+                                    save_to_drive(drive_service, st.session_state.trades)
+                                
+                                # 4. Cleanup state and rerun
+                                del st.session_state[f"close_mode_{i}"]
+                                st.experimental_rerun()
 
                     if st.button("Cancel", key=f"cancel_{i}"):
                         del st.session_state[f"close_mode_{i}"]
@@ -368,7 +337,6 @@ else:
         st.markdown("<hr style='margin-top: 20px; margin-bottom: 20px; border: 0; border-top: 1px solid #e0e0e0;'>", unsafe_allow_html=True)
 
 # ---------------- Manual Controls ----------------
-# Updated layout to group buttons closer together
 st.write("### Data Sync")
 ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 5])
 
