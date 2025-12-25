@@ -11,7 +11,7 @@ from persistence import (
     build_drive_service_from_session,
     save_to_drive,
     load_from_drive,
-    log_trade_to_csv, # <--- NEW: Imported the smart journaling function
+    log_trade_to_csv, 
     logout,
 )
 
@@ -152,9 +152,9 @@ else:
         # Backend Data
         current_price = cached.get("current_price")
         
-        # Support both old "abs_delta" and new "net_delta" structures gracefully
+        # Support both old and new delta keys
         abs_delta = cached.get("abs_delta") 
-        if abs_delta is None and cached.get("delta"): # Handle legacy
+        if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
 
         spread_value = cached.get("spread_value_percent")
@@ -169,7 +169,6 @@ else:
         if rules.get("other_rules", False):
             status_icon = "⚠️"
             status_color = "#d32f2f" # Red
-            # Determine specific error
             if abs_delta and abs_delta >= 0.40:
                 status_msg = "Short Delta High"
             elif spread_value and spread_value >= 150:
@@ -207,9 +206,33 @@ else:
 
         # -------- LEFT CARD (Details + Close Button) --------
         with cols[0]:
+            # --- Ticker & Change Logic ---
+            day_change = cached.get("day_change_percent", 0.0)
+            
+            # Formatting (Green Up, Red Down)
+            if day_change is None: day_change = 0.0
+            
+            if day_change > 0:
+                change_color = "#4caf50" 
+                arrow = "▲"
+                change_str = f"{day_change:.2f}%"
+            elif day_change < 0:
+                change_color = "#f44336" 
+                arrow = "▼"
+                change_str = f"{abs(day_change):.2f}%" 
+            else:
+                change_color = "gray"
+                arrow = ""
+                change_str = "0.00%"
+
             st.markdown(f"""
             <div style="line-height: 1.4; font-size: 15px;">
-                <h3 style="margin-bottom: 5px;">{t['ticker']}</h3>
+                <h3 style="margin-bottom: 5px; display: flex; align-items: center; gap: 10px;">
+                    {t['ticker']} 
+                    <span style="color: {change_color}; font-size: 0.85em;">
+                        {arrow} {change_str}
+                    </span>
+                </h3>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2px;">
                     <div><strong>Short:</strong> {t['short_strike']}</div>
                     <div><strong>Max Gain:</strong> {format_money(max_gain)}</div>
@@ -239,12 +262,11 @@ else:
                     with st.form(key=f"close_form_{i}"):
                         col_log1, col_log2 = st.columns(2)
                         with col_log1:
-                            # Auto-Calculate Price: Try to pre-fill the debit box with current value
+                            # Auto-Calculate Price
                             default_debit = 0.0
                             current_short = t.get("cached", {}).get("short_option_price")
                             current_long = t.get("cached", {}).get("long_option_price")
                             
-                            # If we have live data, suggest the mid-price or cost
                             if current_short is not None and current_long is not None:
                                 est_price = current_short - current_long
                                 if est_price > 0:
@@ -266,10 +288,8 @@ else:
                         if submit_close:
                             success = False
                             
-                            # 1. Log to CSV (Smart Journal)
                             if drive_service:
                                 success = log_trade_to_csv(drive_service, t, debit_paid, close_notes)
-                                
                                 if success:
                                     st.success(f"Logged {t['ticker']} to 'trade_journal.csv'")
                                 else:
@@ -279,14 +299,9 @@ else:
                                 success = True 
                             
                             if success:
-                                # 2. Remove from session state
                                 st.session_state.trades.pop(i)
-                                
-                                # 3. Save updated list
                                 if drive_service:
                                     save_to_drive(drive_service, st.session_state.trades)
-                                
-                                # 4. Cleanup state and rerun
                                 del st.session_state[f"close_mode_{i}"]
                                 st.experimental_rerun()
 
@@ -296,7 +311,6 @@ else:
 
         # -------- RIGHT CARD (Alerts & Chart) --------
         with cols[1]:
-            # Updated Warning Text
             st.markdown(
                 f"""
                 <div style="font-size: 14px; margin-bottom: 10px;">
@@ -309,17 +323,14 @@ else:
                 unsafe_allow_html=True
             )
 
-            # --- CHART LOGIC (DTE Axis) ---
+            # --- CHART LOGIC ---
             if t.get("pnl_history"):
                 df = pd.DataFrame(t["pnl_history"])
-                # We plot 'dte' on X, 'profit' on Y.
-                # Domain: Entry DTE -> 0. (Reversed: High numbers on left, 0 on right)
-                
                 base = alt.Chart(df).mark_line(point=True, strokeWidth=2).encode(
                     x=alt.X(
                         "dte:Q", 
                         title="Days to Expiration (DTE)", 
-                        scale=alt.Scale(domain=[entry_dte, 0])  # Force domain from Entry -> 0
+                        scale=alt.Scale(domain=[entry_dte, 0])
                     ),
                     y=alt.Y("profit:Q", scale=alt.Scale(domain=[-100, 100]), title="Profit %"),
                     tooltip=["dte", "profit", "date"]
