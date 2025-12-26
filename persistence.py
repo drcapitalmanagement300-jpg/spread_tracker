@@ -13,8 +13,6 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 # --- IMPORT LOCK MANAGER ---
-# We wrap this in a try/except to prevent the app from crashing 
-# if the file hasn't been uploaded yet, though it should be there.
 try:
     from google_drive import DriveLockManager
 except ImportError:
@@ -183,7 +181,8 @@ def logout():
     except Exception:
         pass
     st.success("Logged out.")
-    st.experimental_rerun()
+    # UPDATED: Use st.rerun() instead of experimental_rerun()
+    st.rerun()
 
 
 def _credentials_dict_to_oauth(creds_dict: Dict[str, Any]) -> Optional[OAuthCredentials]:
@@ -256,19 +255,26 @@ def _try_load_credentials() -> Optional[Dict[str, Any]]:
 
 
 def ensure_logged_in():
+    """
+    Blocks execution until the user is logged in via Google OAuth.
+    Uses modern st.query_params to avoid deprecation warnings.
+    """
     creds_dict = _try_load_credentials()
     if creds_dict:
         st.session_state["credentials"] = creds_dict
         return
 
-    q = st.experimental_get_query_params()
-    if "code" in q and not st.session_state.get("credentials"):
-        code = q["code"][0] if isinstance(q["code"], list) else q["code"]
+    # UPDATED: Use st.query_params (dict-like) instead of experimental_get_query_params (list-like)
+    if "code" in st.query_params and not st.session_state.get("credentials"):
+        # The new API returns strings directly, so no need for [0]
+        code = st.query_params["code"]
         creds = exchange_code_for_credentials(code)
         if creds:
             st.session_state["credentials"] = creds
-            st.experimental_set_query_params()
-            st.experimental_rerun()
+            # UPDATED: Clear params using .clear()
+            st.query_params.clear()
+            # UPDATED: Use st.rerun()
+            st.rerun()
 
     flow = get_flow()
     auth_url, _ = flow.authorization_url(
@@ -277,7 +283,8 @@ def ensure_logged_in():
         include_granted_scopes="true",
     )
     st.markdown("### Sign in with Google to enable Drive persistence")
-    st.markdown(f"[Click here to sign in with Google]({auth_url})")
+    # Using a button that acts as a link is cleaner
+    st.link_button("Sign in with Google", auth_url, type="primary")
     st.stop()
 
 
@@ -399,80 +406,4 @@ def log_trade_to_csv(service, trade_data: Dict[str, Any], debit_paid: float, not
         
         entry_date_str = trade_data.get("entry_date", date.today().isoformat())
         # Handle timestamp strings if they include time components
-        if isinstance(entry_date_str, str) and "T" in entry_date_str:
-            entry_date = datetime.fromisoformat(entry_date_str).date()
-        elif isinstance(entry_date_str, (date, datetime)):
-             entry_date = entry_date_str if isinstance(entry_date_str, date) else entry_date_str.date()
-        else:
-            entry_date = date.fromisoformat(entry_date_str)
-            
-        close_date = date.today()
-        days_held = (close_date - entry_date).days
-        
-        # Win/Loss Flag
-        if pnl_val > 0:
-            result = "WIN"
-        elif pnl_val < 0:
-            result = "LOSS"
-        else:
-            result = "BREAK-EVEN"
-        
-    except Exception as e:
-        print(f"Error calculating metrics: {e}")
-        pnl_val = 0
-        days_held = 0
-        result = "UNKNOWN"
-        credit = 0
-
-    # 2. Prepare Row Data
-    new_row = [
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), # Timestamp
-        trade_data.get("ticker"),                     # Ticker
-        "Put Credit Spread",                          # Type
-        trade_data.get("short_strike"),               # Short Strike
-        trade_data.get("long_strike"),                # Long Strike
-        trade_data.get("expiration"),                 # Expiry
-        entry_date_str,                               # Entry Date
-        days_held,                                    # Days Held
-        f"{credit:.2f}",                              # Credit (Entry)
-        f"{debit_paid:.2f}",                          # Debit (Exit)
-        f"{pnl_val:.2f}",                             # Realized PnL ($)
-        result,                                       # Result
-        notes                                         # User Notes
-    ]
-    
-    headers = [
-        "Timestamp", "Ticker", "Type", "Short Strike", "Long Strike", 
-        "Expiry", "Entry Date", "Days Held", "Credit", "Debit", 
-        "PnL", "Result", "Notes"
-    ]
-
-    # 3. Download Existing CSV (if any) to append
-    file_id = _find_file_id(service, FILENAME)
-    existing_content = ""
-    
-    if file_id:
-        existing_content = _download_file(service, file_id)
-    
-    # 4. Construct CSV Content
-    output = io.StringIO()
-    writer = csv.writer(output)
-    
-    final_csv_str = ""
-    if not existing_content:
-        # New File: Write Headers + Row
-        writer.writerow(headers)
-        writer.writerow(new_row)
-        final_csv_str = output.getvalue()
-    else:
-        # Existing File: Append Row
-        # Ensure it ends with a newline before appending
-        if not existing_content.endswith("\n"):
-            existing_content += "\n"
-        
-        writer.writerow(new_row)
-        new_row_str = output.getvalue()
-        final_csv_str = existing_content + new_row_str
-
-    # 5. Upload
-    return _upload_file(service, FILENAME, final_csv_str)
+        if isinstance(entry_date
