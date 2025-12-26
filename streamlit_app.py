@@ -50,12 +50,13 @@ with header_col1:
         st.write("**DR CAPITAL**")
 
 with header_col2:
+    # Removing indentation to prevent Markdown code block rendering
     st.markdown("""
-    <div style='text-align: left; padding-top: 10px;'>
-        <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Put Credit Spread Monitor</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
-    </div>
-    """, unsafe_allow_html=True)
+<div style='text-align: left; padding-top: 10px;'>
+    <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Put Credit Spread Monitor</h1>
+    <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
+</div>
+""", unsafe_allow_html=True)
 
 with header_col3:
     st.write("") 
@@ -181,23 +182,24 @@ def render_profit_bar(profit_pct):
         label_color = SUCCESS_COLOR
         status_text = f"WIN TARGET: {profit_pct:.1f}%"
 
+    # Removed indentation here as well to be safe
     return f"""
-    <div style="margin-bottom: 12px; margin-top: 5px;">
-        <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">
-            <strong style="color: #ddd;">Target Progress</strong>
-            <span style="color:{label_color}; font-weight:bold;">{status_text}</span>
-        </div>
-        <div style="width: 100%; background-color: #333; height: 6px; border-radius: 3px; position: relative; overflow: hidden; border: 1px solid #444;">
-            <div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>
-            <div style="position: absolute; left: 66.6%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>
-        </div>
-        <div style="display:flex; justify-content:space-between; font-size:9px; color:gray; margin-top:2px; padding-left: 2px; padding-right: 2px;">
-            <span>Max Loss</span>
-            <span style="margin-left: 15px;">Break Even</span>
-            <span>TARGET (50%)</span>
-        </div>
+<div style="margin-bottom: 12px; margin-top: 5px;">
+    <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">
+        <strong style="color: #ddd;">Target Progress</strong>
+        <span style="color:{label_color}; font-weight:bold;">{status_text}</span>
     </div>
-    """
+    <div style="width: 100%; background-color: #333; height: 6px; border-radius: 3px; position: relative; overflow: hidden; border: 1px solid #444;">
+        <div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>
+        <div style="position: absolute; left: 66.6%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>
+    </div>
+    <div style="display:flex; justify-content:space-between; font-size:9px; color:gray; margin-top:2px; padding-left: 2px; padding-right: 2px;">
+        <span>Max Loss</span>
+        <span style="margin-left: 15px;">Break Even</span>
+        <span>TARGET (50%)</span>
+    </div>
+</div>
+"""
 
 # ---------------- Load Drive State ----------------
 if drive_service:
@@ -228,7 +230,6 @@ with st.form("add_trade", clear_on_submit=True):
         
     with c4:
         credit = st.number_input("Credit (Per Share)", min_value=0.0, format="%.2f")
-        # Spacer or calculated total could go here
 
     submitted = st.form_submit_button("Initialize Position")
 
@@ -241,7 +242,7 @@ with st.form("add_trade", clear_on_submit=True):
             trade = {
                 "id": f"{ticker}-{short_strike}-{long_strike}-{expiration.isoformat()}",
                 "ticker": ticker,
-                "contracts": num_contracts, # Saved
+                "contracts": num_contracts, 
                 "short_strike": short_strike,
                 "long_strike": long_strike,
                 "expiration": expiration.isoformat(),
@@ -270,7 +271,7 @@ else:
         current_dte = days_to_expiry(t["expiration"])
         
         # --- POSITION SIZING & TOTALS ---
-        contracts = t.get("contracts", 1) # Default to 1 if missing
+        contracts = t.get("contracts", 1) 
         
         width = abs(t["short_strike"] - t["long_strike"])
         
@@ -285,10 +286,8 @@ else:
         if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
         
-        # --- ACCURATE THETA CALCULATION ---
+        # --- THETA CALCULATION ---
         net_theta = cached.get("net_theta", 0.0)
-        # Net Theta is per share. 
-        # Total Daily Theta = Net Theta * 100 (multiplier) * Contracts
         daily_theta_dollars = net_theta * 100.0 * contracts 
 
         spread_value = cached.get("spread_value_percent")
@@ -347,35 +346,36 @@ else:
             # Theta Badge Style
             theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
             
+            # CRITICAL FIX: Remove Indentation in HTML String
             st.markdown(f"""
-            <div style="line-height: 1.4; font-size: 15px;">
-                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;">
-                    <h3 style="margin: 0; display: flex; align-items: center; gap: 10px;">
-                        {t['ticker']} 
-                        <span style="color: {change_color}; font-size: 0.85em;">
-                            {arrow} {change_str}
-                        </span>
-                        <span style="font-size: 0.6em; color: gray; border: 1px solid #444; padding: 1px 4px; border-radius: 4px;">{contracts}x</span>
-                    </h3>
-                    
-                    <div style="background-color: rgba(0, 200, 83, 0.1); border: 1px solid {SUCCESS_COLOR}; color: {SUCCESS_COLOR}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;">
-                        {theta_text}
-                    </div>
-                </div>
+<div style="line-height: 1.4; font-size: 15px;">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;">
+        <h3 style="margin: 0; display: flex; align-items: center; gap: 10px;">
+            {t['ticker']} 
+            <span style="color: {change_color}; font-size: 0.85em;">
+                {arrow} {change_str}
+            </span>
+            <span style="font-size: 0.6em; color: gray; border: 1px solid #444; padding: 1px 4px; border-radius: 4px;">{contracts}x</span>
+        </h3>
+        
+        <div style="background-color: rgba(0, 200, 83, 0.1); border: 1px solid {SUCCESS_COLOR}; color: {SUCCESS_COLOR}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;">
+            {theta_text}
+        </div>
+    </div>
 
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2px;">
-                    <div><strong>Short:</strong> {t['short_strike']}</div>
-                    <div><strong>Max Gain:</strong> {format_money(max_gain_total)}</div>
-                    <div><strong>Long:</strong> {t['long_strike']}</div>
-                    <div><strong>Max Loss:</strong> {format_money(max_loss_total)}</div>
-                    <div style="grid-column: span 2;"><strong>Exp:</strong> {t['expiration']}</div>
-                    <div style="grid-column: span 2;"><strong>Width:</strong> {width:.2f}</div>
-                </div>
-                <div style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; color: {status_color}; font-weight: bold;">
-                   {status_icon} {status_msg}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2px;">
+        <div><strong>Short:</strong> {t['short_strike']}</div>
+        <div><strong>Max Gain:</strong> {format_money(max_gain_total)}</div>
+        <div><strong>Long:</strong> {t['long_strike']}</div>
+        <div><strong>Max Loss:</strong> {format_money(max_loss_total)}</div>
+        <div style="grid-column: span 2;"><strong>Exp:</strong> {t['expiration']}</div>
+        <div style="grid-column: span 2;"><strong>Width:</strong> {width:.2f}</div>
+    </div>
+    <div style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; color: {status_color}; font-weight: bold;">
+        {status_icon} {status_msg}
+    </div>
+</div>
+""", unsafe_allow_html=True)
             
             st.write("") 
             
@@ -420,17 +420,14 @@ else:
 
         # -------- RIGHT CARD (Chart & Bar) --------
         with cols[1]:
-            # 1. Rules Block
-            st.markdown(
-                f"""
-                <div style="font-size: 14px; margin-bottom: 5px;">
-                    <div style="margin-bottom: 4px;">Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 0.40)</span></div>
-                    <div style="margin-bottom: 4px;">Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 150%)</span></div>
-                    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Min: 7 days)</span></div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+            # 1. Rules Block - Fixed Indentation
+            st.markdown(f"""
+<div style="font-size: 14px; margin-bottom: 5px;">
+    <div style="margin-bottom: 4px;">Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 0.40)</span></div>
+    <div style="margin-bottom: 4px;">Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 150%)</span></div>
+    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Min: 7 days)</span></div>
+</div>
+""", unsafe_allow_html=True)
             
             # 2. PROGRESS BAR
             st.markdown(render_profit_bar(profit_pct), unsafe_allow_html=True)
