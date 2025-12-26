@@ -86,56 +86,88 @@ def get_entry_dte(entry_date_str, expiry_date_str):
     except:
         return 30 # fallback
 
-# --- NEW CHARTING FUNCTION ---
+# --- NEW CHARTING FUNCTION (Dark Mode + Candles) ---
 def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_strike, crit_price=None):
     """
-    Generates a Matplotlib figure for the option spread.
-    Includes forward timeline projection, event markers, unified strike styling,
-    and optional critical price stop loss level.
+    Generates a Dark Mode Matplotlib figure with Candlesticks.
     """
-    # 1. Setup Figure
-    fig, ax = plt.subplots(figsize=(10, 4)) # slightly shorter height for card view
+    # 1. Colors & Theme
+    bg_color = '#0E1117'    # Streamlit Main Dark BG
+    card_color = '#262730'  # Streamlit Card BG
+    text_color = '#FAFAFA'  # White/Light Text
+    grid_color = '#444444'  
     
-    # 2. Plot Underlying Price
-    ax.plot(df['Date'], df['Close'], label='Underlying Price', color='#0068C9', linewidth=2)
+    # 2. Setup Figure (Smaller Size)
+    fig, ax = plt.subplots(figsize=(8, 3))
+    
+    # Apply Dark Background
+    fig.patch.set_facecolor(bg_color)
+    ax.set_facecolor(bg_color)
 
-    # 3. Forward Space & X-Axis Limits
+    # 3. Plot Candlesticks
+    # We iterate manually to draw candles using Bar/Vlines logic
+    width = 0.6  # width of candle body
+    width2 = 0.05 # width of wick
+    
+    up = df[df.Close >= df.Open]
+    down = df[df.Close < df.Open]
+    
+    # Up Candles (Green)
+    col_up = '#26a69a'
+    col_down = '#ef5350'
+    
+    # Wicks
+    ax.bar(up.Date, up.High - up.Low, bottom=up.Low, color=col_up, width=width2, align='center')
+    ax.bar(down.Date, down.High - down.Low, bottom=down.Low, color=col_down, width=width2, align='center')
+    
+    # Bodies
+    ax.bar(up.Date, up.Close - up.Open, bottom=up.Open, color=col_up, width=width, align='center')
+    ax.bar(down.Date, down.Open - down.Close, bottom=down.Close, color=col_down, width=width, align='center')
+
+    # 4. Forward Space & X-Axis Limits
     min_date = df['Date'].min()
     max_date = max(df['Date'].max(), expiration_date) + pd.Timedelta(days=5)
     ax.set_xlim(left=min_date, right=max_date)
 
-    # 4. Vertical Event Lines
-    # Trade Start
-    ax.axvline(x=trade_start_date, color='green', linestyle='--', linewidth=1.5, label='Trade Start')
-    # Expiration
-    ax.axvline(x=expiration_date, color='gray', linestyle='--', linewidth=1.5, label='Expiration')
+    # 5. Vertical Event Lines
+    ax.axvline(x=trade_start_date, color='#00C853', linestyle='--', linewidth=1, label='Start', alpha=0.7)
+    ax.axvline(x=expiration_date, color='#B0BEC5', linestyle='--', linewidth=1, label='Exp', alpha=0.7)
 
-    # 5. Unified Strikes & Shading
+    # 6. Unified Strikes & Shading
     # Strikes (Red)
-    ax.axhline(y=short_strike, color='#FF4B4B', linestyle='-', linewidth=1.5, label='Long and Short Strikes')
-    ax.axhline(y=long_strike, color='#FF4B4B', linestyle='-', linewidth=1.5)
+    ax.axhline(y=short_strike, color='#FF5252', linestyle='-', linewidth=1.2, label='Strikes')
+    ax.axhline(y=long_strike, color='#FF5252', linestyle='-', linewidth=1.2)
     
     # Shaded Spread Zone
-    ax.axhspan(short_strike, long_strike, color='#FF4B4B', alpha=0.1)
+    ax.axhspan(short_strike, long_strike, color='#FF5252', alpha=0.15)
 
-    # 6. Dynamic Critical Price (Stop Loss) - Orange Dashed
+    # 7. Dynamic Critical Price (Stop Loss)
     if crit_price:
-        ax.axhline(y=crit_price, color='#FFA500', linestyle='--', linewidth=1.5, label='Stop Loss (0.40 Delta)')
+        ax.axhline(y=crit_price, color='#FFA726', linestyle=':', linewidth=1.2, label='Stop Loss')
 
-    # 7. Formatting & Legend
-    ax.legend(loc='best', prop={'family': 'sans-serif', 'size': 8}, frameon=True)
-    
-    ax.set_title(f"Trade Analysis (Exp: {expiration_date.date()})", fontname='sans-serif', fontsize=10, fontweight='bold')
-    
-    # Date Axis Formatting
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
-    plt.xticks(rotation=0, fontname='sans-serif', fontsize=8)
-    plt.yticks(fontname='sans-serif', fontsize=8)
-    
-    # Aesthetic touches
-    ax.grid(True, which='major', linestyle=':', alpha=0.6)
+    # 8. Styling & Legend
+    # Spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_color(text_color)
+    ax.spines['left'].set_color(text_color)
+    
+    # Ticks and Labels
+    ax.tick_params(axis='x', colors=text_color, labelsize=8)
+    ax.tick_params(axis='y', colors=text_color, labelsize=8)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+    
+    # Grid
+    ax.grid(True, which='major', linestyle=':', color=grid_color, alpha=0.4)
+    
+    # Title
+    ax.set_title(f"Price Action vs Strikes (Exp: {expiration_date.date()})", 
+                 color=text_color, fontsize=9, fontweight='bold', pad=10)
+    
+    # Legend (Dark Mode Adaptation)
+    leg = ax.legend(loc='upper left', fontsize=7, facecolor=card_color, edgecolor=grid_color)
+    for text in leg.get_texts():
+        text.set_color(text_color)
 
     plt.tight_layout()
     return fig
@@ -378,25 +410,24 @@ else:
                 unsafe_allow_html=True
             )
 
-            # --- CHART LOGIC: Matplotlib Patch ---
+            # --- CHART LOGIC: Dark Candles Patch ---
             price_hist = t.get("cached", {}).get("price_history", [])
             crit_price = t.get("cached", {}).get("critical_price_040")
             
-            # Use data if available, otherwise show placeholder
             if price_hist:
                 try:
-                    # Convert history to DataFrame
                     df_chart = pd.DataFrame(price_hist)
-                    # We need 'Date' and 'Close' for the function
-                    # Incoming data likely has 'date' (ISO string) and 'close'
+                    # Map JSON keys to DataFrame columns
                     df_chart['Date'] = pd.to_datetime(df_chart['date'])
                     df_chart['Close'] = df_chart['close']
+                    # Ensure OHLC exists for candles
+                    df_chart['Open'] = df_chart['open'] if 'open' in df_chart.columns else df_chart['close']
+                    df_chart['High'] = df_chart['high'] if 'high' in df_chart.columns else df_chart['close']
+                    df_chart['Low'] = df_chart['low'] if 'low' in df_chart.columns else df_chart['close']
                     
-                    # Convert trade params to Timestamps
                     trade_start_ts = pd.Timestamp(t['entry_date'])
                     expiration_ts = pd.Timestamp(t['expiration'])
                     
-                    # Generate Chart
                     fig = plot_spread_chart(
                         df=df_chart,
                         trade_start_date=trade_start_ts,
@@ -406,11 +437,10 @@ else:
                         crit_price=crit_price
                     )
                     
-                    # Display
                     st.pyplot(fig)
                     
                 except Exception as e:
-                    st.error(f"Error rendering chart: {e}")
+                    st.error(f"Chart Error: {e}")
             else:
                 st.caption("Initializing market data...")
 
