@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 # ---------------- Persistence ----------------
+# Assumes you have a persistence.py file in the same directory
 from persistence import (
     ensure_logged_in,
     build_drive_service_from_session,
@@ -40,6 +41,7 @@ header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 
 with header_col1:
     try:
+        # Replace with your actual logo file if present
         st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=140)
     except Exception:
         st.write("**DR CAPITAL**")
@@ -86,91 +88,134 @@ def get_entry_dte(entry_date_str, expiry_date_str):
     except:
         return 30 # fallback
 
-# --- NEW CHARTING FUNCTION (Dark Mode + Candles) ---
+# --- 1. CHARTING FUNCTION (Dark Mode + Candles) ---
 def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_strike, crit_price=None):
     """
     Generates a Dark Mode Matplotlib figure with Candlesticks.
     """
-    # 1. Colors & Theme
-    bg_color = '#0E1117'    # Streamlit Main Dark BG
-    card_color = '#262730'  # Streamlit Card BG
-    text_color = '#FAFAFA'  # White/Light Text
+    # Theme Colors
+    bg_color = '#0E1117'    
+    card_color = '#262730'  
+    text_color = '#FAFAFA'  
     grid_color = '#444444'  
     
-    # 2. Setup Figure (Smaller Size)
     fig, ax = plt.subplots(figsize=(8, 3))
-    
-    # Apply Dark Background
     fig.patch.set_facecolor(bg_color)
     ax.set_facecolor(bg_color)
 
-    # 3. Plot Candlesticks
-    # We iterate manually to draw candles using Bar/Vlines logic
-    width = 0.6  # width of candle body
-    width2 = 0.05 # width of wick
+    # Candle logic
+    width = 0.6  
+    width2 = 0.05 
     
     up = df[df.Close >= df.Open]
     down = df[df.Close < df.Open]
     
-    # Up Candles (Green)
     col_up = '#26a69a'
     col_down = '#ef5350'
     
-    # Wicks
+    # Draw Wicks
     ax.bar(up.Date, up.High - up.Low, bottom=up.Low, color=col_up, width=width2, align='center')
     ax.bar(down.Date, down.High - down.Low, bottom=down.Low, color=col_down, width=width2, align='center')
     
-    # Bodies
+    # Draw Bodies
     ax.bar(up.Date, up.Close - up.Open, bottom=up.Open, color=col_up, width=width, align='center')
     ax.bar(down.Date, down.Open - down.Close, bottom=down.Close, color=col_down, width=width, align='center')
 
-    # 4. Forward Space & X-Axis Limits
+    # Timeline Limits
     min_date = df['Date'].min()
     max_date = max(df['Date'].max(), expiration_date) + pd.Timedelta(days=5)
     ax.set_xlim(left=min_date, right=max_date)
 
-    # 5. Vertical Event Lines
+    # Vertical Event Lines
     ax.axvline(x=trade_start_date, color='#00C853', linestyle='--', linewidth=1, label='Start', alpha=0.7)
     ax.axvline(x=expiration_date, color='#B0BEC5', linestyle='--', linewidth=1, label='Exp', alpha=0.7)
 
-    # 6. Unified Strikes & Shading
-    # Strikes (Red)
+    # Strike Lines & Shading
     ax.axhline(y=short_strike, color='#FF5252', linestyle='-', linewidth=1.2, label='Strikes')
     ax.axhline(y=long_strike, color='#FF5252', linestyle='-', linewidth=1.2)
-    
-    # Shaded Spread Zone
     ax.axhspan(short_strike, long_strike, color='#FF5252', alpha=0.15)
 
-    # 7. Dynamic Critical Price (Stop Loss)
+    # Stop Loss Line
     if crit_price:
         ax.axhline(y=crit_price, color='#FFA726', linestyle=':', linewidth=1.2, label='Stop Loss')
 
-    # 8. Styling & Legend
-    # Spines
+    # Formatting
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.spines['bottom'].set_color(text_color)
     ax.spines['left'].set_color(text_color)
     
-    # Ticks and Labels
     ax.tick_params(axis='x', colors=text_color, labelsize=8)
     ax.tick_params(axis='y', colors=text_color, labelsize=8)
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
-    
-    # Grid
     ax.grid(True, which='major', linestyle=':', color=grid_color, alpha=0.4)
     
-    # Title
     ax.set_title(f"Price Action vs Strikes (Exp: {expiration_date.date()})", 
                  color=text_color, fontsize=9, fontweight='bold', pad=10)
     
-    # Legend (Dark Mode Adaptation)
+    # Dark Mode Legend
     leg = ax.legend(loc='upper left', fontsize=7, facecolor=card_color, edgecolor=grid_color)
     for text in leg.get_texts():
         text.set_color(text_color)
 
     plt.tight_layout()
     return fig
+
+# --- 2. PROGRESS BAR FUNCTION (Psychological Logic) ---
+def render_profit_bar(profit_pct):
+    """
+    Renders a psychological progress bar.
+    - Scale: -100% Profit (Loss) -> 0% Bar Fill
+    - Scale: +50% Profit (Target) -> 100% Bar Fill
+    - Scale: >50% Profit -> Bar stays full, color intensifies.
+    """
+    if profit_pct is None:
+        return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
+    
+    # Linear Mapping:
+    # Range (-100 to 50) = 150 points.
+    # If profit = -100, fill = 0.
+    # If profit = 50, fill = 100.
+    # Formula: fill = ((profit + 100) / 150) * 100
+    
+    fill_pct = ((profit_pct + 100) / 150) * 100
+    
+    # Clamp visual fill between 0 and 100%
+    display_fill = max(0, min(fill_pct, 100))
+    
+    # Visual Styles
+    if profit_pct < 0:
+        bar_color = "#ff4b4b" # Red
+        label_color = "#ff4b4b"
+        status_text = f"LOSS: {profit_pct:.1f}%"
+    elif profit_pct < 50:
+        bar_color = "#00c853" # Green
+        label_color = "#00c853"
+        status_text = f"PROFIT: {profit_pct:.1f}%"
+    else:
+        # Target Hit (Psychological Win)
+        bar_color = "#00e676" # Bright Neon Green
+        label_color = "#00e676"
+        status_text = f"WIN TARGET: {profit_pct:.1f}%"
+
+    return f"""
+    <div style="margin-bottom: 15px; margin-top: 5px;">
+        <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:5px;">
+            <strong style="color: #ddd;">Target Progress</strong>
+            <span style="color:{label_color}; font-weight:bold;">{status_text}</span>
+        </div>
+        <div style="width: 100%; background-color: #333; height: 14px; border-radius: 7px; position: relative; overflow: hidden; border: 1px solid #444;">
+            <div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>
+            
+            <div style="position: absolute; left: 66.6%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5); border-right: 1px dashed rgba(0,0,0,0.5);" title="Break Even (0%)"></div>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:9px; color:gray; margin-top:3px; padding-left: 2px; padding-right: 2px;">
+            <span>Max Loss</span>
+            <span style="margin-left: 15px;">Break Even</span>
+            <span>TARGET (50%)</span>
+        </div>
+    </div>
+    """
 
 # ---------------- Load Drive State ----------------
 if drive_service:
@@ -231,16 +276,12 @@ else:
         cached = t.get("cached", {})
 
         current_dte = days_to_expiry(t["expiration"])
-        entry_dte = get_entry_dte(t["entry_date"], t["expiration"])
         
         width = abs(t["short_strike"] - t["long_strike"])
         max_gain = t["credit"]
         max_loss = width - t["credit"]
 
         # Backend Data
-        current_price = cached.get("current_price")
-        
-        # Support both old "abs_delta" and new "net_delta" structures
         abs_delta = cached.get("abs_delta") 
         if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
@@ -266,41 +307,27 @@ else:
         
         if profit_pct and profit_pct >= 50:
             status_icon = "💰" 
-            status_msg = "Profit Target Reached"
-            status_color = "green"
+            status_msg = "TARGET REACHED"
+            status_color = "#00e676"
 
         # --- Color Coding ---
-        delta_color = "#d32f2f" if abs_delta and abs_delta >= 0.40 else "green"
+        delta_color = "#d32f2f" if abs_delta and abs_delta >= 0.40 else "#00e676"
         delta_val = f"{abs_delta:.2f}" if abs_delta is not None else "Pending"
 
-        spread_color = "#d32f2f" if spread_value and spread_value >= 150 else "green"
+        spread_color = "#d32f2f" if spread_value and spread_value >= 150 else "#00e676"
         spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
 
-        dte_color = "#d32f2f" if current_dte <= 7 else "green"
-
-        if profit_pct is None:
-            profit_color = "inherit"
-            profit_val = "Pending"
-        else:
-            profit_val = f"{profit_pct:.1f}"
-            if profit_pct >= 50:
-                profit_color = "green"
-            elif profit_pct < 0:
-                profit_color = "#d32f2f"
-            else:
-                profit_color = "#e6b800"
+        dte_color = "#d32f2f" if current_dte <= 7 else "#00e676"
 
         cols = st.columns([3, 4])
 
         # -------- LEFT CARD (Details + Close Button) --------
         with cols[0]:
-            # --- Ticker & Change Logic ---
             day_change = cached.get("day_change_percent", 0.0)
-            
             if day_change is None: day_change = 0.0
             
             if day_change > 0:
-                change_color = "green" 
+                change_color = "#00e676" 
                 arrow = "▲"
                 change_str = f"{day_change:.2f}%"
             elif day_change < 0:
@@ -334,159 +361,117 @@ else:
             </div>
             """, unsafe_allow_html=True)
             
-            st.write("") # Spacer
+            st.write("") 
             
             # --- Close / Log Logic ---
             if st.button("Close Position / Log", key=f"btn_close_{i}"):
                 st.session_state[f"close_mode_{i}"] = True
 
-            # If close mode is active for this trade
             if st.session_state.get(f"close_mode_{i}", False):
                 with st.container():
                     st.markdown("---")
                     st.info("📉 Closing Position & Logging to Journal")
-                    
                     with st.form(key=f"close_form_{i}"):
                         col_log1, col_log2 = st.columns(2)
                         with col_log1:
-                            # Auto-Calculate Price
                             default_debit = 0.0
                             current_short = t.get("cached", {}).get("short_option_price")
                             current_long = t.get("cached", {}).get("long_option_price")
-                            
                             if current_short is not None and current_long is not None:
                                 est_price = current_short - current_long
                                 if est_price > 0:
                                     default_debit = est_price
 
-                            debit_paid = st.number_input(
-                                "Debit Paid ($)", 
-                                min_value=0.0, 
-                                value=float(f"{default_debit:.2f}"), 
-                                step=0.01,
-                                help="Enter the price you paid to buy back the spread (positive number)."
-                            )
-                        
+                            debit_paid = st.number_input("Debit Paid ($)", min_value=0.0, value=float(f"{default_debit:.2f}"), step=0.01)
                         with col_log2:
-                            close_notes = st.text_area("Notes / Reason", height=70, placeholder="e.g. 50% profit target hit...")
+                            close_notes = st.text_area("Notes", height=70)
                         
-                        submit_close = st.form_submit_button("Confirm Close & Log")
-                        
-                        if submit_close:
-                            success = False
-                            
+                        if st.form_submit_button("Confirm Close"):
                             if drive_service:
-                                success = log_trade_to_csv(drive_service, t, debit_paid, close_notes)
-                                if success:
-                                    st.success(f"Logged {t['ticker']} to 'trade_journal.csv'")
-                                else:
-                                    st.error("Could not write to Drive journal.")
-                            else:
-                                st.warning("Drive service not active. Removing without log.")
-                                success = True 
-                            
-                            if success:
-                                st.session_state.trades.pop(i)
-                                if drive_service:
+                                if log_trade_to_csv(drive_service, t, debit_paid, close_notes):
+                                    st.success(f"Logged {t['ticker']}")
+                                    st.session_state.trades.pop(i)
                                     save_to_drive(drive_service, st.session_state.trades)
+                                    del st.session_state[f"close_mode_{i}"]
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Drive Error")
+                            else:
+                                st.session_state.trades.pop(i)
                                 del st.session_state[f"close_mode_{i}"]
                                 st.experimental_rerun()
-
+                                
                     if st.button("Cancel", key=f"cancel_{i}"):
                         del st.session_state[f"close_mode_{i}"]
                         st.experimental_rerun()
 
-        # -------- RIGHT CARD (Chart) --------
+        # -------- RIGHT CARD (Chart & Bar) --------
         with cols[1]:
+            # 1. Rules Block
             st.markdown(
                 f"""
-                <div style="font-size: 14px; margin-bottom: 10px;">
-                    <div>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must not exceed 0.40)</span></div>
-                    <div>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must not exceed 150%)</span></div>
-                    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must not be less than 7)</span></div>
-                    <div>Profit: <strong style='color:{profit_color}'>{profit_val}%</strong> <span style='color:gray; font-size:0.85em; display:block; margin-bottom:4px;'>(Must sell between 50-75%)</span></div>
+                <div style="font-size: 14px; margin-bottom: 5px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <div>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong></div>
+                    <div>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong></div>
+                    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong></div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
-
-            # --- CHART LOGIC: Dark Candles Patch ---
+            
+            # 2. PROGRESS BAR (Psychological)
+            st.markdown(render_profit_bar(profit_pct), unsafe_allow_html=True)
+            
+            # 3. CHART (Dark Mode + Candles)
             price_hist = t.get("cached", {}).get("price_history", [])
             crit_price = t.get("cached", {}).get("critical_price_040")
             
             if price_hist:
                 try:
                     df_chart = pd.DataFrame(price_hist)
-                    # Map JSON keys to DataFrame columns
                     df_chart['Date'] = pd.to_datetime(df_chart['date'])
                     df_chart['Close'] = df_chart['close']
-                    # Ensure OHLC exists for candles
                     df_chart['Open'] = df_chart['open'] if 'open' in df_chart.columns else df_chart['close']
                     df_chart['High'] = df_chart['high'] if 'high' in df_chart.columns else df_chart['close']
                     df_chart['Low'] = df_chart['low'] if 'low' in df_chart.columns else df_chart['close']
                     
-                    trade_start_ts = pd.Timestamp(t['entry_date'])
-                    expiration_ts = pd.Timestamp(t['expiration'])
-                    
                     fig = plot_spread_chart(
                         df=df_chart,
-                        trade_start_date=trade_start_ts,
-                        expiration_date=expiration_ts,
+                        trade_start_date=pd.Timestamp(t['entry_date']),
+                        expiration_date=pd.Timestamp(t['expiration']),
                         short_strike=t['short_strike'],
                         long_strike=t['long_strike'],
                         crit_price=crit_price
                     )
-                    
                     st.pyplot(fig)
-                    
-                except Exception as e:
-                    st.error(f"Chart Error: {e}")
+                except Exception:
+                    st.caption("Chart Error")
             else:
-                st.caption("Initializing market data...")
+                st.caption("Loading chart...")
 
-        # Divider between trades
         st.markdown("<hr style='margin-top: 20px; margin-bottom: 20px; border: 0; border-top: 1px solid #e0e0e0;'>", unsafe_allow_html=True)
 
 # ---------------- Manual Controls ----------------
 st.write("### Data Sync")
 ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 5])
-
 with ctl1:
-    if st.button("💾 Save all trades to Google Drive"):
-        saved = False
-        if drive_service:
-            try:
-                saved = save_to_drive(drive_service, st.session_state.trades)
-            except Exception:
-                saved = False
-        if saved:
-            st.success("Saved successfully.")
-        else:
-            st.error("Failed to save.")
-
+    if st.button("💾 Save to Drive"):
+        if drive_service and save_to_drive(drive_service, st.session_state.trades):
+            st.success("Saved.")
 with ctl2:
-    if st.button("📥 Reload trades from Google Drive"):
+    if st.button("📥 Reload from Drive"):
         if drive_service:
             loaded = load_from_drive(drive_service)
             if loaded is not None:
                 st.session_state.trades = loaded
-                st.success("Loaded trades.")
                 st.experimental_rerun()
-            else:
-                st.info("No trades found/failed.")
 
 st.markdown("---")
 
-# ---------------- External Tools Section ----------------
+# ---------------- External Tools ----------------
 st.subheader("External Tools")
-tools_c1, tools_c2, tools_c3, tools_c4 = st.columns(4)
-
-with tools_c1:
-    st.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
-with tools_c2:
-    st.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
-with tools_c3:
-    screener_url = "https://optionmoves.com/screener?ticker=SPY%2C+NVDA%2C+AAPL%2C+MSFT%2C+GOOG%2C+AMZN%2C+META%2C+BRK.B%2C+TSLA%2C+AVGO%2C+LLY%2C+JPM%2C+UNH%2C+V%2C+MA%2C+JNJ%2C+XOM%2C+CVX%2C+PG%2C+PEP%2C+KO%2C+WMT%2C+BAC%2C+PFE%2C+NFLX%2C+ORCL%2C+ADBE%2C+INTC%2C+COST%2C+ABT%2C+VZ&strategy=put-credit-spread&expiryType=dte&dte=30&deltaStrikeType=delta&delta=0.30&spreadWidth=5"
-    st.link_button("Option Screener", screener_url, use_container_width=True)
-with tools_c4:
-    st.link_button("IV Rank Check", "https://marketchameleon.com/", use_container_width=True)
+t1, t2, t3, t4 = st.columns(4)
+with t1: st.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
+with t2: st.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
+with t3: st.link_button("Option Screener", "https://optionmoves.com/", use_container_width=True)
+with t4: st.link_button("IV Rank", "https://marketchameleon.com/", use_container_width=True)
