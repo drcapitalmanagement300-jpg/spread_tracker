@@ -6,6 +6,7 @@ from streamlit_autorefresh import st_autorefresh
 import io
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import textwrap
 
 # ---------------- Persistence ----------------
 from persistence import (
@@ -50,7 +51,6 @@ with header_col1:
         st.write("**DR CAPITAL**")
 
 with header_col2:
-    # NUCLEAR FIX: Explicit HTML string without indentation
     header_html = (
         "<div style='text-align: left; padding-top: 10px;'>"
         "<h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Put Credit Spread Monitor</h1>"
@@ -183,7 +183,6 @@ def render_profit_bar(profit_pct):
         label_color = SUCCESS_COLOR
         status_text = f"WIN TARGET: {profit_pct:.1f}%"
 
-    # NUCLEAR FIX: Flattened HTML string
     return (
         f'<div style="margin-bottom: 12px; margin-top: 5px;">'
         f'<div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">'
@@ -344,29 +343,41 @@ else:
 
             theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
             
-            # NUCLEAR FIX: Flattened HTML string
+            # --- CARD HTML UPDATE ---
             left_card_html = (
                 f"<div style='line-height: 1.4; font-size: 15px;'>"
+                # HEADER ROW (Ticker + Theta)
                 f"<div style='display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;'>"
-                f"<h3 style='margin: 0; display: flex; align-items: center; gap: 10px;'>"
-                f"{t['ticker']} "
-                f"<span style='color: {change_color}; font-size: 0.85em;'>"
-                f"{arrow} {change_str}"
-                f"</span>"
-                f"<span style='font-size: 0.6em; color: gray; border: 1px solid #444; padding: 1px 4px; border-radius: 4px;'>{contracts}x</span>"
-                f"</h3>"
-                f"<div style='background-color: rgba(0, 200, 83, 0.1); border: 1px solid {SUCCESS_COLOR}; color: {SUCCESS_COLOR}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;'>"
-                f"{theta_text}"
+                    f"<h3 style='margin: 0; display: flex; align-items: center; gap: 10px;'>"
+                    f"{t['ticker']} "
+                    f"<span style='color: {change_color}; font-size: 0.85em;'>"
+                    f"{arrow} {change_str}"
+                    f"</span>"
+                    f"</h3>"
+                    # Right side: Label + Badge
+                    f"<div style='display:flex; flex-direction:column; align-items:flex-end; gap:2px;'>"
+                        f"<span style='font-size:10px; color:gray; text-transform:uppercase; letter-spacing:0.5px;'>Daily Theta Gain</span>"
+                        f"<div style='background-color: rgba(0, 200, 83, 0.1); border: 1px solid {SUCCESS_COLOR}; color: {SUCCESS_COLOR}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;'>"
+                        f"{theta_text}"
+                        f"</div>"
+                    f"</div>"
                 f"</div>"
-                f"</div>"
+                
+                # DATA GRID
                 f"<div style='display: grid; grid-template-columns: 1fr 1fr; gap: 2px;'>"
-                f"<div><strong>Short:</strong> {t['short_strike']}</div>"
-                f"<div><strong>Max Gain:</strong> {format_money(max_gain_total)}</div>"
-                f"<div><strong>Long:</strong> {t['long_strike']}</div>"
-                f"<div><strong>Max Loss:</strong> {format_money(max_loss_total)}</div>"
-                f"<div style='grid-column: span 2;'><strong>Exp:</strong> {t['expiration']}</div>"
-                f"<div style='grid-column: span 2;'><strong>Width:</strong> {width:.2f}</div>"
+                    f"<div><strong>Short:</strong> {t['short_strike']}</div>"
+                    f"<div><strong>Max Gain:</strong> {format_money(max_gain_total)}</div>"
+                    
+                    f"<div><strong>Long:</strong> {t['long_strike']}</div>"
+                    f"<div><strong>Max Loss:</strong> {format_money(max_loss_total)}</div>"
+                    
+                    f"<div><strong>Width:</strong> {width:.2f}</div>"
+                    f"<div><strong>Contracts:</strong> {contracts}</div>"
+                    
+                    f"<div style='grid-column: span 2;'><strong>Exp:</strong> {t['expiration']}</div>"
                 f"</div>"
+                
+                # STATUS FOOTER
                 f"<div style='margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; color: {status_color}; font-weight: bold;'>"
                 f"{status_icon} {status_msg}"
                 f"</div>"
@@ -417,7 +428,6 @@ else:
 
         # -------- RIGHT CARD --------
         with cols[1]:
-            # NUCLEAR FIX: Flattened HTML string
             right_card_html = (
                 f"<div style='font-size: 14px; margin-bottom: 5px;'>"
                 f"<div style='margin-bottom: 4px;'>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 0.40)</span></div>"
