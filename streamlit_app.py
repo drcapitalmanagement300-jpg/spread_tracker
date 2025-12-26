@@ -113,7 +113,7 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     up = df[df.Close >= df.Open]
     down = df[df.Close < df.Open]
     
-    # MATCHED COLORS: Using the global UI constants
+    # MATCHED COLORS
     col_up = SUCCESS_COLOR
     col_down = WARNING_COLOR
     
@@ -133,6 +133,11 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     # Event Lines
     ax.axvline(x=trade_start_date, color=SUCCESS_COLOR, linestyle='--', linewidth=1, label='Start', alpha=0.7)
     ax.axvline(x=expiration_date, color='#B0BEC5', linestyle='--', linewidth=1, label='Exp', alpha=0.7)
+
+    # --- NEW: 7-Day Warning Line ---
+    warning_date = expiration_date - pd.Timedelta(days=7)
+    # Only plot if it falls within our view (or close to it)
+    ax.axvline(x=warning_date, color=STOP_LOSS_COLOR, linestyle=':', linewidth=1, label='7 Days Out', alpha=0.8)
 
     # Strikes
     ax.axhline(y=short_strike, color='#FF5252', linestyle='-', linewidth=1.2, label='Strikes')
