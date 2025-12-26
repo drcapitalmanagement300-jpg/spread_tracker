@@ -21,8 +21,8 @@ from persistence import (
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 
 # ---------------- Constants ----------------
-SUCCESS_COLOR = "#00C853"  # Unified Green for Nominal/Profit/Good
-WARNING_COLOR = "#d32f2f"  # Red for Danger/Loss
+SUCCESS_COLOR = "#00C853"  # Unified Green
+WARNING_COLOR = "#d32f2f"  # Red
 STOP_LOSS_COLOR = "#FFA726" # Orange
 
 # ---------------- UI Refresh ----------------
@@ -91,7 +91,7 @@ def get_entry_dte(entry_date_str, expiry_date_str):
     except:
         return 30 # fallback
 
-# --- 1. CHARTING FUNCTION (Dark Mode + Candles) ---
+# --- 1. CHARTING FUNCTION ---
 def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_strike, crit_price=None):
     """
     Generates a Dark Mode Matplotlib figure with Candlesticks.
@@ -162,17 +162,12 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
 
 # --- 2. PROGRESS BAR FUNCTION ---
 def render_profit_bar(profit_pct):
-    """
-    Renders a psychological progress bar (Slim Version).
-    """
     if profit_pct is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
     
-    # Mapping -100 to 50 -> 0 to 100
     fill_pct = ((profit_pct + 100) / 150) * 100
     display_fill = max(0, min(fill_pct, 100))
     
-    # Visual Styles
     if profit_pct < 0:
         bar_color = WARNING_COLOR 
         label_color = WARNING_COLOR
@@ -182,8 +177,7 @@ def render_profit_bar(profit_pct):
         label_color = SUCCESS_COLOR
         status_text = f"PROFIT: {profit_pct:.1f}%"
     else:
-        # Target Hit
-        bar_color = SUCCESS_COLOR # Unified Green
+        bar_color = SUCCESS_COLOR 
         label_color = SUCCESS_COLOR
         status_text = f"WIN TARGET: {profit_pct:.1f}%"
 
@@ -195,7 +189,6 @@ def render_profit_bar(profit_pct):
         </div>
         <div style="width: 100%; background-color: #333; height: 6px; border-radius: 3px; position: relative; overflow: hidden; border: 1px solid #444;">
             <div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>
-            
             <div style="position: absolute; left: 66.6%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>
         </div>
         <div style="display:flex; justify-content:space-between; font-size:9px; color:gray; margin-top:2px; padding-left: 2px; padding-right: 2px;">
@@ -217,16 +210,25 @@ else:
 with st.form("add_trade", clear_on_submit=True):
     st.subheader("New Position Entry")
 
-    c1, c2, c3 = st.columns(3)
+    # Layout: 4 Columns to fit "Contracts" nicely
+    c1, c2, c3, c4 = st.columns(4)
+    
     with c1:
         ticker = st.text_input("Ticker").upper()
-        short_strike = st.number_input("Short Strike", min_value=0.0, format="%.2f")
+        # New Field: Contracts
+        num_contracts = st.number_input("Contracts", min_value=1, value=1, step=1)
+        
     with c2:
-        expiration = st.date_input("Expiration Date")
+        short_strike = st.number_input("Short Strike", min_value=0.0, format="%.2f")
         long_strike = st.number_input("Long Strike", min_value=0.0, format="%.2f")
+        
     with c3:
+        expiration = st.date_input("Expiration Date")
         entry_date = st.date_input("Entry Date")
-        credit = st.number_input("Credit Received", min_value=0.0, format="%.2f")
+        
+    with c4:
+        credit = st.number_input("Credit (Per Share)", min_value=0.0, format="%.2f")
+        # Spacer or calculated total could go here
 
     submitted = st.form_submit_button("Initialize Position")
 
@@ -239,6 +241,7 @@ with st.form("add_trade", clear_on_submit=True):
             trade = {
                 "id": f"{ticker}-{short_strike}-{long_strike}-{expiration.isoformat()}",
                 "ticker": ticker,
+                "contracts": num_contracts, # Saved
                 "short_strike": short_strike,
                 "long_strike": long_strike,
                 "expiration": expiration.isoformat(),
@@ -251,7 +254,7 @@ with st.form("add_trade", clear_on_submit=True):
             st.session_state.trades.append(trade)
             if drive_service:
                 save_to_drive(drive_service, st.session_state.trades)
-            st.success(f"Position initialized for {ticker}. Backend will sync data shortly.")
+            st.success(f"Position initialized: {num_contracts}x {ticker} Puts.")
 
 st.markdown("---")
 
@@ -266,14 +269,27 @@ else:
 
         current_dte = days_to_expiry(t["expiration"])
         
+        # --- POSITION SIZING & TOTALS ---
+        contracts = t.get("contracts", 1) # Default to 1 if missing
+        
         width = abs(t["short_strike"] - t["long_strike"])
-        max_gain = t["credit"]
-        max_loss = width - t["credit"]
+        
+        # Max Gain = Credit * 100 * Contracts
+        max_gain_total = t["credit"] * 100 * contracts
+        
+        # Max Loss = (Width - Credit) * 100 * Contracts
+        max_loss_total = (width - t["credit"]) * 100 * contracts
 
         # Backend Data
         abs_delta = cached.get("abs_delta") 
         if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
+        
+        # --- ACCURATE THETA CALCULATION ---
+        net_theta = cached.get("net_theta", 0.0)
+        # Net Theta is per share. 
+        # Total Daily Theta = Net Theta * 100 (multiplier) * Contracts
+        daily_theta_dollars = net_theta * 100.0 * contracts 
 
         spread_value = cached.get("spread_value_percent")
         profit_pct = cached.get("current_profit_percent")
@@ -299,7 +315,7 @@ else:
             status_msg = "TARGET REACHED"
             status_color = SUCCESS_COLOR
 
-        # --- Color Coding for Text ---
+        # --- Color Coding ---
         delta_color = WARNING_COLOR if abs_delta and abs_delta >= 0.40 else SUCCESS_COLOR
         delta_val = f"{abs_delta:.2f}" if abs_delta is not None else "Pending"
 
@@ -310,7 +326,7 @@ else:
 
         cols = st.columns([3, 4])
 
-        # -------- LEFT CARD (Details) --------
+        # -------- LEFT CARD (Details + Theta Ticker) --------
         with cols[0]:
             day_change = cached.get("day_change_percent", 0.0)
             if day_change is None: day_change = 0.0
@@ -328,19 +344,30 @@ else:
                 arrow = ""
                 change_str = "0.00%"
 
+            # Theta Badge Style
+            theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
+            
             st.markdown(f"""
             <div style="line-height: 1.4; font-size: 15px;">
-                <h3 style="margin-bottom: 5px; display: flex; align-items: center; gap: 10px;">
-                    {t['ticker']} 
-                    <span style="color: {change_color}; font-size: 0.85em;">
-                        {arrow} {change_str}
-                    </span>
-                </h3>
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;">
+                    <h3 style="margin: 0; display: flex; align-items: center; gap: 10px;">
+                        {t['ticker']} 
+                        <span style="color: {change_color}; font-size: 0.85em;">
+                            {arrow} {change_str}
+                        </span>
+                        <span style="font-size: 0.6em; color: gray; border: 1px solid #444; padding: 1px 4px; border-radius: 4px;">{contracts}x</span>
+                    </h3>
+                    
+                    <div style="background-color: rgba(0, 200, 83, 0.1); border: 1px solid {SUCCESS_COLOR}; color: {SUCCESS_COLOR}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;">
+                        {theta_text}
+                    </div>
+                </div>
+
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2px;">
                     <div><strong>Short:</strong> {t['short_strike']}</div>
-                    <div><strong>Max Gain:</strong> {format_money(max_gain)}</div>
+                    <div><strong>Max Gain:</strong> {format_money(max_gain_total)}</div>
                     <div><strong>Long:</strong> {t['long_strike']}</div>
-                    <div><strong>Max Loss:</strong> {format_money(max_loss)}</div>
+                    <div><strong>Max Loss:</strong> {format_money(max_loss_total)}</div>
                     <div style="grid-column: span 2;"><strong>Exp:</strong> {t['expiration']}</div>
                     <div style="grid-column: span 2;"><strong>Width:</strong> {width:.2f}</div>
                 </div>
@@ -393,7 +420,7 @@ else:
 
         # -------- RIGHT CARD (Chart & Bar) --------
         with cols[1]:
-            # 1. Rules Block (RESTORED)
+            # 1. Rules Block
             st.markdown(
                 f"""
                 <div style="font-size: 14px; margin-bottom: 5px;">
@@ -405,7 +432,7 @@ else:
                 unsafe_allow_html=True
             )
             
-            # 2. PROGRESS BAR (Slim)
+            # 2. PROGRESS BAR
             st.markdown(render_profit_bar(profit_pct), unsafe_allow_html=True)
             
             # 3. CHART
