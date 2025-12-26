@@ -113,8 +113,9 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     up = df[df.Close >= df.Open]
     down = df[df.Close < df.Open]
     
-    col_up = '#26a69a'
-    col_down = '#ef5350'
+    # MATCHED COLORS: Using the global UI constants
+    col_up = SUCCESS_COLOR
+    col_down = WARNING_COLOR
     
     # Draw Wicks
     ax.bar(up.Date, up.High - up.Low, bottom=up.Low, color=col_up, width=width2, align='center')
