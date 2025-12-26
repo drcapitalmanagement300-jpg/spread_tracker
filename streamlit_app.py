@@ -136,7 +136,6 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
 
     # --- NEW: 7-Day Warning Line ---
     warning_date = expiration_date - pd.Timedelta(days=7)
-    # Only plot if it falls within our view (or close to it)
     ax.axvline(x=warning_date, color=STOP_LOSS_COLOR, linestyle=':', linewidth=1, label='7 Days Out', alpha=0.8)
 
     # Strikes
@@ -286,6 +285,7 @@ else:
         max_loss_total = (width - t["credit"]) * 100 * contracts
 
         # Backend Data
+        current_price = cached.get("current_price")
         abs_delta = cached.get("abs_delta") 
         if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
@@ -356,15 +356,17 @@ else:
                 arrow = ""
                 change_str = "0.00%"
 
+            price_display = f"${current_price:.2f}" if current_price else "$-.--"
             theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
             
-            # --- CARD HTML UPDATE (With Contracts & P.O.P.) ---
+            # --- CARD HTML UPDATE (With Price & Contracts) ---
             left_card_html = (
                 f"<div style='line-height: 1.4; font-size: 15px;'>"
-                # HEADER ROW (Ticker + Theta)
+                # HEADER ROW (Ticker + Price + Theta)
                 f"<div style='display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;'>"
-                    f"<h3 style='margin: 0; display: flex; align-items: center; gap: 10px;'>"
+                    f"<h3 style='margin: 0; display: flex; align-items: center; gap: 8px;'>"
                     f"{t['ticker']} "
+                    f"<span style='font-size: 0.9em; color: #ddd; font-weight: normal;'>{price_display}</span>"
                     f"<span style='color: {change_color}; font-size: 0.85em;'>"
                     f"{arrow} {change_str}"
                     f"</span>"
