@@ -147,6 +147,7 @@ def send_discord_alert(ticker, description, color=15158332):
 
 def handle_heartbeat(updated_trades):
     now_utc = datetime.now(timezone.utc)
+    # Heartbeat between 9AM and 10AM ET (approx 13/14 UTC depending on DST)
     if now_utc.hour in [13, 14]:
         if not updated_trades: return
         last_hb = updated_trades[0].get("last_heartbeat_date")
@@ -282,9 +283,12 @@ def update_trade(trade, data_manager):
     notif_color = 15158332
     short_abs_delta = abs(short_leg_greeks["delta"]) 
 
+    # --- NOTIFICATION LOGIC ---
     if profit_pct is not None and profit_pct >= 50:
-        notif_msg = f"✅ **Target Reached**: {profit_pct:.1f}% profit."
-        notif_color = 3066993
+        # Psychology Hack: Map 50% Real Profit -> 100% "Target" Profit
+        psych_profit = (profit_pct / 50.0) * 100.0
+        notif_msg = f"✅ **Target Reached**: {psych_profit:.0f}% Profitable"
+        notif_color = 3066993 # Green
     elif short_abs_delta >= 0.40:
         rule_violations["other_rules"] = True
         notif_msg = f"⚠️ **Delta Breach**: {short_abs_delta:.2f} (Limit 0.40)"
