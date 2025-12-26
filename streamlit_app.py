@@ -288,6 +288,11 @@ else:
         net_theta = cached.get("net_theta", 0.0)
         daily_theta_dollars = net_theta * 100.0 * contracts 
 
+        # --- POP CALCULATION (1 - Delta) ---
+        pop_percent = 0.0
+        if abs_delta is not None:
+            pop_percent = (1.0 - abs_delta) * 100.0
+
         spread_value = cached.get("spread_value_percent")
         profit_pct = cached.get("current_profit_percent")
         rules = cached.get("rule_violations", {})
@@ -320,6 +325,10 @@ else:
         spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
 
         dte_color = WARNING_COLOR if current_dte <= 7 else SUCCESS_COLOR
+        
+        # POP Color
+        pop_color = SUCCESS_COLOR if pop_percent >= 60 else "#FFA726"
+        if pop_percent < 50: pop_color = WARNING_COLOR
 
         cols = st.columns([3, 4])
 
@@ -343,7 +352,7 @@ else:
 
             theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
             
-            # --- CARD HTML UPDATE ---
+            # --- CARD HTML UPDATE (With Contracts & P.O.P.) ---
             left_card_html = (
                 f"<div style='line-height: 1.4; font-size: 15px;'>"
                 # HEADER ROW (Ticker + Theta)
@@ -377,9 +386,14 @@ else:
                     f"<div style='grid-column: span 2;'><strong>Exp:</strong> {t['expiration']}</div>"
                 f"</div>"
                 
-                # STATUS FOOTER
-                f"<div style='margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; color: {status_color}; font-weight: bold;'>"
-                f"{status_icon} {status_msg}"
+                # STATUS FOOTER (Flexbox for Status Left / POP Right)
+                f"<div style='margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; display: flex; justify-content: space-between; align-items: center;'>"
+                    f"<div style='color: {status_color}; font-weight: bold;'>"
+                    f"{status_icon} {status_msg}"
+                    f"</div>"
+                    f"<div style='font-size: 13px; color: gray;'>"
+                    f"P.O.P: <strong style='color: {pop_color};'>{pop_percent:.0f}%</strong>"
+                    f"</div>"
                 f"</div>"
                 f"</div>"
             )
