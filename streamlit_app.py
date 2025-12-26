@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 # ---------------- Persistence ----------------
-# Assumes you have a persistence.py file in the same directory
 from persistence import (
     ensure_logged_in,
     build_drive_service_from_session,
@@ -20,6 +19,11 @@ from persistence import (
 
 # ---------------- Page config ----------------
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
+
+# ---------------- Constants ----------------
+SUCCESS_COLOR = "#00C853"  # Unified Green for Nominal/Profit/Good
+WARNING_COLOR = "#d32f2f"  # Red for Danger/Loss
+STOP_LOSS_COLOR = "#FFA726" # Orange
 
 # ---------------- UI Refresh ----------------
 st_autorefresh(interval=60_000, key="ui_refresh")
@@ -41,7 +45,6 @@ header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 
 with header_col1:
     try:
-        # Replace with your actual logo file if present
         st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=140)
     except Exception:
         st.write("**DR CAPITAL**")
@@ -93,7 +96,6 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     """
     Generates a Dark Mode Matplotlib figure with Candlesticks.
     """
-    # Theme Colors
     bg_color = '#0E1117'    
     card_color = '#262730'  
     text_color = '#FAFAFA'  
@@ -103,7 +105,6 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     fig.patch.set_facecolor(bg_color)
     ax.set_facecolor(bg_color)
 
-    # Candle logic
     width = 0.6  
     width2 = 0.05 
     
@@ -121,23 +122,22 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     ax.bar(up.Date, up.Close - up.Open, bottom=up.Open, color=col_up, width=width, align='center')
     ax.bar(down.Date, down.Open - down.Close, bottom=down.Close, color=col_down, width=width, align='center')
 
-    # Timeline Limits
+    # Timeline
     min_date = df['Date'].min()
     max_date = max(df['Date'].max(), expiration_date) + pd.Timedelta(days=5)
     ax.set_xlim(left=min_date, right=max_date)
 
-    # Vertical Event Lines
-    ax.axvline(x=trade_start_date, color='#00C853', linestyle='--', linewidth=1, label='Start', alpha=0.7)
+    # Event Lines
+    ax.axvline(x=trade_start_date, color=SUCCESS_COLOR, linestyle='--', linewidth=1, label='Start', alpha=0.7)
     ax.axvline(x=expiration_date, color='#B0BEC5', linestyle='--', linewidth=1, label='Exp', alpha=0.7)
 
-    # Strike Lines & Shading
+    # Strikes
     ax.axhline(y=short_strike, color='#FF5252', linestyle='-', linewidth=1.2, label='Strikes')
     ax.axhline(y=long_strike, color='#FF5252', linestyle='-', linewidth=1.2)
     ax.axhspan(short_strike, long_strike, color='#FF5252', alpha=0.15)
 
-    # Stop Loss Line
     if crit_price:
-        ax.axhline(y=crit_price, color='#FFA726', linestyle=':', linewidth=1.2, label='Stop Loss')
+        ax.axhline(y=crit_price, color=STOP_LOSS_COLOR, linestyle=':', linewidth=1.2, label='Stop Loss')
 
     # Formatting
     ax.spines['top'].set_visible(False)
@@ -153,7 +153,6 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     ax.set_title(f"Price Action vs Strikes (Exp: {expiration_date.date()})", 
                  color=text_color, fontsize=9, fontweight='bold', pad=10)
     
-    # Dark Mode Legend
     leg = ax.legend(loc='upper left', fontsize=7, facecolor=card_color, edgecolor=grid_color)
     for text in leg.get_texts():
         text.set_color(text_color)
@@ -161,55 +160,45 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     plt.tight_layout()
     return fig
 
-# --- 2. PROGRESS BAR FUNCTION (Psychological Logic) ---
+# --- 2. PROGRESS BAR FUNCTION ---
 def render_profit_bar(profit_pct):
     """
-    Renders a psychological progress bar.
-    - Scale: -100% Profit (Loss) -> 0% Bar Fill
-    - Scale: +50% Profit (Target) -> 100% Bar Fill
-    - Scale: >50% Profit -> Bar stays full, color intensifies.
+    Renders a psychological progress bar (Slim Version).
     """
     if profit_pct is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
     
-    # Linear Mapping:
-    # Range (-100 to 50) = 150 points.
-    # If profit = -100, fill = 0.
-    # If profit = 50, fill = 100.
-    # Formula: fill = ((profit + 100) / 150) * 100
-    
+    # Mapping -100 to 50 -> 0 to 100
     fill_pct = ((profit_pct + 100) / 150) * 100
-    
-    # Clamp visual fill between 0 and 100%
     display_fill = max(0, min(fill_pct, 100))
     
     # Visual Styles
     if profit_pct < 0:
-        bar_color = "#ff4b4b" # Red
-        label_color = "#ff4b4b"
+        bar_color = WARNING_COLOR 
+        label_color = WARNING_COLOR
         status_text = f"LOSS: {profit_pct:.1f}%"
     elif profit_pct < 50:
-        bar_color = "#00c853" # Green
-        label_color = "#00c853"
+        bar_color = SUCCESS_COLOR
+        label_color = SUCCESS_COLOR
         status_text = f"PROFIT: {profit_pct:.1f}%"
     else:
-        # Target Hit (Psychological Win)
-        bar_color = "#00e676" # Bright Neon Green
-        label_color = "#00e676"
+        # Target Hit
+        bar_color = SUCCESS_COLOR # Unified Green
+        label_color = SUCCESS_COLOR
         status_text = f"WIN TARGET: {profit_pct:.1f}%"
 
     return f"""
-    <div style="margin-bottom: 15px; margin-top: 5px;">
-        <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:5px;">
+    <div style="margin-bottom: 12px; margin-top: 5px;">
+        <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">
             <strong style="color: #ddd;">Target Progress</strong>
             <span style="color:{label_color}; font-weight:bold;">{status_text}</span>
         </div>
-        <div style="width: 100%; background-color: #333; height: 14px; border-radius: 7px; position: relative; overflow: hidden; border: 1px solid #444;">
+        <div style="width: 100%; background-color: #333; height: 6px; border-radius: 3px; position: relative; overflow: hidden; border: 1px solid #444;">
             <div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>
             
-            <div style="position: absolute; left: 66.6%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5); border-right: 1px dashed rgba(0,0,0,0.5);" title="Break Even (0%)"></div>
+            <div style="position: absolute; left: 66.6%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>
         </div>
-        <div style="display:flex; justify-content:space-between; font-size:9px; color:gray; margin-top:3px; padding-left: 2px; padding-right: 2px;">
+        <div style="display:flex; justify-content:space-between; font-size:9px; color:gray; margin-top:2px; padding-left: 2px; padding-right: 2px;">
             <span>Max Loss</span>
             <span style="margin-left: 15px;">Break Even</span>
             <span>TARGET (50%)</span>
@@ -293,11 +282,11 @@ else:
         # --- Status Logic ---
         status_msg = "Status Nominal"
         status_icon = "✅"
-        status_color = "green"
+        status_color = SUCCESS_COLOR
 
         if rules.get("other_rules", False):
             status_icon = "⚠️"
-            status_color = "#d32f2f" # Red
+            status_color = WARNING_COLOR 
             if abs_delta and abs_delta >= 0.40:
                 status_msg = "Short Delta High"
             elif spread_value and spread_value >= 150:
@@ -308,30 +297,30 @@ else:
         if profit_pct and profit_pct >= 50:
             status_icon = "💰" 
             status_msg = "TARGET REACHED"
-            status_color = "#00e676"
+            status_color = SUCCESS_COLOR
 
-        # --- Color Coding ---
-        delta_color = "#d32f2f" if abs_delta and abs_delta >= 0.40 else "#00e676"
+        # --- Color Coding for Text ---
+        delta_color = WARNING_COLOR if abs_delta and abs_delta >= 0.40 else SUCCESS_COLOR
         delta_val = f"{abs_delta:.2f}" if abs_delta is not None else "Pending"
 
-        spread_color = "#d32f2f" if spread_value and spread_value >= 150 else "#00e676"
+        spread_color = WARNING_COLOR if spread_value and spread_value >= 150 else SUCCESS_COLOR
         spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
 
-        dte_color = "#d32f2f" if current_dte <= 7 else "#00e676"
+        dte_color = WARNING_COLOR if current_dte <= 7 else SUCCESS_COLOR
 
         cols = st.columns([3, 4])
 
-        # -------- LEFT CARD (Details + Close Button) --------
+        # -------- LEFT CARD (Details) --------
         with cols[0]:
             day_change = cached.get("day_change_percent", 0.0)
             if day_change is None: day_change = 0.0
             
             if day_change > 0:
-                change_color = "#00e676" 
+                change_color = SUCCESS_COLOR 
                 arrow = "▲"
                 change_str = f"{day_change:.2f}%"
             elif day_change < 0:
-                change_color = "#d32f2f"
+                change_color = WARNING_COLOR
                 arrow = "▼"
                 change_str = f"{abs(day_change):.2f}%" 
             else:
@@ -363,7 +352,6 @@ else:
             
             st.write("") 
             
-            # --- Close / Log Logic ---
             if st.button("Close Position / Log", key=f"btn_close_{i}"):
                 st.session_state[f"close_mode_{i}"] = True
 
@@ -381,7 +369,6 @@ else:
                                 est_price = current_short - current_long
                                 if est_price > 0:
                                     default_debit = est_price
-
                             debit_paid = st.number_input("Debit Paid ($)", min_value=0.0, value=float(f"{default_debit:.2f}"), step=0.01)
                         with col_log2:
                             close_notes = st.text_area("Notes", height=70)
@@ -400,29 +387,28 @@ else:
                                 st.session_state.trades.pop(i)
                                 del st.session_state[f"close_mode_{i}"]
                                 st.experimental_rerun()
-                                
                     if st.button("Cancel", key=f"cancel_{i}"):
                         del st.session_state[f"close_mode_{i}"]
                         st.experimental_rerun()
 
         # -------- RIGHT CARD (Chart & Bar) --------
         with cols[1]:
-            # 1. Rules Block
+            # 1. Rules Block (RESTORED)
             st.markdown(
                 f"""
-                <div style="font-size: 14px; margin-bottom: 5px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                    <div>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong></div>
-                    <div>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong></div>
-                    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong></div>
+                <div style="font-size: 14px; margin-bottom: 5px;">
+                    <div style="margin-bottom: 4px;">Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 0.40)</span></div>
+                    <div style="margin-bottom: 4px;">Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 150%)</span></div>
+                    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Min: 7 days)</span></div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
             
-            # 2. PROGRESS BAR (Psychological)
+            # 2. PROGRESS BAR (Slim)
             st.markdown(render_profit_bar(profit_pct), unsafe_allow_html=True)
             
-            # 3. CHART (Dark Mode + Candles)
+            # 3. CHART
             price_hist = t.get("cached", {}).get("price_history", [])
             crit_price = t.get("cached", {}).get("critical_price_040")
             
