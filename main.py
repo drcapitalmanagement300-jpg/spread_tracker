@@ -1,11 +1,20 @@
 import streamlit as st
 
-# Define your pages here
-dashboard = st.Page("streamlit_app.py", title="Dashboard", icon="📊")
-finder = st.Page("spread_finder.py", title="Deep Dive", icon="📈")
+# 1. Define your pages
+# You can point to any file. 'streamlit_app.py' is your main dashboard.
+dashboard = st.Page("streamlit_app.py", title="Dashboard", icon="📊", default=True)
+analytics = st.Page("spread_finder.py", title="Spread Finder", icon="📈")
 
-# Create the navigation
-pg = st.navigation([dashboard, finder])
+# You can add more pages here easily
+# settings = st.Page("pages/settings.py", title="Settings", icon="⚙️")
 
-# Run the selected page
+# 2. Define Navigation with SECTIONS (The Dictionary)
+# The keys ("Main", "Analysis") will appear as gray section headers in the sidebar
+pg = st.navigation({
+    "Main": [dashboard],
+    "Analysis": [analytics],
+    # "Configuration": [settings] 
+})
+
+# 3. Run the app
 pg.run()
