@@ -50,7 +50,7 @@ with header_col1:
         st.write("**DR CAPITAL**")
 
 with header_col2:
-    # Removing indentation to prevent Markdown code block rendering
+    # FIXED: No indentation for the HTML string
     st.markdown("""
 <div style='text-align: left; padding-top: 10px;'>
     <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Put Credit Spread Monitor</h1>
@@ -182,7 +182,7 @@ def render_profit_bar(profit_pct):
         label_color = SUCCESS_COLOR
         status_text = f"WIN TARGET: {profit_pct:.1f}%"
 
-    # Removed indentation here as well to be safe
+    # FIXED: No indentation for the HTML string
     return f"""
 <div style="margin-bottom: 12px; margin-top: 5px;">
     <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">
@@ -212,12 +212,10 @@ else:
 with st.form("add_trade", clear_on_submit=True):
     st.subheader("New Position Entry")
 
-    # Layout: 4 Columns to fit "Contracts" nicely
     c1, c2, c3, c4 = st.columns(4)
     
     with c1:
         ticker = st.text_input("Ticker").upper()
-        # New Field: Contracts
         num_contracts = st.number_input("Contracts", min_value=1, value=1, step=1)
         
     with c2:
@@ -269,16 +267,11 @@ else:
         cached = t.get("cached", {})
 
         current_dte = days_to_expiry(t["expiration"])
-        
-        # --- POSITION SIZING & TOTALS ---
         contracts = t.get("contracts", 1) 
         
         width = abs(t["short_strike"] - t["long_strike"])
         
-        # Max Gain = Credit * 100 * Contracts
         max_gain_total = t["credit"] * 100 * contracts
-        
-        # Max Loss = (Width - Credit) * 100 * Contracts
         max_loss_total = (width - t["credit"]) * 100 * contracts
 
         # Backend Data
@@ -286,7 +279,7 @@ else:
         if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
         
-        # --- THETA CALCULATION ---
+        # Theta
         net_theta = cached.get("net_theta", 0.0)
         daily_theta_dollars = net_theta * 100.0 * contracts 
 
@@ -325,7 +318,7 @@ else:
 
         cols = st.columns([3, 4])
 
-        # -------- LEFT CARD (Details + Theta Ticker) --------
+        # -------- LEFT CARD --------
         with cols[0]:
             day_change = cached.get("day_change_percent", 0.0)
             if day_change is None: day_change = 0.0
@@ -343,10 +336,9 @@ else:
                 arrow = ""
                 change_str = "0.00%"
 
-            # Theta Badge Style
             theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
             
-            # CRITICAL FIX: Remove Indentation in HTML String
+            # FIXED: No indentation for the HTML string
             st.markdown(f"""
 <div style="line-height: 1.4; font-size: 15px;">
     <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;">
@@ -357,7 +349,6 @@ else:
             </span>
             <span style="font-size: 0.6em; color: gray; border: 1px solid #444; padding: 1px 4px; border-radius: 4px;">{contracts}x</span>
         </h3>
-        
         <div style="background-color: rgba(0, 200, 83, 0.1); border: 1px solid {SUCCESS_COLOR}; color: {SUCCESS_COLOR}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;">
             {theta_text}
         </div>
@@ -418,9 +409,9 @@ else:
                         del st.session_state[f"close_mode_{i}"]
                         st.experimental_rerun()
 
-        # -------- RIGHT CARD (Chart & Bar) --------
+        # -------- RIGHT CARD --------
         with cols[1]:
-            # 1. Rules Block - Fixed Indentation
+            # FIXED: No indentation for the HTML string
             st.markdown(f"""
 <div style="font-size: 14px; margin-bottom: 5px;">
     <div style="margin-bottom: 4px;">Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 0.40)</span></div>
@@ -429,10 +420,9 @@ else:
 </div>
 """, unsafe_allow_html=True)
             
-            # 2. PROGRESS BAR
             st.markdown(render_profit_bar(profit_pct), unsafe_allow_html=True)
             
-            # 3. CHART
+            # Chart
             price_hist = t.get("cached", {}).get("price_history", [])
             crit_price = t.get("cached", {}).get("critical_price_040")
             
