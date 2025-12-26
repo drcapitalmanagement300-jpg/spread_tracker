@@ -248,6 +248,8 @@ def update_trade(trade, data_manager):
         short_strike = float(trade.get("short_strike", 0))
         long_strike = float(trade.get("long_strike", 0))
         credit_received = float(trade.get("credit", 0))
+        # Ensure 'contracts' exists in the trade object being updated
+        contracts = int(trade.get("contracts", 1)) 
     except ValueError: return trade 
 
     current_price, day_change_pct, price_history = data_manager.get_price_data(ticker)
@@ -285,7 +287,6 @@ def update_trade(trade, data_manager):
 
     # --- NOTIFICATION LOGIC ---
     if profit_pct is not None and profit_pct >= 50:
-        # Psychology Hack: Map 50% Real Profit -> 100% "Target" Profit
         psych_profit = (profit_pct / 50.0) * 100.0
         notif_msg = f"✅ **Target Reached**: {psych_profit:.0f}% Profitable"
         notif_color = 3066993 # Green
@@ -309,6 +310,9 @@ def update_trade(trade, data_manager):
             send_discord_alert(f"Position Alert: {ticker}", notif_msg, notif_color)
             trade["last_alert_sent"] = datetime.now(timezone.utc).isoformat()
 
+    # Preserve 'contracts' in the returned object (technically redundant as we are modifying 'trade' in place, but good practice)
+    trade["contracts"] = contracts
+    
     trade["cached"] = {
         "current_price": current_price,
         "day_change_percent": day_change_pct,
