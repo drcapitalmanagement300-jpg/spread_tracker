@@ -6,7 +6,6 @@ from streamlit_autorefresh import st_autorefresh
 import io
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import textwrap  # <--- NEW IMPORT for robust HTML fixing
 
 # ---------------- Persistence ----------------
 from persistence import (
@@ -51,13 +50,14 @@ with header_col1:
         st.write("**DR CAPITAL**")
 
 with header_col2:
-    # ROBUST FIX: textwrap.dedent removes indentation automatically
-    st.markdown(textwrap.dedent("""
-        <div style='text-align: left; padding-top: 10px;'>
-            <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Put Credit Spread Monitor</h1>
-            <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
-        </div>
-    """), unsafe_allow_html=True)
+    # NUCLEAR FIX: Explicit HTML string without indentation
+    header_html = (
+        "<div style='text-align: left; padding-top: 10px;'>"
+        "<h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Put Credit Spread Monitor</h1>"
+        "<p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>"
+        "</div>"
+    )
+    st.markdown(header_html, unsafe_allow_html=True)
 
 with header_col3:
     st.write("") 
@@ -183,24 +183,24 @@ def render_profit_bar(profit_pct):
         label_color = SUCCESS_COLOR
         status_text = f"WIN TARGET: {profit_pct:.1f}%"
 
-    # ROBUST FIX: textwrap.dedent allows clean indentation in code
-    return textwrap.dedent(f"""
-        <div style="margin-bottom: 12px; margin-top: 5px;">
-            <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">
-                <strong style="color: #ddd;">Target Progress</strong>
-                <span style="color:{label_color}; font-weight:bold;">{status_text}</span>
-            </div>
-            <div style="width: 100%; background-color: #333; height: 6px; border-radius: 3px; position: relative; overflow: hidden; border: 1px solid #444;">
-                <div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>
-                <div style="position: absolute; left: 66.6%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>
-            </div>
-            <div style="display:flex; justify-content:space-between; font-size:9px; color:gray; margin-top:2px; padding-left: 2px; padding-right: 2px;">
-                <span>Max Loss</span>
-                <span style="margin-left: 15px;">Break Even</span>
-                <span>TARGET (50%)</span>
-            </div>
-        </div>
-    """)
+    # NUCLEAR FIX: Flattened HTML string
+    return (
+        f'<div style="margin-bottom: 12px; margin-top: 5px;">'
+        f'<div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">'
+        f'<strong style="color: #ddd;">Target Progress</strong>'
+        f'<span style="color:{label_color}; font-weight:bold;">{status_text}</span>'
+        f'</div>'
+        f'<div style="width: 100%; background-color: #333; height: 6px; border-radius: 3px; position: relative; overflow: hidden; border: 1px solid #444;">'
+        f'<div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>'
+        f'<div style="position: absolute; left: 66.6%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>'
+        f'</div>'
+        f'<div style="display:flex; justify-content:space-between; font-size:9px; color:gray; margin-top:2px; padding-left: 2px; padding-right: 2px;">'
+        f'<span>Max Loss</span>'
+        f'<span style="margin-left: 15px;">Break Even</span>'
+        f'<span>TARGET (50%)</span>'
+        f'</div>'
+        f'</div>'
+    )
 
 # ---------------- Load Drive State ----------------
 if drive_service:
@@ -213,12 +213,10 @@ else:
 with st.form("add_trade", clear_on_submit=True):
     st.subheader("New Position Entry")
 
-    # Layout: 4 Columns to fit "Contracts" nicely
     c1, c2, c3, c4 = st.columns(4)
     
     with c1:
         ticker = st.text_input("Ticker").upper()
-        # New Field: Contracts
         num_contracts = st.number_input("Contracts", min_value=1, value=1, step=1)
         
     with c2:
@@ -326,7 +324,7 @@ else:
 
         cols = st.columns([3, 4])
 
-        # -------- LEFT CARD (Details + Theta Ticker) --------
+        # -------- LEFT CARD --------
         with cols[0]:
             day_change = cached.get("day_change_percent", 0.0)
             if day_change is None: day_change = 0.0
@@ -344,39 +342,37 @@ else:
                 arrow = ""
                 change_str = "0.00%"
 
-            # Theta Badge Style
             theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
             
-            # ROBUST FIX: textwrap.dedent removes common leading whitespace
-            st.markdown(textwrap.dedent(f"""
-                <div style="line-height: 1.4; font-size: 15px;">
-                    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;">
-                        <h3 style="margin: 0; display: flex; align-items: center; gap: 10px;">
-                            {t['ticker']} 
-                            <span style="color: {change_color}; font-size: 0.85em;">
-                                {arrow} {change_str}
-                            </span>
-                            <span style="font-size: 0.6em; color: gray; border: 1px solid #444; padding: 1px 4px; border-radius: 4px;">{contracts}x</span>
-                        </h3>
-                        
-                        <div style="background-color: rgba(0, 200, 83, 0.1); border: 1px solid {SUCCESS_COLOR}; color: {SUCCESS_COLOR}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;">
-                            {theta_text}
-                        </div>
-                    </div>
-
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2px;">
-                        <div><strong>Short:</strong> {t['short_strike']}</div>
-                        <div><strong>Max Gain:</strong> {format_money(max_gain_total)}</div>
-                        <div><strong>Long:</strong> {t['long_strike']}</div>
-                        <div><strong>Max Loss:</strong> {format_money(max_loss_total)}</div>
-                        <div style="grid-column: span 2;"><strong>Exp:</strong> {t['expiration']}</div>
-                        <div style="grid-column: span 2;"><strong>Width:</strong> {width:.2f}</div>
-                    </div>
-                    <div style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; color: {status_color}; font-weight: bold;">
-                    {status_icon} {status_msg}
-                    </div>
-                </div>
-            """), unsafe_allow_html=True)
+            # NUCLEAR FIX: Flattened HTML string
+            left_card_html = (
+                f"<div style='line-height: 1.4; font-size: 15px;'>"
+                f"<div style='display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;'>"
+                f"<h3 style='margin: 0; display: flex; align-items: center; gap: 10px;'>"
+                f"{t['ticker']} "
+                f"<span style='color: {change_color}; font-size: 0.85em;'>"
+                f"{arrow} {change_str}"
+                f"</span>"
+                f"<span style='font-size: 0.6em; color: gray; border: 1px solid #444; padding: 1px 4px; border-radius: 4px;'>{contracts}x</span>"
+                f"</h3>"
+                f"<div style='background-color: rgba(0, 200, 83, 0.1); border: 1px solid {SUCCESS_COLOR}; color: {SUCCESS_COLOR}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;'>"
+                f"{theta_text}"
+                f"</div>"
+                f"</div>"
+                f"<div style='display: grid; grid-template-columns: 1fr 1fr; gap: 2px;'>"
+                f"<div><strong>Short:</strong> {t['short_strike']}</div>"
+                f"<div><strong>Max Gain:</strong> {format_money(max_gain_total)}</div>"
+                f"<div><strong>Long:</strong> {t['long_strike']}</div>"
+                f"<div><strong>Max Loss:</strong> {format_money(max_loss_total)}</div>"
+                f"<div style='grid-column: span 2;'><strong>Exp:</strong> {t['expiration']}</div>"
+                f"<div style='grid-column: span 2;'><strong>Width:</strong> {width:.2f}</div>"
+                f"</div>"
+                f"<div style='margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; color: {status_color}; font-weight: bold;'>"
+                f"{status_icon} {status_msg}"
+                f"</div>"
+                f"</div>"
+            )
+            st.markdown(left_card_html, unsafe_allow_html=True)
             
             st.write("") 
             
@@ -419,21 +415,21 @@ else:
                         del st.session_state[f"close_mode_{i}"]
                         st.experimental_rerun()
 
-        # -------- RIGHT CARD (Chart & Bar) --------
+        # -------- RIGHT CARD --------
         with cols[1]:
-            # ROBUST FIX: textwrap.dedent
-            st.markdown(textwrap.dedent(f"""
-                <div style="font-size: 14px; margin-bottom: 5px;">
-                    <div style="margin-bottom: 4px;">Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 0.40)</span></div>
-                    <div style="margin-bottom: 4px;">Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 150%)</span></div>
-                    <div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Min: 7 days)</span></div>
-                </div>
-            """), unsafe_allow_html=True)
+            # NUCLEAR FIX: Flattened HTML string
+            right_card_html = (
+                f"<div style='font-size: 14px; margin-bottom: 5px;'>"
+                f"<div style='margin-bottom: 4px;'>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 0.40)</span></div>"
+                f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 150%)</span></div>"
+                f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Min: 7 days)</span></div>"
+                f"</div>"
+            )
+            st.markdown(right_card_html, unsafe_allow_html=True)
             
-            # 2. PROGRESS BAR
             st.markdown(render_profit_bar(profit_pct), unsafe_allow_html=True)
             
-            # 3. CHART
+            # Chart
             price_hist = t.get("cached", {}).get("price_history", [])
             crit_price = t.get("cached", {}).get("critical_price_040")
             
