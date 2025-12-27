@@ -6,7 +6,6 @@ import matplotlib.dates as mdates
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- Persistence ----------------
-# Ensure persistence.py is in the same folder
 from persistence import (
     ensure_logged_in,
     build_drive_service_from_session,
@@ -23,6 +22,7 @@ st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 SUCCESS_COLOR = "#00C853"
 WARNING_COLOR = "#d32f2f"
 STOP_LOSS_COLOR = "#FFA726"
+WHITE_DIVIDER_HTML = "<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: 10px; margin-bottom: 10px;'>"
 
 # ---------------- UI Refresh ----------------
 st_autorefresh(interval=60_000, key="ui_refresh")
@@ -41,8 +41,13 @@ except Exception:
 
 # ---------------- Header ----------------
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
+
 with header_col1:
-    st.write("**DR CAPITAL**") # Placeholder or image
+    try:
+        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
+    except Exception:
+        st.write("**DR CAPITAL**")
+
 with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
@@ -50,6 +55,7 @@ with header_col2:
         <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
     </div>
     """, unsafe_allow_html=True)
+
 with header_col3:
     st.write("") 
     if st.button("Log out"):
@@ -57,9 +63,10 @@ with header_col3:
             logout()
         except Exception:
             st.session_state.pop("credentials", None)
-        st.experimental_rerun()
+        st.rerun()
 
-st.markdown("---")
+# Solid White Divider
+st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # ---------------- Helpers ----------------
 def days_to_expiry(expiry) -> int:
@@ -76,7 +83,7 @@ def format_money(x):
     except Exception:
         return "-"
 
-# --- Charting & Progress Bar Functions (Same as before) ---
+# --- Charting & Progress Bar Functions ---
 def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_strike, crit_price=None):
     bg_color = '#0E1117'    
     card_color = '#262730'  
@@ -175,7 +182,6 @@ def render_profit_bar(profit_pct):
 
 # ---------------- Load Drive State ----------------
 if drive_service:
-    # Use session_state.trades (The global standard for this app)
     st.session_state.trades = load_from_drive(drive_service) or []
 else:
     if "trades" not in st.session_state:
@@ -192,7 +198,6 @@ else:
 
         current_dte = days_to_expiry(t["expiration"])
         
-        # --- POSITION SIZING & TOTALS ---
         contracts = t.get("contracts", 1) 
         
         width = abs(t["short_strike"] - t["long_strike"])
@@ -336,16 +341,16 @@ else:
                                     st.session_state.trades.pop(i)
                                     save_to_drive(drive_service, st.session_state.trades)
                                     del st.session_state[f"close_mode_{i}"]
-                                    st.experimental_rerun()
+                                    st.rerun()
                                 else:
                                     st.error("Drive Error")
                             else:
                                 st.session_state.trades.pop(i)
                                 del st.session_state[f"close_mode_{i}"]
-                                st.experimental_rerun()
+                                st.rerun()
                     if st.button("Cancel", key=f"cancel_{i}"):
                         del st.session_state[f"close_mode_{i}"]
-                        st.experimental_rerun()
+                        st.rerun()
 
         # -------- RIGHT CARD --------
         with cols[1]:
@@ -387,7 +392,8 @@ else:
             else:
                 st.caption("Loading chart...")
 
-        st.markdown("<hr style='margin-top: 20px; margin-bottom: 20px; border: 0; border-top: 1px solid #e0e0e0;'>", unsafe_allow_html=True)
+        # Solid White Divider between trades
+        st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # ---------------- Manual Controls ----------------
 st.write("### Data Sync")
@@ -402,12 +408,13 @@ with ctl2:
             loaded = load_from_drive(drive_service)
             if loaded is not None:
                 st.session_state.trades = loaded
-                st.experimental_rerun()
+                st.rerun()
 
-st.markdown("---")
+# Solid White Divider
+st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # ---------------- External Tools ----------------
 st.subheader("External Tools")
-t1, t2 = st.columns(4)
+t1, t2 = st.columns(2)
 with t1: st.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
 with t2: st.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
