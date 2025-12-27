@@ -248,12 +248,7 @@ with header_col2:
 
 with header_col3:
     st.write("") 
-    if st.button("Log out"):
-        try:
-            logout()
-        except Exception:
-            st.session_state.pop("credentials", None)
-        st.rerun()
+    # Log out button REMOVED per request
 
 # Solid White Divider
 st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
