@@ -29,7 +29,6 @@ st.markdown("""
     .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
     .strategy-badge { border: 1px solid #d4ac0d; color: #d4ac0d; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
-    .warning-box { background-color: rgba(255, 165, 0, 0.1); border: 1px solid rgba(255, 165, 0, 0.3); color: orange; padding: 5px; font-size: 12px; border-radius: 4px; margin-bottom: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -37,7 +36,6 @@ st.markdown("""
 def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_rate=0.045):
     """Approximation for display purposes."""
     try:
-        # Simplified IV Newton-Raphson
         sigma = 0.5
         for i in range(20):
             d1 = (np.log(price / strike) + (risk_free_rate + 0.5 * sigma ** 2) * time_to_exp) / (sigma * np.sqrt(time_to_exp))
@@ -72,20 +70,30 @@ def get_stock_data(ticker):
             if mx != mn: 
                 rank = ((hist['HV'].iloc[-1] - mn) / (mx - mn)) * 100
 
-        # 2. Earnings Check
+        # 2. Earnings Check (Robust)
         earnings_days = 999
         try:
             cal = stock.calendar
             if cal is not None and not cal.empty:
-                # Handle different yfinance return formats
-                potential_date = cal.iloc[0][0] 
-                if isinstance(potential_date, (list, tuple)):
-                    future = [d for d in potential_date if d > datetime.now().date()]
-                    if future: earnings_days = (future[0] - datetime.now().date()).days
-                elif hasattr(potential_date, 'date'):
-                    if potential_date.date() > datetime.now().date():
-                        earnings_days = (potential_date.date() - datetime.now().date()).days
-        except: pass
+                # Calendar might be a DataFrame or Dict
+                if isinstance(cal, pd.DataFrame):
+                    # Usually row 0 is the next earnings date, or column 0
+                    dates = cal.iloc[0] if not cal.iloc[0].empty else cal.index
+                    # Flatten and filter for future
+                    future_dates = []
+                    for d in dates:
+                        if isinstance(d, (datetime, pd.Timestamp)) and d.date() > datetime.now().date():
+                            future_dates.append(d.date())
+                    
+                    if future_dates:
+                        earnings_days = (min(future_dates) - datetime.now().date()).days
+                        
+                elif isinstance(cal, dict):
+                    # Some versions return dict
+                    pass 
+        except: 
+            # If calendar fails, we assume no near-term earnings but flag it in UI if possible
+            pass
 
         return {
             "price": current_price,
@@ -101,7 +109,7 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30):
     """
     Finds a High Quality Put Credit Spread.
     Criteria: 
-    - ~30 Delta Short
+    - ~30 Delta Short (Strike ~95% of Price)
     - $5 Width
     - Min Credit > $0.40
     - Liquid (Tight Bid/Ask)
@@ -110,19 +118,17 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30):
         exps = stock_obj.options
         if not exps: return None
         
-        # 1. Expiration (30-45 Days ideal)
+        # 1. Expiration (20-50 Days ideal)
         target_date = datetime.now() + timedelta(days=target_dte)
         best_exp = min(exps, key=lambda x: abs((datetime.strptime(x, "%Y-%m-%d") - target_date).days))
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
         
-        # Reject if too close (<20 days) or too far (>50 days)
         if dte < 20 or dte > 50: return None 
 
         chain = stock_obj.option_chain(best_exp)
         puts = chain.puts
         
-        # 2. Short Leg Selection (Proxy: 4-5% OTM for High IV stocks)
-        # For Rank > 80, we want to be slightly further OTM than usual to be safe
+        # 2. Short Leg Selection
         target_strike = current_price * 0.95 
         short_leg = puts.iloc[(puts['strike'] - target_strike).abs().argsort()[:1]]
         if short_leg.empty: return None
@@ -131,9 +137,11 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30):
         short_bid = short_leg.iloc[0]['bid']
         short_ask = short_leg.iloc[0]['ask']
         
-        # 3. Liquidity Check (Spread tightness)
-        if (short_ask - short_bid) > 0.50: # Spread is too wide, hard to fill
-            return None
+        # 3. Liquidity Check
+        # If Ask is 0, market is closed or data is bad.
+        if short_ask == 0: return None 
+        # If spread is > $0.50, it's too slippy.
+        if (short_ask - short_bid) > 0.50: return None
 
         # 4. Long Leg Selection ($5 Width)
         long_strike_target = short_strike - 5.0
@@ -147,12 +155,11 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30):
         if abs((short_strike - long_strike) - 5.0) > 1.0: return None
 
         # 5. Credit & ROI Calculation
-        credit = short_bid - long_ask # Conservative: Sell at Bid, Buy at Ask
+        credit = short_bid - long_ask 
         max_loss = (short_strike - long_strike) - credit
         
-        # 6. Minimum Premium Filter (The "Penny Picker" Check)
-        if credit < 0.40: # If we aren't collecting at least $0.40, it's not worth the risk
-            return None
+        # 6. Minimum Premium Filter ($0.40)
+        if credit < 0.40: return None
 
         roi = (credit / max_loss) * 100 if max_loss > 0 else 0
         iv = get_implied_volatility(current_price, short_strike, dte/365, (short_bid+short_ask)/2) * 100
@@ -166,7 +173,6 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30):
     except: return None
 
 def plot_cone(hist, price, iv):
-    """Visualizes the risk cone."""
     fig, ax = plt.subplots(figsize=(4, 1.2)) 
     fig.patch.set_facecolor('#0E1117')
     ax.set_facecolor('#0E1117')
@@ -222,11 +228,8 @@ if st.button("🔎 Scan Market (Quality Filter)", type="primary"):
         if spread:
             # FILTER 2: Earnings Safety Check
             # If Earnings are happening BEFORE expiration, it's risky.
-            is_earnings_risky = False
             if data['earnings_days'] < spread['dte'] + 2:
-                is_earnings_risky = True
-                # In "Sniper" mode, we might skip these entirely, 
-                # or just flag them heavily. Let's SKIP them for "Best of Best".
+                # Skip trade
                 continue 
 
             # Score = Rank + ROI
@@ -243,8 +246,6 @@ if st.button("🔎 Scan Market (Quality Filter)", type="primary"):
         1. IV Rank must be > 80%.
         2. Must collect > $0.40 credit.
         3. Must NOT have earnings in the next 30 days.
-        
-        *Try checking back when market fear (VIX) is higher.*
         """)
     else:
         results = sorted(results, key=lambda x: x['score'], reverse=True)
