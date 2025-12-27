@@ -30,7 +30,8 @@ if "trades" not in st.session_state:
     else:
         st.session_state.trades = []
 
-# Initialize Scan Results in Session State (Fixes the disappearing act)
+# --- PERSISTENCE: INITIALIZE SCAN RESULTS ---
+# This ensures results stay on screen until you scan again
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 
@@ -204,7 +205,7 @@ with st.sidebar:
     if dev_mode:
         st.warning("⚠️ DEV MODE ACTIVE: Filters are disabled.")
 
-# --- SCAN BUTTON ---
+# --- SCAN BUTTON LOGIC ---
 if st.button(f"🔎 Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", type="primary"):
     
     status = st.empty()
@@ -237,10 +238,10 @@ if st.button(f"🔎 Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", typ
     progress.empty()
     status.empty()
     
-    # Save results to session state so they persist!
+    # STORE RESULTS IN SESSION STATE SO THEY PERSIST
     st.session_state.scan_results = sorted(results, key=lambda x: x['score'], reverse=True)
 
-# --- DISPLAY RESULTS (From Session State) ---
+# --- DISPLAY LOGIC (Run this if scan_results exist) ---
 if st.session_state.scan_results is not None:
     results = st.session_state.scan_results
     
