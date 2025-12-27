@@ -267,8 +267,9 @@ with st.sidebar:
     if dev_mode:
         st.warning("⚠️ DEV MODE ACTIVE: Filters are disabled.")
 
-# --- SCAN BUTTON LOGIC ---
-if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", type="primary"):
+# --- SCAN BUTTON LOGIC (Standard Gray Button) ---
+# Removed type="primary" to match Yes/No buttons
+if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     
     status = st.empty()
     progress = st.progress(0)
@@ -386,7 +387,6 @@ if st.session_state.scan_results is not None:
                     st.write("") 
                     
                     if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
-                        # AUTH CHECK
                         if not drive_service:
                             st.error("Please sign in with Google on the Dashboard page first.")
                         else:
@@ -398,7 +398,7 @@ if st.session_state.scan_results is not None:
                         
                         col_conf, col_can = st.columns(2)
                         with col_conf:
-                            # Standard button, NOT primary
+                            # STANDARD BUTTON (Gray/Default)
                             if st.button("✅ Confirm", key=f"conf_{t}_{i}"):
                                 new_trade = {
                                     "id": f"{t}-{s['short']}-{s['long']}-{s['expiration']}",
@@ -418,7 +418,9 @@ if st.session_state.scan_results is not None:
                                 
                                 if drive_service:
                                     save_to_drive(drive_service, st.session_state.trades)
-                                    st.toast(f"Saved {num_contracts}x {t} to Drive!")
+                                    # SUCCESS MESSAGE
+                                    st.success(f"Success: Added {num_contracts}x {t} to Dashboard!")
+                                    st.toast(f"Successfully added {num_contracts}x {t} to Dashboard!")
                                 
                                 del st.session_state[add_key]
                                 st.rerun()
