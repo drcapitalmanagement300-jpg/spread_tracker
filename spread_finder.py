@@ -31,7 +31,6 @@ if "trades" not in st.session_state:
         st.session_state.trades = []
 
 # --- PERSISTENCE: INITIALIZE SCAN RESULTS ---
-# This ensures results stay on screen until you scan again
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 
@@ -238,10 +237,10 @@ if st.button(f"🔎 Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", typ
     progress.empty()
     status.empty()
     
-    # STORE RESULTS IN SESSION STATE SO THEY PERSIST
+    # PERSIST RESULTS
     st.session_state.scan_results = sorted(results, key=lambda x: x['score'], reverse=True)
 
-# --- DISPLAY LOGIC (Run this if scan_results exist) ---
+# --- DISPLAY LOGIC ---
 if st.session_state.scan_results is not None:
     results = st.session_state.scan_results
     
@@ -317,7 +316,7 @@ if st.session_state.scan_results is not None:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # --- ADD TO DASHBOARD LOGIC (With Auth Check) ---
+                    # --- ADD TO DASHBOARD LOGIC ---
                     add_key = f"add_mode_{t}_{i}"
                     
                     if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
@@ -355,9 +354,9 @@ if st.session_state.scan_results is not None:
                                     st.toast(f"Saved {num_contracts}x {t} to Drive!")
                                 
                                 del st.session_state[add_key]
-                                st.experimental_rerun()
+                                st.rerun() # <--- UPDATED
                                 
                         with col_can:
                             if st.button("❌ Cancel", key=f"canc_{t}_{i}"):
                                 del st.session_state[add_key]
-                                st.experimental_rerun()
+                                st.rerun() # <--- UPDATED
