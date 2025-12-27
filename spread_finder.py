@@ -10,17 +10,29 @@ from datetime import datetime, timedelta
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Sniper")
 
-# 1. Initialize Gemini (Optional - Fail silently if no key)
+# 1. Initialize Gemini
 try:
     if "GOOGLE_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 except Exception:
     pass
 
-# 2. Universe (Liquid S&P 500 Proxies)
+# 2. UNIVERSE: EXPANDED LIQUIDITY LIST (~60 Tickers)
+# Includes Top Holdings of S&P 500, Nasdaq 100, and High-Beta Momentum Stocks
 LIQUID_TICKERS = [
-    "SPY", "QQQ", "IWM", "AAPL", "NVDA", "TSLA", "AMD", "AMZN", "MSFT", 
-    "GOOGL", "META", "NFLX", "BAC", "JPM", "XOM", "CVX", "DIS", "BA", "PLTR", "COIN"
+    # INDICES & ETFS
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "SMH", "ARKK",
+    # MAGNIFICENT 7 + TECH
+    "NVDA", "TSLA", "AAPL", "MSFT", "AMD", "AMZN", "META", "GOOGL", "NFLX", 
+    "AVGO", "QCOM", "INTC", "MU", "ARM", "PLTR", "CRM", "ADBE",
+    # HIGH BETA / CRYPTO PROXIES
+    "COIN", "MSTR", "HOOD", "DKNG", "UBER", "ABNB", "SQ", "ROKU", "SHOP",
+    # FINANCIALS
+    "JPM", "BAC", "WFC", "GS", "MS", "C", "V", "MA", "PYPL",
+    # RETAIL & CONSUMER
+    "DIS", "NKE", "SBUX", "MCD", "WMT", "TGT", "COST", "HD", "LOW",
+    # INDUSTRIAL & ENERGY
+    "BA", "CAT", "GE", "F", "GM", "XOM", "CVX", "COP"
 ]
 
 # --- CUSTOM CSS ---
@@ -121,7 +133,7 @@ def find_credit_spread(stock_obj, current_price, target_dte=30, width=5.0):
         if long_leg.empty: return None
         long_strike = long_leg.iloc[0]['strike']
         
-        # Strict Width Check
+        # Strict Width Check (Allowing small variance for weird strikes)
         if abs((short_strike - long_strike) - width) > 1.0: return None
 
         credit = short_leg.iloc[0]['bid'] - long_leg.iloc[0]['ask']
@@ -131,7 +143,6 @@ def find_credit_spread(stock_obj, current_price, target_dte=30, width=5.0):
         iv = get_implied_volatility(current_price, short_strike, dte/365, short_mid) * 100
         roi = (credit / max_loss) * 100 if max_loss > 0 else 0
 
-        # Construct result dictionary
         result = {
             "expiration": best_exp, 
             "dte": dte, 
@@ -144,7 +155,7 @@ def find_credit_spread(stock_obj, current_price, target_dte=30, width=5.0):
         }
         return result
 
-    except Exception as e:
+    except Exception:
         return None
 
 def plot_sparkline_cone(hist, price, iv):
@@ -159,7 +170,7 @@ def plot_sparkline_cone(hist, price, iv):
     
     # Projected Cone (30 Days out)
     days_proj = 30
-    safe_iv = iv if iv > 0 else 20 # Fallback if IV calc fails
+    safe_iv = iv if iv > 0 else 20 
     vol_move = price * (safe_iv/100) * np.sqrt(np.arange(1, days_proj+1)/365)
     
     upper = price + vol_move
@@ -179,7 +190,7 @@ def plot_sparkline_cone(hist, price, iv):
 st.title("🦅 Spread Sniper")
 st.markdown("Scanning for **Rank > 80%**, **30 DTE**, **30 Delta** Put Credit Spreads.")
 
-if st.button("🔎 Scan Market (Strict)", type="primary"):
+if st.button("🔎 Scan Market (Wide Net)", type="primary"):
     
     status = st.empty()
     progress = st.progress(0)
@@ -213,14 +224,13 @@ if st.button("🔎 Scan Market (Strict)", type="primary"):
     
     # 2. RESULTS DISPLAY
     if not results:
-        st.info("Market is quiet. No liquid tickers found with >80% Volatility Rank today.")
+        st.info("Market is extremely quiet. Even with 60+ tickers, no 80% Rank setups were found.")
+        st.caption("Try checking back during market hours or when VIX > 15.")
     else:
-        # Sort best setups first
         results = sorted(results, key=lambda x: x['score'], reverse=True)
         
         st.success(f"Found {len(results)} High-Probability Opportunities")
         
-        # Grid Layout (3 cards per row)
         cols = st.columns(3)
         
         for i, res in enumerate(results):
