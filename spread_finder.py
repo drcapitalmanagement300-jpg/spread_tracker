@@ -6,8 +6,29 @@ import matplotlib.pyplot as plt
 import scipy.stats as si
 from datetime import datetime, timedelta
 
+# Import persistence to save trades to drive
+from persistence import (
+    build_drive_service_from_session,
+    save_to_drive,
+    load_from_drive
+)
+
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Sniper Pro")
+
+# --- INITIALIZE DRIVE SERVICE (For Saving Trades) ---
+drive_service = None
+try:
+    drive_service = build_drive_service_from_session()
+except Exception:
+    drive_service = None
+
+# Ensure we have the trade list loaded
+if "trades" not in st.session_state:
+    if drive_service:
+        st.session_state.trades = load_from_drive(drive_service) or []
+    else:
+        st.session_state.trades = []
 
 # 1. UNIVERSE: LIQUIDITY LIST (~60 Tickers)
 LIQUID_TICKERS = [
@@ -89,10 +110,8 @@ def get_stock_data(ticker):
                         earnings_days = (min(future_dates) - datetime.now().date()).days
                         
                 elif isinstance(cal, dict):
-                    # Some versions return dict
                     pass 
         except: 
-            # If calendar fails, we assume no near-term earnings but flag it in UI if possible
             pass
 
         return {
@@ -106,14 +125,6 @@ def get_stock_data(ticker):
 
 # --- TRADE LOGIC ---
 def find_optimal_spread(stock_obj, current_price, target_dte=30):
-    """
-    Finds a High Quality Put Credit Spread.
-    Criteria: 
-    - ~30 Delta Short (Strike ~95% of Price)
-    - $5 Width
-    - Min Credit > $0.40
-    - Liquid (Tight Bid/Ask)
-    """
     try:
         exps = stock_obj.options
         if not exps: return None
@@ -138,9 +149,7 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30):
         short_ask = short_leg.iloc[0]['ask']
         
         # 3. Liquidity Check
-        # If Ask is 0, market is closed or data is bad.
         if short_ask == 0: return None 
-        # If spread is > $0.50, it's too slippy.
         if (short_ask - short_bid) > 0.50: return None
 
         # 4. Long Leg Selection ($5 Width)
@@ -227,9 +236,7 @@ if st.button("🔎 Scan Market (Quality Filter)", type="primary"):
         
         if spread:
             # FILTER 2: Earnings Safety Check
-            # If Earnings are happening BEFORE expiration, it's risky.
             if data['earnings_days'] < spread['dte'] + 2:
-                # Skip trade
                 continue 
 
             # Score = Rank + ROI
@@ -311,7 +318,47 @@ if st.button("🔎 Scan Market (Quality Filter)", type="primary"):
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    if st.button(f"Add {t}", key=f"btn_{t}", use_container_width=True):
-                        if 'portfolio' not in st.session_state: st.session_state.portfolio = []
-                        st.session_state.portfolio.append(res)
-                        st.toast(f"{t} added!")
+                    # --- ADD TO DASHBOARD LOGIC (With Contracts Prompt) ---
+                    # Unique key for every card
+                    add_key = f"add_mode_{t}_{i}"
+                    
+                    if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
+                        st.session_state[add_key] = True
+
+                    if st.session_state.get(add_key, False):
+                        st.info("⚙️ Position Sizing")
+                        num_contracts = st.number_input(f"Contracts for {t}", min_value=1, value=1, step=1, key=f"contracts_{t}_{i}")
+                        
+                        col_conf, col_can = st.columns(2)
+                        with col_conf:
+                            if st.button("✅ Confirm", key=f"conf_{t}_{i}"):
+                                # Build Trade Object Matching Dashboard Structure
+                                new_trade = {
+                                    "id": f"{t}-{s['short']}-{s['long']}-{s['expiration']}",
+                                    "ticker": t,
+                                    "contracts": num_contracts, 
+                                    "short_strike": s['short'],
+                                    "long_strike": s['long'],
+                                    "expiration": s['expiration'],
+                                    "credit": s['credit'],
+                                    "entry_date": datetime.now().date().isoformat(),
+                                    "created_at": datetime.utcnow().isoformat(),
+                                    "cached": {},
+                                    "pnl_history": []
+                                }
+                                
+                                st.session_state.trades.append(new_trade)
+                                
+                                if drive_service:
+                                    save_to_drive(drive_service, st.session_state.trades)
+                                    st.toast(f"Saved {num_contracts}x {t} to Drive!")
+                                else:
+                                    st.toast(f"Added {t} (Local Only)")
+                                
+                                del st.session_state[add_key]
+                                st.experimental_rerun()
+                                
+                        with col_can:
+                            if st.button("❌ Cancel", key=f"canc_{t}_{i}"):
+                                del st.session_state[add_key]
+                                st.experimental_rerun()
