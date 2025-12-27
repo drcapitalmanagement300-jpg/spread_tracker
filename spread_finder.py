@@ -92,21 +92,28 @@ def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_r
         return abs(sigma)
     except: return 0.0
 
-# --- AI HELPER (SAFETY PATCHED) ---
+# --- AI HELPER (FIXED FOR GEMINI 1.5 FLASH) ---
 def get_ai_analysis(ticker, rank, price_change):
     """Asks Gemini for a volatility context check using Google Search."""
     if not GEMINI_AVAILABLE:
         return "AI Key not configured."
     
     try:
-        # 1. Use the Flash model (Fast/Cheap)
-        # 2. Add 'google_search' tool to force live internet access [Image of google_search grounding architecture]
-        model = genai.GenerativeModel('gemini-1.5-flash', tools=[{'google_search': {}}])
+        # Use 'google_search_retrieval' for Gemini 1.5 models
+        # This explicitly tells the SDK to use the built-in search tool
+        tools = [{'google_search_retrieval': {
+            'dynamic_retrieval_config': {
+                'mode': 'dynamic',
+                'dynamic_threshold': 0.6
+            }
+        }}]
+        
+        model = genai.GenerativeModel('gemini-1.5-flash', tools=tools)
         
         prompt = (
             f"I am a volatility trader looking to sell a Put Credit Spread on {ticker}. "
             f"The stock is at {price_change:.2f}% recently and IV Rank is {rank:.0f}%. "
-            f"Using Google Search, find the latest news from the last 7 days. "
+            f"Use Google Search to find any major news or earnings from the last 7 days. "
             f"Concisely explain WHY volatility might be high right now. "
             f"Then, give a verdict: 'Catalyst Risk' (if earnings/event coming soon) or 'Standard Volatility' (if just market fear). "
             f"Keep it under 50 words."
@@ -274,9 +281,7 @@ with header_col2:
 
 with header_col3:
     st.write("") 
-    # Log out button removed
 
-# Solid White Divider
 st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # --- SIDEBAR CONTROLS ---
@@ -398,10 +403,10 @@ if st.session_state.scan_results is not None:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # --- AI ANALYZE BUTTON (Adjusted Position & Removed Emoji) ---
-                    st.write("") # Spacer
+                    # --- AI ANALYZE BUTTON ---
+                    st.write("") 
                     ai_key = f"ai_{t}_{i}"
-                    # No emoji, just text
+                    
                     if st.button(f"Analyze {t}", key=f"btn_ai_{t}_{i}", help="Ask Gemini to analyze volatility drivers."):
                         st.session_state[ai_key] = True
                     
