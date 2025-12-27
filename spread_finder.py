@@ -11,7 +11,7 @@ from persistence import (
     build_drive_service_from_session,
     save_to_drive,
     load_from_drive,
-    logout # Added logout for header parity
+    logout 
 )
 
 # --- CONFIGURATION ---
@@ -267,7 +267,7 @@ with st.sidebar:
     if dev_mode:
         st.warning("⚠️ DEV MODE ACTIVE: Filters are disabled.")
 
-# --- SCAN BUTTON LOGIC (Removed Emoji) ---
+# --- SCAN BUTTON LOGIC ---
 if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", type="primary"):
     
     status = st.empty()
@@ -362,7 +362,6 @@ if st.session_state.scan_results is not None:
                     
                     vc1, vc2 = st.columns([2, 1])
                     with vc1:
-                         # UPDATED PLOT CALL WITH STRIKES
                          st.pyplot(plot_sparkline_cone(d['hist'], d['price'], s['iv'], s['short'], s['long']), use_container_width=True)
                     with vc2:
                         st.markdown(f"""
@@ -383,25 +382,24 @@ if st.session_state.scan_results is not None:
                     # --- ADD TO DASHBOARD LOGIC ---
                     add_key = f"add_mode_{t}_{i}"
                     
-                    # Spacer to push button down slightly
+                    # Spacer
                     st.write("") 
                     
                     if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
-                        # AUTH CHECK: Only open input if logged in
+                        # AUTH CHECK
                         if not drive_service:
                             st.error("Please sign in with Google on the Dashboard page first.")
                         else:
                             st.session_state[add_key] = True
 
                     if st.session_state.get(add_key, False):
-                        # Replaced st.info("⚙️...") with clean header
                         st.markdown("##### Position Sizing")
                         num_contracts = st.number_input(f"Contracts for {t}", min_value=1, value=1, step=1, key=f"contracts_{t}_{i}")
                         
                         col_conf, col_can = st.columns(2)
                         with col_conf:
-                            # Primary button (matches theme/green usually)
-                            if st.button("✅ Confirm", key=f"conf_{t}_{i}", type="primary"):
+                            # Standard button, NOT primary
+                            if st.button("✅ Confirm", key=f"conf_{t}_{i}"):
                                 new_trade = {
                                     "id": f"{t}-{s['short']}-{s['long']}-{s['expiration']}",
                                     "ticker": t,
