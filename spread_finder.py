@@ -92,52 +92,84 @@ def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_r
         return abs(sigma)
     except: return 0.0
 
-# --- AI HELPER (ROBUST FALLBACK) ---
+# --- AI HELPER (ROBUST / DYNAMIC) ---
 def get_ai_analysis(ticker, rank, price_change):
-    """Asks Gemini for a volatility context check using Google Search."""
+    """
+    Dynamically finds a working model and attempts to use Google Search.
+    Falls back to internal knowledge if search tools fail.
+    """
     if not GEMINI_AVAILABLE:
         return "AI Key not configured."
     
-    # Tool config for v1beta
-    tools = [{'google_search_retrieval': {
-        'dynamic_retrieval_config': {
-            'mode': 'dynamic',
-            'dynamic_threshold': 0.6
-        }
-    }}]
-    
-    # List of models to try in order of preference
-    # 001 is often more stable than the generic alias
-    models_to_try = [
-        'gemini-1.5-flash-001',
-        'gemini-1.5-flash-latest',
-        'gemini-1.5-flash',
-        'gemini-1.5-pro-001'
-    ]
-    
-    last_error = ""
-    
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name, tools=tools)
-            prompt = (
-                f"I am a volatility trader looking to sell a Put Credit Spread on {ticker}. "
-                f"The stock is at {price_change:.2f}% recently and IV Rank is {rank:.0f}%. "
-                f"Use Google Search to find any major news or earnings from the last 7 days. "
-                f"Concisely explain WHY volatility might be high right now. "
-                f"Then, give a verdict: 'Catalyst Risk' (if earnings/event coming soon) or 'Standard Volatility' (if just market fear). "
-                f"Keep it under 50 words."
-            )
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            last_error = str(e)
-            if "404" in last_error or "not found" in last_error.lower():
-                continue # Try next model
-            else:
-                return f"AI Error ({model_name}): {last_error}"
+    # 1. DISCOVER AVAILABLE MODELS
+    # This prevents 404 errors by asking the API what exists first.
+    target_model_name = None
+    try:
+        all_models = [m.name for m in genai.list_models()]
+        
+        # Priority 1: Gemini 1.5 Flash (Fast/Cheap)
+        for m in all_models:
+            if 'flash' in m.lower() and '1.5' in m:
+                target_model_name = m
+                break
+        
+        # Priority 2: Gemini 1.5 Pro
+        if not target_model_name:
+            for m in all_models:
+                if 'pro' in m.lower() and '1.5' in m:
+                    target_model_name = m
+                    break
+                    
+        # Priority 3: Gemini 1.0 Pro (Legacy)
+        if not target_model_name:
+            for m in all_models:
+                if 'gemini-pro' in m:
+                    target_model_name = m
+                    break
+        
+        if not target_model_name:
+            return "Error: No Gemini models found available for this API key."
 
-    return f"AI Error: Could not find a working model. Last error: {last_error}"
+    except Exception as e:
+        return f"Model Discovery Error: {str(e)}"
+
+    # 2. CONFIGURE TOOLS (Search)
+    # Gemini 1.5 uses 'google_search_retrieval'.
+    # Gemini 1.0 usually does not support this tool structure in the SDK.
+    tools = []
+    if '1.5' in target_model_name:
+        tools = [{'google_search_retrieval': {
+            'dynamic_retrieval_config': {
+                'mode': 'dynamic',
+                'dynamic_threshold': 0.6
+            }
+        }}]
+
+    # 3. GENERATE
+    try:
+        model = genai.GenerativeModel(target_model_name, tools=tools)
+        
+        prompt = (
+            f"I am a volatility trader looking to sell a Put Credit Spread on {ticker}. "
+            f"The stock is at {price_change:.2f}% recently and IV Rank is {rank:.0f}%. "
+            f"Please check for any major news, earnings, or events from the last 7 days. "
+            f"Concisely explain WHY volatility might be high. "
+            f"Verdict: 'Catalyst Risk' (Earnings/Event) or 'Standard Volatility' (Market Fear). "
+            f"Keep it under 50 words."
+        )
+        response = model.generate_content(prompt)
+        return response.text
+
+    except Exception as e:
+        # Fallback: If Search tool fails, try again WITHOUT tools
+        if tools:
+            try:
+                model_fallback = genai.GenerativeModel(target_model_name) # No tools
+                response = model_fallback.generate_content(prompt + " (Search unavailable, use internal knowledge)")
+                return f"{response.text} \n\n*(Note: Live search failed, analysis based on internal training data)*"
+            except Exception as e2:
+                return f"AI Error (Fallback): {str(e2)}"
+        return f"AI Error: {str(e)}"
 
 # --- DATA FETCHING ---
 @st.cache_data(ttl=3600)
