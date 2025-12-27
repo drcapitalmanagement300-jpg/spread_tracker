@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats as si
-import google.generativeai as genai  # Required for AI features
+import google.generativeai as genai
 from datetime import datetime, timedelta
 
 # Import persistence
@@ -19,8 +19,6 @@ from persistence import (
 st.set_page_config(layout="wide", page_title="Spread Sniper Pro")
 
 # --- GEMINI SETUP ---
-# It tries to find the key in Streamlit secrets.
-# If not found, the AI buttons will simply be disabled/hidden.
 GEMINI_AVAILABLE = False
 try:
     if "GOOGLE_API_KEY" in st.secrets:
@@ -101,11 +99,13 @@ def get_ai_analysis(ticker, rank, price_change):
         return "AI Key not configured."
     
     try:
-        model = genai.GenerativeModel('gemini-pro')
+        # UPDATED: Use Gemini 1.5 Flash (Standard)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
         prompt = (
             f"I am a volatility trader looking to sell a Put Credit Spread on {ticker}. "
             f"The stock is at {price_change:.2f}% recently and IV Rank is {rank:.0f}%. "
-            f" concisely explain WHY volatility might be high right now (Earnings? News? Macro?). "
+            f"Concisely explain WHY volatility might be high right now (Earnings? News? Macro?). "
             f"Then, give a verdict: 'Catalyst Risk' (if earnings/event coming) or 'Standard Volatility' (if just market fear). "
             f"Keep it under 50 words."
         )
@@ -272,7 +272,9 @@ with header_col2:
 
 with header_col3:
     st.write("") 
+    # Log out button REMOVED per request
 
+# Solid White Divider
 st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # --- SIDEBAR CONTROLS ---
@@ -394,9 +396,11 @@ if st.session_state.scan_results is not None:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # --- AI ANALYZE BUTTON ---
+                    # --- AI ANALYZE BUTTON (Adjusted per request) ---
+                    st.write("") # Spacer
                     ai_key = f"ai_{t}_{i}"
-                    if st.button(f"🤖 Analyze {t}", key=f"btn_ai_{t}_{i}", help="Ask Gemini to analyze volatility drivers."):
+                    # No emoji, just text
+                    if st.button(f"Analyze {t}", key=f"btn_ai_{t}_{i}", help="Ask Gemini to analyze volatility drivers."):
                         st.session_state[ai_key] = True
                     
                     if st.session_state.get(ai_key, False):
@@ -407,7 +411,7 @@ if st.session_state.scan_results is not None:
                     # --- ADD TO DASHBOARD LOGIC ---
                     add_key = f"add_mode_{t}_{i}"
                     
-                    st.write("") 
+                    st.write("") # Spacer
                     
                     if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
                         if not drive_service:
