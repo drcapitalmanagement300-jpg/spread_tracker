@@ -23,11 +23,16 @@ try:
 except Exception:
     drive_service = None
 
+# Load trades if logged in
 if "trades" not in st.session_state:
     if drive_service:
         st.session_state.trades = load_from_drive(drive_service) or []
     else:
         st.session_state.trades = []
+
+# Initialize Scan Results in Session State (Fixes the disappearing act)
+if "scan_results" not in st.session_state:
+    st.session_state.scan_results = None
 
 # 1. UNIVERSE (~60 Tickers)
 LIQUID_TICKERS = [
@@ -135,7 +140,7 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False)
         short_ask = short_leg.iloc[0]['ask']
         
         if short_ask == 0: return None 
-        # In Dev Mode, we tolerate wider spreads just to see results
+        # In Dev Mode, we tolerate wider spreads
         if not dev_mode and (short_ask - short_bid) > 0.50: return None
 
         long_strike_target = short_strike - 5.0
@@ -194,24 +199,12 @@ st.title("🦅 Spread Sniper: Pro")
 # --- SIDEBAR CONTROLS ---
 with st.sidebar:
     st.header("Scanner Settings")
-    dev_mode = st.checkbox("🛠 Dev Mode (Bypass Filters)", value=True, help="Check this to see ALL valid spread structures, ignoring Rank/Credit requirements. Useful for testing UI.")
+    dev_mode = st.checkbox("🛠 Dev Mode (Bypass Filters)", value=True, help="Check this to see ALL valid spread structures.")
     
     if dev_mode:
-        st.warning("⚠️ DEV MODE ACTIVE: Filters are disabled. Results may be low quality.")
+        st.warning("⚠️ DEV MODE ACTIVE: Filters are disabled.")
 
-if dev_mode:
-    st.markdown("""
-    **DEV MODE ACTIVE:** Showing all valid 30-Delta spreads. 
-    *Rank > 80% Filter: OFF* | *Credit > $0.40 Filter: OFF*
-    """)
-else:
-    st.markdown("""
-    Scanning for **"Best of Best"** opportunities:
-    * **Rank > 80%** (Extreme Fear)
-    * **Credit > $0.40** (Meaningful Yield)
-    * **Earnings Safe** (No binary events during trade)
-    """)
-
+# --- SCAN BUTTON ---
 if st.button(f"🔎 Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", type="primary"):
     
     status = st.empty()
@@ -222,19 +215,19 @@ if st.button(f"🔎 Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", typ
         status.caption(f"Analyzing {ticker}...")
         progress.progress((i + 1) / len(LIQUID_TICKERS))
         
-        # 1. Fetch & Rank
+        # 1. Fetch
         data = get_stock_data(ticker)
         if not data: continue
         
-        # FILTER 1: Volatility Rank (Ignored in Dev Mode)
+        # 2. Filter Rank
         if not dev_mode and data['rank'] < 80: continue 
 
-        # 2. Find Trade (Pass Dev Mode flag to relax spread/liquidity rules)
+        # 3. Find Trade
         obj = yf.Ticker(ticker)
         spread = find_optimal_spread(obj, data['price'], dev_mode=dev_mode)
         
         if spread:
-            # FILTER 2: Earnings Safety Check (Ignored in Dev Mode)
+            # 4. Filter Earnings
             if not dev_mode and data['earnings_days'] < spread['dte'] + 2:
                 continue 
 
@@ -244,12 +237,16 @@ if st.button(f"🔎 Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", typ
     progress.empty()
     status.empty()
     
+    # Save results to session state so they persist!
+    st.session_state.scan_results = sorted(results, key=lambda x: x['score'], reverse=True)
+
+# --- DISPLAY RESULTS (From Session State) ---
+if st.session_state.scan_results is not None:
+    results = st.session_state.scan_results
+    
     if not results:
         st.info("No setups found.")
-        if not dev_mode:
-            st.markdown("**Tip:** Enable 'Dev Mode' in the sidebar to test the UI.")
     else:
-        results = sorted(results, key=lambda x: x['score'], reverse=True)
         st.success(f"Found {len(results)} Opportunities")
         
         cols = st.columns(3)
@@ -262,9 +259,8 @@ if st.button(f"🔎 Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", typ
                 with st.container(border=True):
                     pill_class = "price-pill-red" if d['change_pct'] < 0 else "price-pill-green"
                     
-                    # Badge Logic
                     badge_text = "PRIME SETUP"
-                    badge_style = "border: 1px solid #d4ac0d; color: #d4ac0d;" # Gold
+                    badge_style = "border: 1px solid #d4ac0d; color: #d4ac0d;" 
                     if dev_mode and (d['rank'] < 80 or s['credit'] < 0.40):
                         badge_text = "TEST RESULT"
                         badge_style = "border: 1px solid gray; color: gray;"
@@ -320,10 +316,15 @@ if st.button(f"🔎 Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", typ
                     </div>
                     """, unsafe_allow_html=True)
                     
+                    # --- ADD TO DASHBOARD LOGIC (With Auth Check) ---
                     add_key = f"add_mode_{t}_{i}"
                     
                     if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
-                        st.session_state[add_key] = True
+                        # AUTH CHECK: Only open input if logged in
+                        if not drive_service:
+                            st.error("Please sign in with Google on the Dashboard page first.")
+                        else:
+                            st.session_state[add_key] = True
 
                     if st.session_state.get(add_key, False):
                         st.info("⚙️ Position Sizing")
@@ -351,8 +352,6 @@ if st.button(f"🔎 Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", typ
                                 if drive_service:
                                     save_to_drive(drive_service, st.session_state.trades)
                                     st.toast(f"Saved {num_contracts}x {t} to Drive!")
-                                else:
-                                    st.toast(f"Added {t} (Local Only)")
                                 
                                 del st.session_state[add_key]
                                 st.experimental_rerun()
