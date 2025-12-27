@@ -92,21 +92,23 @@ def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_r
         return abs(sigma)
     except: return 0.0
 
-# --- AI HELPER ---
+# --- AI HELPER (SAFETY PATCHED) ---
 def get_ai_analysis(ticker, rank, price_change):
-    """Asks Gemini for a volatility context check."""
+    """Asks Gemini for a volatility context check using Google Search."""
     if not GEMINI_AVAILABLE:
         return "AI Key not configured."
     
     try:
-        # UPDATED: Use Gemini 1.5 Flash (Standard)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 1. Use the Flash model (Fast/Cheap)
+        # 2. Add 'google_search' tool to force live internet access [Image of google_search grounding architecture]
+        model = genai.GenerativeModel('gemini-1.5-flash', tools=[{'google_search': {}}])
         
         prompt = (
             f"I am a volatility trader looking to sell a Put Credit Spread on {ticker}. "
             f"The stock is at {price_change:.2f}% recently and IV Rank is {rank:.0f}%. "
-            f"Concisely explain WHY volatility might be high right now (Earnings? News? Macro?). "
-            f"Then, give a verdict: 'Catalyst Risk' (if earnings/event coming) or 'Standard Volatility' (if just market fear). "
+            f"Using Google Search, find the latest news from the last 7 days. "
+            f"Concisely explain WHY volatility might be high right now. "
+            f"Then, give a verdict: 'Catalyst Risk' (if earnings/event coming soon) or 'Standard Volatility' (if just market fear). "
             f"Keep it under 50 words."
         )
         response = model.generate_content(prompt)
@@ -272,7 +274,7 @@ with header_col2:
 
 with header_col3:
     st.write("") 
-    # Log out button REMOVED per request
+    # Log out button removed
 
 # Solid White Divider
 st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
@@ -396,7 +398,7 @@ if st.session_state.scan_results is not None:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # --- AI ANALYZE BUTTON (Adjusted per request) ---
+                    # --- AI ANALYZE BUTTON (Adjusted Position & Removed Emoji) ---
                     st.write("") # Spacer
                     ai_key = f"ai_{t}_{i}"
                     # No emoji, just text
@@ -411,7 +413,7 @@ if st.session_state.scan_results is not None:
                     # --- ADD TO DASHBOARD LOGIC ---
                     add_key = f"add_mode_{t}_{i}"
                     
-                    st.write("") # Spacer
+                    st.write("") 
                     
                     if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
                         if not drive_service:
