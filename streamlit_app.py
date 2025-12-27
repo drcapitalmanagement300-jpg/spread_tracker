@@ -408,8 +408,6 @@ st.markdown("---")
 
 # ---------------- External Tools ----------------
 st.subheader("External Tools")
-t1, t2, t3, t4 = st.columns(4)
+t1, t2 = st.columns(4)
 with t1: st.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
 with t2: st.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
-with t3: st.link_button("Option Screener", "https://optionmoves.com/", use_container_width=True)
-with t4: st.link_button("IV Rank", "https://marketchameleon.com/", use_container_width=True)
