@@ -2,7 +2,7 @@ import streamlit as st
 import json
 import io
 import os
-import csv  # Added for CSV logging
+import csv
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
@@ -24,7 +24,6 @@ DRIVE_SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/drive",
 ]
-# token file names
 LOCAL_TOKEN_FILE = "google_oauth_token.json"
 DRIVE_TOKEN_FILE = "credit_spreads_token.json"
 
@@ -43,10 +42,8 @@ def _get_oauth_config() -> Dict[str, str]:
 
     return cfg
 
-
 def _get_redirect_uri() -> str:
     return st.secrets["google_oauth"]["redirect_uri"]
-
 
 def get_flow() -> Flow:
     """Create OAuth flow object."""
@@ -66,7 +63,6 @@ def get_flow() -> Flow:
     flow.redirect_uri = cfg["redirect_uri"]
     return flow
 
-
 # ----------------------------- Helper: local token store -----------------------------
 def _save_local_token(creds_dict: Dict[str, Any]) -> None:
     try:
@@ -74,7 +70,6 @@ def _save_local_token(creds_dict: Dict[str, Any]) -> None:
             json.dump(creds_dict, f)
     except Exception:
         pass
-
 
 def _load_local_token() -> Optional[Dict[str, Any]]:
     try:
@@ -85,7 +80,6 @@ def _load_local_token() -> Optional[Dict[str, Any]]:
     except Exception:
         return None
     return None
-
 
 # ----------------------------- Drive file helpers -----------------------------
 def _find_file_id(service, filename: str) -> Optional[str]:
@@ -100,7 +94,6 @@ def _find_file_id(service, filename: str) -> Optional[str]:
         return files[0]["id"] if files else None
     except Exception:
         return None
-
 
 def _download_file(service, file_id: str) -> Optional[str]:
     try:
@@ -117,7 +110,6 @@ def _download_file(service, file_id: str) -> Optional[str]:
     except Exception:
         return None
 
-
 def _upload_file(service, filename: str, content: str) -> bool:
     try:
         file_id = _find_file_id(service, filename)
@@ -133,13 +125,11 @@ def _upload_file(service, filename: str, content: str) -> bool:
     except Exception:
         return False
 
-
 def _download_file_by_name(service, filename: str) -> Optional[str]:
     file_id = _find_file_id(service, filename)
     if not file_id:
         return None
     return _download_file(service, file_id)
-
 
 # ----------------------------- OAuth Flow -----------------------------
 def exchange_code_for_credentials(code: str) -> Optional[Dict[str, Any]]:
@@ -172,7 +162,6 @@ def exchange_code_for_credentials(code: str) -> Optional[Dict[str, Any]]:
         st.error(f"OAuth token exchange failed: {e}")
         return None
 
-
 def logout():
     st.session_state.pop("credentials", None)
     try:
@@ -181,9 +170,7 @@ def logout():
     except Exception:
         pass
     st.success("Logged out.")
-    # UPDATED: Use st.rerun() instead of experimental_rerun()
     st.rerun()
-
 
 def _credentials_dict_to_oauth(creds_dict: Dict[str, Any]) -> Optional[OAuthCredentials]:
     try:
@@ -201,7 +188,6 @@ def _credentials_dict_to_oauth(creds_dict: Dict[str, Any]) -> Optional[OAuthCred
     except Exception:
         return None
 
-
 def _oauth_to_credentials_dict(creds: OAuthCredentials) -> Dict[str, Any]:
     return {
         "token": creds.token,
@@ -211,7 +197,6 @@ def _oauth_to_credentials_dict(creds: OAuthCredentials) -> Dict[str, Any]:
         "client_secret": creds.client_secret,
         "scopes": list(creds.scopes) if creds.scopes else [],
     }
-
 
 def build_drive_service_from_session():
     cred_dict = st.session_state.get("credentials")
@@ -229,7 +214,6 @@ def build_drive_service_from_session():
     except Exception as e:
         st.error(f"Drive service error: {e}")
         return None
-
 
 def _try_load_credentials() -> Optional[Dict[str, Any]]:
     if st.session_state.get("credentials"):
@@ -253,27 +237,22 @@ def _try_load_credentials() -> Optional[Dict[str, Any]]:
 
     return None
 
-
 def ensure_logged_in():
     """
     Blocks execution until the user is logged in via Google OAuth.
-    Uses modern st.query_params to avoid deprecation warnings.
     """
     creds_dict = _try_load_credentials()
     if creds_dict:
         st.session_state["credentials"] = creds_dict
         return
 
-    # UPDATED: Use st.query_params (dict-like) instead of experimental_get_query_params (list-like)
+    # Using st.query_params (dict-like)
     if "code" in st.query_params and not st.session_state.get("credentials"):
-        # The new API returns strings directly, so no need for [0]
         code = st.query_params["code"]
         creds = exchange_code_for_credentials(code)
         if creds:
             st.session_state["credentials"] = creds
-            # UPDATED: Clear params using .clear()
             st.query_params.clear()
-            # UPDATED: Use st.rerun()
             st.rerun()
 
     flow = get_flow()
@@ -283,10 +262,13 @@ def ensure_logged_in():
         include_granted_scopes="true",
     )
     st.markdown("### Sign in with Google to enable Drive persistence")
-    # Using a button that acts as a link is cleaner
-    st.link_button("Sign in with Google", auth_url, type="primary")
+    # st.link_button requires Streamlit 1.27+. If using an older version, use st.markdown with HTML.
+    if hasattr(st, "link_button"):
+        st.link_button("Sign in with Google", auth_url, type="primary")
+    else:
+        st.markdown(f"[Sign in with Google]({auth_url})")
+    
     st.stop()
-
 
 # ----------------------------- Drive Helpers (public) -----------------------------
 
@@ -305,7 +287,6 @@ def load_from_drive(service) -> List[Dict[str, Any]]:
     except json.JSONDecodeError:
         return []
 
-    # Deserialize date fields
     parsed = []
     for t in data:
         ct = {}
@@ -326,14 +307,10 @@ def load_from_drive(service) -> List[Dict[str, Any]]:
 
     return parsed
 
-
 def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
     """
     Serialize and upload trade list to Drive with Lock protection.
-    Includes smart merging to prevent overwriting backend updates.
     """
-    
-    # 1. Prepare Lock
     file_id = _find_file_id(service, DRIVE_FILE_NAME)
     lock = None
     if DriveLockManager:
@@ -343,31 +320,22 @@ def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
         if lock:
             lock.acquire()
             
-        # 2. SMART MERGE STRATEGY
-        # Download latest from Drive (Source of Truth for Prices/Deltas)
         latest_drive_trades = load_from_drive(service)
         drive_map = {t['id']: t for t in latest_drive_trades if 'id' in t}
         
-        # 'trades' contains the user's intended list (e.g. they deleted one trade).
-        # We iterate through the USER'S list, but grab the DATA from the DRIVE list.
         merged_trades = []
         for user_trade in trades:
             t_id = user_trade.get('id')
-            
-            # If this trade exists on Drive, prefer Drive's cached math/history
             if t_id and t_id in drive_map:
                 drive_trade = drive_map[t_id]
-                # Merge fresh backend data into user object
                 if 'cached' in drive_trade:
                     user_trade['cached'] = drive_trade['cached']
                 if 'pnl_history' in drive_trade:
                     user_trade['pnl_history'] = drive_trade['pnl_history']
                 if 'last_heartbeat_date' in drive_trade:
                     user_trade['last_heartbeat_date'] = drive_trade['last_heartbeat_date']
-            
             merged_trades.append(user_trade)
             
-        # 3. Serialize
         serializable = []
         for t in merged_trades:
             ct = {}
@@ -378,7 +346,6 @@ def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
                     ct[k] = v
             serializable.append(ct)
 
-        # 4. Upload
         return _upload_file(service, DRIVE_FILE_NAME, json.dumps(serializable, indent=2))
         
     except Exception as e:
@@ -393,17 +360,80 @@ def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
 def log_trade_to_csv(service, trade_data: Dict[str, Any], debit_paid: float, notes: str) -> bool:
     """
     Logs a closed trade to 'trade_journal.csv' on Drive.
-    Calculates Realized PnL and other metrics automatically.
     """
     FILENAME = "trade_journal.csv"
     
-    # 1. Calculate Metrics
     try:
         credit = float(trade_data.get("credit", 0))
-        # PnL Calculation: (Credit Received - Debit Paid) * 100
-        # Assumes 1 contract sizing per entry
         pnl_val = (credit - debit_paid) * 100
         
         entry_date_str = trade_data.get("entry_date", date.today().isoformat())
-        # Handle timestamp strings if they include time components
-        if isinstance(entry_date
+        if isinstance(entry_date_str, str) and "T" in entry_date_str:
+            entry_date = datetime.fromisoformat(entry_date_str).date()
+        elif isinstance(entry_date_str, (date, datetime)):
+            entry_date = entry_date_str if isinstance(entry_date_str, date) else entry_date_str.date()
+        else:
+            entry_date = date.fromisoformat(entry_date_str)
+            
+        close_date = date.today()
+        days_held = (close_date - entry_date).days
+        
+        if pnl_val > 0:
+            result = "WIN"
+        elif pnl_val < 0:
+            result = "LOSS"
+        else:
+            result = "BREAK-EVEN"
+        
+    except Exception as e:
+        print(f"Error calculating metrics: {e}")
+        pnl_val = 0
+        days_held = 0
+        result = "UNKNOWN"
+        credit = 0
+
+    new_row = [
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        trade_data.get("ticker"),
+        "Put Credit Spread",
+        trade_data.get("short_strike"),
+        trade_data.get("long_strike"),
+        trade_data.get("expiration"),
+        entry_date_str,
+        days_held,
+        f"{credit:.2f}",
+        f"{debit_paid:.2f}",
+        f"{pnl_val:.2f}",
+        result,
+        notes
+    ]
+    
+    headers = [
+        "Timestamp", "Ticker", "Type", "Short Strike", "Long Strike", 
+        "Expiry", "Entry Date", "Days Held", "Credit", "Debit", 
+        "PnL", "Result", "Notes"
+    ]
+
+    file_id = _find_file_id(service, FILENAME)
+    existing_content = ""
+    
+    if file_id:
+        existing_content = _download_file(service, file_id)
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    final_csv_str = ""
+    if not existing_content:
+        writer.writerow(headers)
+        writer.writerow(new_row)
+        final_csv_str = output.getvalue()
+    else:
+        if not existing_content.endswith("\n"):
+            existing_content += "\n"
+        
+        writer.writerow(new_row)
+        new_row_str = output.getvalue()
+        final_csv_str = existing_content + new_row_str
+
+    return _upload_file(service, FILENAME, final_csv_str)
