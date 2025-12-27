@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats as si
+import google.generativeai as genai  # Required for AI features
 from datetime import datetime, timedelta
 
 # Import persistence
@@ -16,6 +17,17 @@ from persistence import (
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Sniper Pro")
+
+# --- GEMINI SETUP ---
+# It tries to find the key in Streamlit secrets.
+# If not found, the AI buttons will simply be disabled/hidden.
+GEMINI_AVAILABLE = False
+try:
+    if "GOOGLE_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+        GEMINI_AVAILABLE = True
+except Exception:
+    pass
 
 # --- CONSTANTS & COLORS ---
 SUCCESS_COLOR = "#00C853"
@@ -63,6 +75,7 @@ st.markdown("""
     .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
     .strategy-badge { border: 1px solid #d4ac0d; color: #d4ac0d; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
+    .ai-box { background-color: rgba(66, 133, 244, 0.1); border: 1px solid #4285F4; border-radius: 6px; padding: 10px; margin-top: 10px; font-size: 13px; color: #E8EAED; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -80,6 +93,26 @@ def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_r
             sigma = sigma - diff / vega
         return abs(sigma)
     except: return 0.0
+
+# --- AI HELPER ---
+def get_ai_analysis(ticker, rank, price_change):
+    """Asks Gemini for a volatility context check."""
+    if not GEMINI_AVAILABLE:
+        return "AI Key not configured."
+    
+    try:
+        model = genai.GenerativeModel('gemini-pro')
+        prompt = (
+            f"I am a volatility trader looking to sell a Put Credit Spread on {ticker}. "
+            f"The stock is at {price_change:.2f}% recently and IV Rank is {rank:.0f}%. "
+            f" concisely explain WHY volatility might be high right now (Earnings? News? Macro?). "
+            f"Then, give a verdict: 'Catalyst Risk' (if earnings/event coming) or 'Standard Volatility' (if just market fear). "
+            f"Keep it under 50 words."
+        )
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"AI Error: {str(e)}"
 
 # --- DATA FETCHING ---
 @st.cache_data(ttl=3600)
@@ -149,7 +182,6 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False)
         short_ask = short_leg.iloc[0]['ask']
         
         if short_ask == 0: return None 
-        # In Dev Mode, we tolerate wider spreads
         if not dev_mode and (short_ask - short_bid) > 0.50: return None
 
         long_strike_target = short_strike - 5.0
@@ -179,34 +211,27 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False)
         }
     except: return None
 
-# --- IMPROVED PLOTTING FUNCTION ---
+# --- PLOTTING FUNCTION ---
 def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
-    """
-    Generates a mini-chart with bars, strikes, and IV cone, matching dashboard style.
-    """
     fig, ax = plt.subplots(figsize=(4, 1.3)) 
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(BG_COLOR)
     
-    # 1. Data Prep (Last 60 days)
     last_60 = hist.tail(60).copy()
     dates = last_60.index
     
     if 'Open' not in last_60.columns: last_60['Open'] = last_60['Close']
 
-    # 2. Draw Bars (Dashboard Style - Green up, Red down)
     bar_colors = np.where(last_60['Close'] >= last_60['Open'], SUCCESS_COLOR, WARNING_COLOR)
     heights = last_60['Close'] - last_60['Open']
     bottoms = last_60['Open']
     
     ax.bar(dates, heights, bottom=bottoms, color=bar_colors, width=0.8, align='center', alpha=0.9)
 
-    # 3. Draw Strikes
     ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, alpha=0.9)
     ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
     ax.fill_between(dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.1)
 
-    # 4. Draw IV Cone (Projected future)
     days_proj = 30
     safe_iv = iv if iv > 0 else 30
     vol_move = current_price * (safe_iv/100) * np.sqrt(np.arange(1, days_proj+1)/365)
@@ -220,7 +245,6 @@ def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
     
     ax.fill_between(future_dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.08)
 
-    # 5. Formatting
     ax.grid(True, which='major', linestyle=':', color=GRID_COLOR, alpha=0.3)
     ax.axis('off') 
     
@@ -229,7 +253,7 @@ def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
 
 # --- MAIN UI ---
 
-# ---------------- Header (Matches Dashboard) ----------------
+# ---------------- Header ----------------
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 
 with header_col1:
@@ -248,22 +272,18 @@ with header_col2:
 
 with header_col3:
     st.write("") 
-    # Log out button REMOVED per request
 
-# Solid White Divider
 st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # --- SIDEBAR CONTROLS ---
 with st.sidebar:
     st.header("Scanner Settings")
-    # Dev Mode OFF by default
     dev_mode = st.checkbox("🛠 Dev Mode (Bypass Filters)", value=False, help="Check this to see ALL valid spread structures.")
     
     if dev_mode:
         st.warning("⚠️ DEV MODE ACTIVE: Filters are disabled.")
 
-# --- SCAN BUTTON LOGIC (Standard Gray Button) ---
-# Removed type="primary" to match Yes/No buttons
+# --- SCAN BUTTON LOGIC ---
 if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     
     status = st.empty()
@@ -296,7 +316,6 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     progress.empty()
     status.empty()
     
-    # PERSIST RESULTS
     st.session_state.scan_results = sorted(results, key=lambda x: x['score'], reverse=True)
 
 # --- DISPLAY LOGIC ---
@@ -375,10 +394,19 @@ if st.session_state.scan_results is not None:
                     </div>
                     """, unsafe_allow_html=True)
                     
+                    # --- AI ANALYZE BUTTON ---
+                    ai_key = f"ai_{t}_{i}"
+                    if st.button(f"🤖 Analyze {t}", key=f"btn_ai_{t}_{i}", help="Ask Gemini to analyze volatility drivers."):
+                        st.session_state[ai_key] = True
+                    
+                    if st.session_state.get(ai_key, False):
+                        with st.spinner("Consulting Gemini..."):
+                            analysis = get_ai_analysis(t, d['rank'], d['change_pct'])
+                            st.markdown(f"<div class='ai-box'><strong>Gemini Analysis:</strong><br>{analysis}</div>", unsafe_allow_html=True)
+
                     # --- ADD TO DASHBOARD LOGIC ---
                     add_key = f"add_mode_{t}_{i}"
                     
-                    # Spacer
                     st.write("") 
                     
                     if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
@@ -393,7 +421,6 @@ if st.session_state.scan_results is not None:
                         
                         col_conf, col_can = st.columns(2)
                         with col_conf:
-                            # STANDARD BUTTON (Gray/Default)
                             if st.button("✅ Confirm", key=f"conf_{t}_{i}"):
                                 new_trade = {
                                     "id": f"{t}-{s['short']}-{s['long']}-{s['expiration']}",
@@ -413,7 +440,6 @@ if st.session_state.scan_results is not None:
                                 
                                 if drive_service:
                                     save_to_drive(drive_service, st.session_state.trades)
-                                    # SUCCESS MESSAGE
                                     st.success(f"Success: Added {num_contracts}x {t} to Dashboard!")
                                     st.toast(f"Successfully added {num_contracts}x {t} to Dashboard!")
                                 
