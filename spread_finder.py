@@ -101,75 +101,80 @@ def get_ai_analysis(ticker, rank, price_change):
     if not GEMINI_AVAILABLE:
         return "AI Key not configured."
     
-    # 1. DISCOVER AVAILABLE MODELS
-    # This prevents 404 errors by asking the API what exists first.
+    # 1. DYNAMIC DISCOVERY: Find a model that actually exists for your key
     target_model_name = None
     try:
+        # Get all models available to your API key
         all_models = [m.name for m in genai.list_models()]
         
-        # Priority 1: Gemini 1.5 Flash (Fast/Cheap)
+        # Priority 1: Look for any "Flash" model (Fastest)
         for m in all_models:
-            if 'flash' in m.lower() and '1.5' in m:
+            if 'flash' in m.lower():
                 target_model_name = m
                 break
         
-        # Priority 2: Gemini 1.5 Pro
+        # Priority 2: Look for "Pro" if Flash missing
         if not target_model_name:
             for m in all_models:
-                if 'pro' in m.lower() and '1.5' in m:
+                if 'pro' in m.lower() and 'vision' not in m.lower():
                     target_model_name = m
                     break
                     
-        # Priority 3: Gemini 1.0 Pro (Legacy)
+        # Priority 3: Fallback to standard gemini-pro
         if not target_model_name:
-            for m in all_models:
-                if 'gemini-pro' in m:
-                    target_model_name = m
-                    break
+            if 'models/gemini-pro' in all_models:
+                target_model_name = 'models/gemini-pro'
         
         if not target_model_name:
-            return "Error: No Gemini models found available for this API key."
+            return "Error: No valid Gemini models found for this API key."
 
     except Exception as e:
         return f"Model Discovery Error: {str(e)}"
 
-    # 2. CONFIGURE TOOLS (Search)
-    # Gemini 1.5 uses 'google_search_retrieval'.
-    # Gemini 1.0 usually does not support this tool structure in the SDK.
-    tools = []
-    if '1.5' in target_model_name:
-        tools = [{'google_search_retrieval': {
-            'dynamic_retrieval_config': {
-                'mode': 'dynamic',
-                'dynamic_threshold': 0.6
-            }
-        }}]
+    # 2. DEFINE TOOLS (Try to use Search)
+    # Note: 'google_search_retrieval' is the correct tool name for v1beta Python SDK
+    tools = [{'google_search_retrieval': {
+        'dynamic_retrieval_config': {
+            'mode': 'dynamic',
+            'dynamic_threshold': 0.6
+        }
+    }}]
 
-    # 3. GENERATE
+    # 3. ATTEMPT GENERATION (With Fallback)
     try:
+        # Attempt 1: Try WITH Google Search
         model = genai.GenerativeModel(target_model_name, tools=tools)
         
         prompt = (
             f"I am a volatility trader looking to sell a Put Credit Spread on {ticker}. "
             f"The stock is at {price_change:.2f}% recently and IV Rank is {rank:.0f}%. "
-            f"Please check for any major news, earnings, or events from the last 7 days. "
-            f"Concisely explain WHY volatility might be high. "
-            f"Verdict: 'Catalyst Risk' (Earnings/Event) or 'Standard Volatility' (Market Fear). "
+            f"Use Google Search to find any major news or earnings from the last 7 days. "
+            f"Concisely explain WHY volatility might be high right now. "
+            f"Verdict: 'Catalyst Risk' (if earnings/event coming soon) or 'Standard Volatility' (if just market fear). "
             f"Keep it under 50 words."
         )
         response = model.generate_content(prompt)
         return response.text
 
     except Exception as e:
-        # Fallback: If Search tool fails, try again WITHOUT tools
-        if tools:
-            try:
-                model_fallback = genai.GenerativeModel(target_model_name) # No tools
-                response = model_fallback.generate_content(prompt + " (Search unavailable, use internal knowledge)")
-                return f"{response.text} \n\n*(Note: Live search failed, analysis based on internal training data)*"
-            except Exception as e2:
-                return f"AI Error (Fallback): {str(e2)}"
-        return f"AI Error: {str(e)}"
+        # Attempt 2: Fallback to Internal Knowledge (No Tools)
+        # This runs if the search tool crashes or isn't supported by the account
+        try:
+            model_fallback = genai.GenerativeModel(target_model_name) # Initialize without tools
+            prompt_fallback = (
+                f"I am a volatility trader looking to sell a Put Credit Spread on {ticker}. "
+                f"The stock is at {price_change:.2f}% recently and IV Rank is {rank:.0f}%. "
+                f"Based on your internal knowledge, are there usually earnings or seasonal events for this stock this time of year? "
+                f"Give a verdict: 'Catalyst Risk' or 'Standard Volatility'. "
+                f"Keep it under 50 words."
+            )
+            response = model_fallback.generate_content(prompt_fallback)
+            
+            # Append a safety warning so the user knows this isn't live data
+            return f"{response.text} \n\n<em style='color: #FFB74D; font-size: 11px;'>⚠️ Live Search Failed. Analysis based on internal training data. Verify news manually.</em>"
+            
+        except Exception as e2:
+            return f"AI Error: {str(e2)}"
 
 # --- DATA FETCHING ---
 @st.cache_data(ttl=3600)
