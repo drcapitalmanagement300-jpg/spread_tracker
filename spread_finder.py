@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import scipy.stats as si
 from datetime import datetime, timedelta
 
-# Import persistence to save trades to drive
+# Import persistence
 from persistence import (
     build_drive_service_from_session,
     save_to_drive,
@@ -16,21 +16,20 @@ from persistence import (
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Sniper Pro")
 
-# --- INITIALIZE DRIVE SERVICE (For Saving Trades) ---
+# --- INITIALIZE DRIVE SERVICE ---
 drive_service = None
 try:
     drive_service = build_drive_service_from_session()
 except Exception:
     drive_service = None
 
-# Ensure we have the trade list loaded
 if "trades" not in st.session_state:
     if drive_service:
         st.session_state.trades = load_from_drive(drive_service) or []
     else:
         st.session_state.trades = []
 
-# 1. UNIVERSE: LIQUIDITY LIST (~60 Tickers)
+# 1. UNIVERSE (~60 Tickers)
 LIQUID_TICKERS = [
     "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "SMH", "ARKK",
     "NVDA", "TSLA", "AAPL", "MSFT", "AMD", "AMZN", "META", "GOOGL", "NFLX", 
@@ -55,7 +54,6 @@ st.markdown("""
 
 # --- MATH HELPER ---
 def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_rate=0.045):
-    """Approximation for display purposes."""
     try:
         sigma = 0.5
         for i in range(20):
@@ -81,7 +79,6 @@ def get_stock_data(ticker):
         prev_price = hist['Close'].iloc[-2]
         change_pct = ((current_price - prev_price) / prev_price) * 100
         
-        # 1. HV Rank (Proxy for IV Rank)
         hist['Returns'] = hist['Close'].pct_change()
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
         
@@ -91,28 +88,19 @@ def get_stock_data(ticker):
             if mx != mn: 
                 rank = ((hist['HV'].iloc[-1] - mn) / (mx - mn)) * 100
 
-        # 2. Earnings Check (Robust)
         earnings_days = 999
         try:
             cal = stock.calendar
             if cal is not None and not cal.empty:
-                # Calendar might be a DataFrame or Dict
                 if isinstance(cal, pd.DataFrame):
-                    # Usually row 0 is the next earnings date, or column 0
                     dates = cal.iloc[0] if not cal.iloc[0].empty else cal.index
-                    # Flatten and filter for future
                     future_dates = []
                     for d in dates:
                         if isinstance(d, (datetime, pd.Timestamp)) and d.date() > datetime.now().date():
                             future_dates.append(d.date())
-                    
                     if future_dates:
                         earnings_days = (min(future_dates) - datetime.now().date()).days
-                        
-                elif isinstance(cal, dict):
-                    pass 
-        except: 
-            pass
+        except: pass
 
         return {
             "price": current_price,
@@ -124,12 +112,11 @@ def get_stock_data(ticker):
     except: return None
 
 # --- TRADE LOGIC ---
-def find_optimal_spread(stock_obj, current_price, target_dte=30):
+def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False):
     try:
         exps = stock_obj.options
         if not exps: return None
         
-        # 1. Expiration (20-50 Days ideal)
         target_date = datetime.now() + timedelta(days=target_dte)
         best_exp = min(exps, key=lambda x: abs((datetime.strptime(x, "%Y-%m-%d") - target_date).days))
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
@@ -139,7 +126,6 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30):
         chain = stock_obj.option_chain(best_exp)
         puts = chain.puts
         
-        # 2. Short Leg Selection
         target_strike = current_price * 0.95 
         short_leg = puts.iloc[(puts['strike'] - target_strike).abs().argsort()[:1]]
         if short_leg.empty: return None
@@ -148,11 +134,10 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30):
         short_bid = short_leg.iloc[0]['bid']
         short_ask = short_leg.iloc[0]['ask']
         
-        # 3. Liquidity Check
         if short_ask == 0: return None 
-        if (short_ask - short_bid) > 0.50: return None
+        # In Dev Mode, we tolerate wider spreads just to see results
+        if not dev_mode and (short_ask - short_bid) > 0.50: return None
 
-        # 4. Long Leg Selection ($5 Width)
         long_strike_target = short_strike - 5.0
         long_leg = puts.iloc[(puts['strike'] - long_strike_target).abs().argsort()[:1]]
         if long_leg.empty: return None
@@ -160,15 +145,14 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30):
         long_strike = long_leg.iloc[0]['strike']
         long_ask = long_leg.iloc[0]['ask']
         
-        # Verify Width
         if abs((short_strike - long_strike) - 5.0) > 1.0: return None
 
-        # 5. Credit & ROI Calculation
         credit = short_bid - long_ask 
         max_loss = (short_strike - long_strike) - credit
         
-        # 6. Minimum Premium Filter ($0.40)
-        if credit < 0.40: return None
+        # In Dev Mode, accept any credit > 0
+        min_credit = 0.05 if dev_mode else 0.40
+        if credit < min_credit: return None
 
         roi = (credit / max_loss) * 100 if max_loss > 0 else 0
         iv = get_implied_volatility(current_price, short_strike, dte/365, (short_bid+short_ask)/2) * 100
@@ -206,14 +190,29 @@ def plot_cone(hist, price, iv):
 
 # --- MAIN UI ---
 st.title("🦅 Spread Sniper: Pro")
-st.markdown("""
-Scanning for **"Best of Best"** opportunities:
-* **Rank > 80%** (Extreme Fear)
-* **Credit > $0.40** (Meaningful Yield)
-* **Earnings Safe** (No binary events during trade)
-""")
 
-if st.button("🔎 Scan Market (Quality Filter)", type="primary"):
+# --- SIDEBAR CONTROLS ---
+with st.sidebar:
+    st.header("Scanner Settings")
+    dev_mode = st.checkbox("🛠 Dev Mode (Bypass Filters)", value=True, help="Check this to see ALL valid spread structures, ignoring Rank/Credit requirements. Useful for testing UI.")
+    
+    if dev_mode:
+        st.warning("⚠️ DEV MODE ACTIVE: Filters are disabled. Results may be low quality.")
+
+if dev_mode:
+    st.markdown("""
+    **DEV MODE ACTIVE:** Showing all valid 30-Delta spreads. 
+    *Rank > 80% Filter: OFF* | *Credit > $0.40 Filter: OFF*
+    """)
+else:
+    st.markdown("""
+    Scanning for **"Best of Best"** opportunities:
+    * **Rank > 80%** (Extreme Fear)
+    * **Credit > $0.40** (Meaningful Yield)
+    * **Earnings Safe** (No binary events during trade)
+    """)
+
+if st.button(f"🔎 Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", type="primary"):
     
     status = st.empty()
     progress = st.progress(0)
@@ -227,19 +226,18 @@ if st.button("🔎 Scan Market (Quality Filter)", type="primary"):
         data = get_stock_data(ticker)
         if not data: continue
         
-        # FILTER 1: Volatility Rank
-        if data['rank'] < 80: continue 
+        # FILTER 1: Volatility Rank (Ignored in Dev Mode)
+        if not dev_mode and data['rank'] < 80: continue 
 
-        # 2. Find Trade
+        # 2. Find Trade (Pass Dev Mode flag to relax spread/liquidity rules)
         obj = yf.Ticker(ticker)
-        spread = find_optimal_spread(obj, data['price'])
+        spread = find_optimal_spread(obj, data['price'], dev_mode=dev_mode)
         
         if spread:
-            # FILTER 2: Earnings Safety Check
-            if data['earnings_days'] < spread['dte'] + 2:
+            # FILTER 2: Earnings Safety Check (Ignored in Dev Mode)
+            if not dev_mode and data['earnings_days'] < spread['dte'] + 2:
                 continue 
 
-            # Score = Rank + ROI
             score = data['rank'] + spread['roi']
             results.append({"ticker": ticker, "data": data, "spread": spread, "score": score})
     
@@ -247,16 +245,12 @@ if st.button("🔎 Scan Market (Quality Filter)", type="primary"):
     status.empty()
     
     if not results:
-        st.info("No 'Perfect' setups found.")
-        st.markdown("""
-        **Why?** The filters are very strict:
-        1. IV Rank must be > 80%.
-        2. Must collect > $0.40 credit.
-        3. Must NOT have earnings in the next 30 days.
-        """)
+        st.info("No setups found.")
+        if not dev_mode:
+            st.markdown("**Tip:** Enable 'Dev Mode' in the sidebar to test the UI.")
     else:
         results = sorted(results, key=lambda x: x['score'], reverse=True)
-        st.success(f"Found {len(results)} Prime Opportunities")
+        st.success(f"Found {len(results)} Opportunities")
         
         cols = st.columns(3)
         for i, res in enumerate(results):
@@ -267,13 +261,21 @@ if st.button("🔎 Scan Market (Quality Filter)", type="primary"):
             with cols[i % 3]:
                 with st.container(border=True):
                     pill_class = "price-pill-red" if d['change_pct'] < 0 else "price-pill-green"
+                    
+                    # Badge Logic
+                    badge_text = "PRIME SETUP"
+                    badge_style = "border: 1px solid #d4ac0d; color: #d4ac0d;" # Gold
+                    if dev_mode and (d['rank'] < 80 or s['credit'] < 0.40):
+                        badge_text = "TEST RESULT"
+                        badge_style = "border: 1px solid gray; color: gray;"
+
                     st.markdown(f"""
                     <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                         <div>
                             <div style="font-size: 22px; font-weight: 900; color: white; line-height: 1;">{t}</div>
                             <div style="margin-top: 4px;"><span class="{pill_class}">${d['price']:.2f} ({d['change_pct']:.2f}%)</span></div>
                         </div>
-                        <div class="strategy-badge">PRIME SETUP</div>
+                        <div class="strategy-badge" style="{badge_style}">{badge_text}</div>
                     </div>
                     """, unsafe_allow_html=True)
                     
@@ -318,8 +320,6 @@ if st.button("🔎 Scan Market (Quality Filter)", type="primary"):
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # --- ADD TO DASHBOARD LOGIC (With Contracts Prompt) ---
-                    # Unique key for every card
                     add_key = f"add_mode_{t}_{i}"
                     
                     if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
@@ -332,7 +332,6 @@ if st.button("🔎 Scan Market (Quality Filter)", type="primary"):
                         col_conf, col_can = st.columns(2)
                         with col_conf:
                             if st.button("✅ Confirm", key=f"conf_{t}_{i}"):
-                                # Build Trade Object Matching Dashboard Structure
                                 new_trade = {
                                     "id": f"{t}-{s['short']}-{s['long']}-{s['expiration']}",
                                     "ticker": t,
