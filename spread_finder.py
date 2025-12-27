@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats as si
-import google.generativeai as genai
 from datetime import datetime, timedelta
 
 # Import persistence
@@ -17,15 +16,6 @@ from persistence import (
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Sniper Pro")
-
-# --- GEMINI SETUP ---
-GEMINI_AVAILABLE = False
-try:
-    if "GOOGLE_API_KEY" in st.secrets:
-        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        GEMINI_AVAILABLE = True
-except Exception:
-    pass
 
 # --- CONSTANTS & COLORS ---
 SUCCESS_COLOR = "#00C853"
@@ -73,7 +63,7 @@ st.markdown("""
     .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
     .strategy-badge { border: 1px solid #d4ac0d; color: #d4ac0d; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
-    .ai-box { background-color: rgba(66, 133, 244, 0.1); border: 1px solid #4285F4; border-radius: 6px; padding: 10px; margin-top: 10px; font-size: 13px; color: #E8EAED; }
+    .earnings-box { background-color: rgba(255, 255, 255, 0.05); border: 1px solid #444; border-radius: 6px; padding: 8px; text-align: center; margin-top: 10px; font-size: 13px; color: #E8EAED; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -91,90 +81,6 @@ def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_r
             sigma = sigma - diff / vega
         return abs(sigma)
     except: return 0.0
-
-# --- AI HELPER (ROBUST / DYNAMIC) ---
-def get_ai_analysis(ticker, rank, price_change):
-    """
-    Dynamically finds a working model and attempts to use Google Search.
-    Falls back to internal knowledge if search tools fail.
-    """
-    if not GEMINI_AVAILABLE:
-        return "AI Key not configured."
-    
-    # 1. DYNAMIC DISCOVERY: Find a model that actually exists for your key
-    target_model_name = None
-    try:
-        # Get all models available to your API key
-        all_models = [m.name for m in genai.list_models()]
-        
-        # Priority 1: Look for any "Flash" model (Fastest)
-        for m in all_models:
-            if 'flash' in m.lower():
-                target_model_name = m
-                break
-        
-        # Priority 2: Look for "Pro" if Flash missing
-        if not target_model_name:
-            for m in all_models:
-                if 'pro' in m.lower() and 'vision' not in m.lower():
-                    target_model_name = m
-                    break
-                    
-        # Priority 3: Fallback to standard gemini-pro
-        if not target_model_name:
-            if 'models/gemini-pro' in all_models:
-                target_model_name = 'models/gemini-pro'
-        
-        if not target_model_name:
-            return "Error: No valid Gemini models found for this API key."
-
-    except Exception as e:
-        return f"Model Discovery Error: {str(e)}"
-
-    # 2. DEFINE TOOLS (Try to use Search)
-    # Note: 'google_search_retrieval' is the correct tool name for v1beta Python SDK
-    tools = [{'google_search_retrieval': {
-        'dynamic_retrieval_config': {
-            'mode': 'dynamic',
-            'dynamic_threshold': 0.6
-        }
-    }}]
-
-    # 3. ATTEMPT GENERATION (With Fallback)
-    try:
-        # Attempt 1: Try WITH Google Search
-        model = genai.GenerativeModel(target_model_name, tools=tools)
-        
-        prompt = (
-            f"I am a volatility trader looking to sell a Put Credit Spread on {ticker}. "
-            f"The stock is at {price_change:.2f}% recently and IV Rank is {rank:.0f}%. "
-            f"Use Google Search to find any major news or earnings from the last 7 days. "
-            f"Concisely explain WHY volatility might be high right now. "
-            f"Verdict: 'Catalyst Risk' (if earnings/event coming soon) or 'Standard Volatility' (if just market fear). "
-            f"Keep it under 50 words."
-        )
-        response = model.generate_content(prompt)
-        return response.text
-
-    except Exception as e:
-        # Attempt 2: Fallback to Internal Knowledge (No Tools)
-        # This runs if the search tool crashes or isn't supported by the account
-        try:
-            model_fallback = genai.GenerativeModel(target_model_name) # Initialize without tools
-            prompt_fallback = (
-                f"I am a volatility trader looking to sell a Put Credit Spread on {ticker}. "
-                f"The stock is at {price_change:.2f}% recently and IV Rank is {rank:.0f}%. "
-                f"Based on your internal knowledge, are there usually earnings or seasonal events for this stock this time of year? "
-                f"Give a verdict: 'Catalyst Risk' or 'Standard Volatility'. "
-                f"Keep it under 50 words."
-            )
-            response = model_fallback.generate_content(prompt_fallback)
-            
-            # Append a safety warning so the user knows this isn't live data
-            return f"{response.text} \n\n<em style='color: #FFB74D; font-size: 11px;'>⚠️ Live Search Failed. Analysis based on internal training data. Verify news manually.</em>"
-            
-        except Exception as e2:
-            return f"AI Error: {str(e2)}"
 
 # --- DATA FETCHING ---
 @st.cache_data(ttl=3600)
@@ -197,25 +103,44 @@ def get_stock_data(ticker):
             if mx != mn: 
                 rank = ((hist['HV'].iloc[-1] - mn) / (mx - mn)) * 100
 
+        # --- EARNINGS LOGIC ---
         earnings_days = 999
+        next_earnings_date_str = "N/A"
         try:
+            # Try getting calendar
             cal = stock.calendar
+            future_dates = []
+            
+            # Handle different yfinance versions/return types
             if cal is not None and not cal.empty:
                 if isinstance(cal, pd.DataFrame):
-                    dates = cal.iloc[0] if not cal.iloc[0].empty else cal.index
-                    future_dates = []
-                    for d in dates:
-                        if isinstance(d, (datetime, pd.Timestamp)) and d.date() > datetime.now().date():
-                            future_dates.append(d.date())
-                    if future_dates:
-                        earnings_days = (min(future_dates) - datetime.now().date()).days
-        except: pass
+                    # Transpose if needed or grab the first row/column
+                    # Often cal.iloc[0] contains the dates
+                    dates = cal.iloc[0].values if not cal.iloc[0].empty else cal.index
+                else:
+                    dates = cal.values() # If dict
+                
+                for d in dates:
+                    # Convert to datetime object if needed
+                    if isinstance(d, (np.datetime64, pd.Timestamp, datetime)):
+                        d_date = pd.to_datetime(d).date()
+                        if d_date > datetime.now().date():
+                            future_dates.append(d_date)
+                
+                if future_dates:
+                    next_date = min(future_dates)
+                    earnings_days = (next_date - datetime.now().date()).days
+                    next_earnings_date_str = next_date.strftime("%b %d, %Y")
+        except: 
+            # Fallback if calendar fails
+            next_earnings_date_str = "Unknown"
 
         return {
             "price": current_price,
             "change_pct": change_pct,
             "rank": rank,
             "earnings_days": earnings_days,
+            "earnings_date_str": next_earnings_date_str,
             "hist": hist
         }
     except: return None
@@ -424,7 +349,7 @@ if st.session_state.scan_results is not None:
                         <div class="metric-value">${s['short']:.0f} / ${s['long']:.0f}</div>
                         <div style="height: 8px;"></div>
                         <div class="metric-label">Credit</div>
-                        <div class="metric-value" style="color:#00FFAA">${s['credit']:.2f}</div>
+                        <div class="metric-value" style="color:{SUCCESS_COLOR}">${s['credit']:.2f}</div>
                         """, unsafe_allow_html=True)
                     with c2:
                         st.markdown(f"""
@@ -456,17 +381,14 @@ if st.session_state.scan_results is not None:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # --- AI ANALYZE BUTTON ---
-                    st.write("") 
-                    ai_key = f"ai_{t}_{i}"
-                    
-                    if st.button(f"Analyze {t}", key=f"btn_ai_{t}_{i}", help="Ask Gemini to analyze volatility drivers."):
-                        st.session_state[ai_key] = True
-                    
-                    if st.session_state.get(ai_key, False):
-                        with st.spinner("Consulting Gemini..."):
-                            analysis = get_ai_analysis(t, d['rank'], d['change_pct'])
-                            st.markdown(f"<div class='ai-box'><strong>Gemini Analysis:</strong><br>{analysis}</div>", unsafe_allow_html=True)
+                    # --- EARNINGS DISPLAY (Replaces AI) ---
+                    # Show the actual date or N/A
+                    earnings_label = d['earnings_date_str'] if d['earnings_date_str'] != "Unknown" else "Unknown"
+                    st.markdown(f"""
+                    <div class="earnings-box">
+                        <span style="color: #AAA;">Next Earnings:</span> <strong style="color: white;">{earnings_label}</strong>
+                    </div>
+                    """, unsafe_allow_html=True)
 
                     # --- ADD TO DASHBOARD LOGIC ---
                     add_key = f"add_mode_{t}_{i}"
