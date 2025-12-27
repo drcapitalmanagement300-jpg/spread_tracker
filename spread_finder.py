@@ -16,6 +16,13 @@ from persistence import (
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Sniper Pro")
 
+# --- CONSTANTS & COLORS (MATCHING DASHBOARD) ---
+SUCCESS_COLOR = "#00C853"
+WARNING_COLOR = "#d32f2f"
+BG_COLOR = '#0E1117'
+GRID_COLOR = '#444444'
+STRIKE_COLOR = '#FF5252'
+
 # --- INITIALIZE DRIVE SERVICE ---
 drive_service = None
 try:
@@ -170,27 +177,60 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False)
         }
     except: return None
 
-def plot_cone(hist, price, iv):
-    fig, ax = plt.subplots(figsize=(4, 1.2)) 
-    fig.patch.set_facecolor('#0E1117')
-    ax.set_facecolor('#0E1117')
+# --- IMPROVED PLOTTING FUNCTION ---
+def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
+    """
+    Generates a mini-chart with bars, strikes, and IV cone, matching dashboard style.
+    """
+    fig, ax = plt.subplots(figsize=(4, 1.3)) 
+    fig.patch.set_facecolor(BG_COLOR)
+    ax.set_facecolor(BG_COLOR)
     
-    last_60 = hist['Close'].tail(60)
+    # 1. Data Prep (Last 60 days)
+    last_60 = hist.tail(60).copy()
     dates = last_60.index
     
+    # Ensure Open column exists, fill with Close if missing (for safety)
+    if 'Open' not in last_60.columns: last_60['Open'] = last_60['Close']
+
+    # 2. Draw Bars (Dashboard Style - Green up, Red down)
+    # Determine colors based on Close vs Open
+    bar_colors = np.where(last_60['Close'] >= last_60['Open'], SUCCESS_COLOR, WARNING_COLOR)
+    # Calculate bar height and bottom for ax.bar
+    heights = last_60['Close'] - last_60['Open']
+    bottoms = last_60['Open']
+    
+    #Plot the bars
+    ax.bar(dates, heights, bottom=bottoms, color=bar_colors, width=0.8, align='center', alpha=0.9)
+
+    # 3. Draw Strikes
+    ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, alpha=0.9)
+    ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
+    # Shade between strikes across historical data
+    ax.fill_between(dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.1)
+
+    # 4. Draw IV Cone (Projected future)
     days_proj = 30
     safe_iv = iv if iv > 0 else 30
-    vol_move = price * (safe_iv/100) * np.sqrt(np.arange(1, days_proj+1)/365)
-    
-    upper = price + vol_move
-    lower = price - vol_move
+    vol_move = current_price * (safe_iv/100) * np.sqrt(np.arange(1, days_proj+1)/365)
+    upper_cone = current_price + vol_move
+    lower_cone = current_price - vol_move
     future_dates = [dates[-1] + timedelta(days=int(i)) for i in range(1, days_proj+1)]
     
-    ax.plot(dates, last_60, color='#00FFAA', lw=1.2)
-    ax.fill_between(future_dates, lower, upper, color='#00FFAA', alpha=0.15)
-    ax.plot(future_dates, upper, color='gray', linestyle=':', lw=0.5)
-    ax.plot(future_dates, lower, color='gray', linestyle=':', lw=0.5)
-    ax.axis('off')
+    # Overlay Cone
+    ax.fill_between(future_dates, lower_cone, upper_cone, color='#00FFAA', alpha=0.1)
+    ax.plot(future_dates, upper_cone, color='gray', linestyle=':', lw=0.5)
+    ax.plot(future_dates, lower_cone, color='gray', linestyle=':', lw=0.5)
+    
+    # Shade strikes into the future as well
+    ax.fill_between(future_dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.08)
+
+    # 5. Formatting
+    ax.grid(True, which='major', linestyle=':', color=GRID_COLOR, alpha=0.3)
+    ax.axis('off') # Keep axis off for sparkline look
+    
+    # Ensure tight layout so it fits the card well
+    plt.tight_layout(pad=0.1)
     return fig
 
 # --- MAIN UI ---
@@ -299,7 +339,8 @@ if st.session_state.scan_results is not None:
                     
                     vc1, vc2 = st.columns([2, 1])
                     with vc1:
-                         st.pyplot(plot_cone(d['hist'], d['price'], s['iv']), use_container_width=True)
+                         # UPDATED PLOT CALL WITH STRIKES
+                         st.pyplot(plot_sparkline_cone(d['hist'], d['price'], s['iv'], s['short'], s['long']), use_container_width=True)
                     with vc2:
                         st.markdown(f"""
                         <div class="metric-label" style="text-align: right;">IV Rank</div>
@@ -316,7 +357,7 @@ if st.session_state.scan_results is not None:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # --- ADD TO DASHBOARD LOGIC ---
+                    # --- ADD TO DASHBOARD LOGIC (With Auth Check) ---
                     add_key = f"add_mode_{t}_{i}"
                     
                     if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
@@ -354,9 +395,9 @@ if st.session_state.scan_results is not None:
                                     st.toast(f"Saved {num_contracts}x {t} to Drive!")
                                 
                                 del st.session_state[add_key]
-                                st.rerun() # <--- UPDATED
+                                st.rerun()
                                 
                         with col_can:
                             if st.button("❌ Cancel", key=f"canc_{t}_{i}"):
                                 del st.session_state[add_key]
-                                st.rerun() # <--- UPDATED
+                                st.rerun()
