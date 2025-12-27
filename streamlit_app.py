@@ -1,14 +1,12 @@
 import streamlit as st
 from datetime import date, datetime
 import pandas as pd
-import altair as alt
-from streamlit_autorefresh import st_autorefresh
-import io
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import textwrap
+from streamlit_autorefresh import st_autorefresh
 
 # ---------------- Persistence ----------------
+# Ensure persistence.py is in the same folder
 from persistence import (
     ensure_logged_in,
     build_drive_service_from_session,
@@ -22,9 +20,9 @@ from persistence import (
 st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
 
 # ---------------- Constants ----------------
-SUCCESS_COLOR = "#00C853"  # Unified Green
-WARNING_COLOR = "#d32f2f"  # Red
-STOP_LOSS_COLOR = "#FFA726" # Orange
+SUCCESS_COLOR = "#00C853"
+WARNING_COLOR = "#d32f2f"
+STOP_LOSS_COLOR = "#FFA726"
 
 # ---------------- UI Refresh ----------------
 st_autorefresh(interval=60_000, key="ui_refresh")
@@ -41,24 +39,17 @@ try:
 except Exception:
     drive_service = None
 
-# ---------------- Header & Logo ----------------
+# ---------------- Header ----------------
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
-
 with header_col1:
-    try:
-        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=140)
-    except Exception:
-        st.write("**DR CAPITAL**")
-
+    st.write("**DR CAPITAL**") # Placeholder or image
 with header_col2:
-    header_html = (
-        "<div style='text-align: left; padding-top: 10px;'>"
-        "<h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Put Credit Spread Monitor</h1>"
-        "<p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>"
-        "</div>"
-    )
-    st.markdown(header_html, unsafe_allow_html=True)
-
+    st.markdown("""
+    <div style='text-align: left; padding-top: 10px;'>
+        <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Put Credit Spread Monitor</h1>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
+    </div>
+    """, unsafe_allow_html=True)
 with header_col3:
     st.write("") 
     if st.button("Log out"):
@@ -85,19 +76,8 @@ def format_money(x):
     except Exception:
         return "-"
 
-def get_entry_dte(entry_date_str, expiry_date_str):
-    try:
-        entry = date.fromisoformat(entry_date_str)
-        expiry = date.fromisoformat(expiry_date_str)
-        return (expiry - entry).days
-    except:
-        return 30 # fallback
-
-# --- 1. CHARTING FUNCTION ---
+# --- Charting & Progress Bar Functions (Same as before) ---
 def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_strike, crit_price=None):
-    """
-    Generates a Dark Mode Matplotlib figure with Candlesticks.
-    """
     bg_color = '#0E1117'    
     card_color = '#262730'  
     text_color = '#FAFAFA'  
@@ -113,32 +93,21 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     up = df[df.Close >= df.Open]
     down = df[df.Close < df.Open]
     
-    # MATCHED COLORS
-    col_up = SUCCESS_COLOR
-    col_down = WARNING_COLOR
-    
-    # Draw Wicks
-    ax.bar(up.Date, up.High - up.Low, bottom=up.Low, color=col_up, width=width2, align='center')
-    ax.bar(down.Date, down.High - down.Low, bottom=down.Low, color=col_down, width=width2, align='center')
-    
-    # Draw Bodies
-    ax.bar(up.Date, up.Close - up.Open, bottom=up.Open, color=col_up, width=width, align='center')
-    ax.bar(down.Date, down.Open - down.Close, bottom=down.Close, color=col_down, width=width, align='center')
+    ax.bar(up.Date, up.High - up.Low, bottom=up.Low, color=SUCCESS_COLOR, width=width2, align='center')
+    ax.bar(down.Date, down.High - down.Low, bottom=down.Low, color=WARNING_COLOR, width=width2, align='center')
+    ax.bar(up.Date, up.Close - up.Open, bottom=up.Open, color=SUCCESS_COLOR, width=width, align='center')
+    ax.bar(down.Date, down.Open - down.Close, bottom=down.Close, color=WARNING_COLOR, width=width, align='center')
 
-    # Timeline
     min_date = df['Date'].min()
     max_date = max(df['Date'].max(), expiration_date) + pd.Timedelta(days=5)
     ax.set_xlim(left=min_date, right=max_date)
 
-    # Event Lines
     ax.axvline(x=trade_start_date, color=SUCCESS_COLOR, linestyle='--', linewidth=1, label='Start', alpha=0.7)
     ax.axvline(x=expiration_date, color='#B0BEC5', linestyle='--', linewidth=1, label='Exp', alpha=0.7)
-
-    # --- NEW: 7-Day Warning Line (Dashed Style) ---
+    
     warning_date = expiration_date - pd.Timedelta(days=7)
     ax.axvline(x=warning_date, color=STOP_LOSS_COLOR, linestyle='--', linewidth=1, label='7 Days Out', alpha=0.8)
 
-    # Strikes
     ax.axhline(y=short_strike, color='#FF5252', linestyle='-', linewidth=1.2, label='Strikes')
     ax.axhline(y=long_strike, color='#FF5252', linestyle='-', linewidth=1.2)
     ax.axhspan(short_strike, long_strike, color='#FF5252', alpha=0.15)
@@ -146,7 +115,6 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     if crit_price:
         ax.axhline(y=crit_price, color=STOP_LOSS_COLOR, linestyle=':', linewidth=1.2, label='Stop Loss')
 
-    # Formatting
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.spines['bottom'].set_color(text_color)
@@ -167,7 +135,6 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     plt.tight_layout()
     return fig
 
-# --- 2. PROGRESS BAR FUNCTION ---
 def render_profit_bar(profit_pct):
     if profit_pct is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
@@ -208,65 +175,17 @@ def render_profit_bar(profit_pct):
 
 # ---------------- Load Drive State ----------------
 if drive_service:
+    # Use session_state.trades (The global standard for this app)
     st.session_state.trades = load_from_drive(drive_service) or []
 else:
     if "trades" not in st.session_state:
         st.session_state.trades = []
 
-# ---------------- Add Trade ----------------
-with st.form("add_trade", clear_on_submit=True):
-    st.subheader("New Position Entry")
-
-    c1, c2, c3, c4 = st.columns(4)
-    
-    with c1:
-        ticker = st.text_input("Ticker").upper()
-        num_contracts = st.number_input("Contracts", min_value=1, value=1, step=1)
-        
-    with c2:
-        short_strike = st.number_input("Short Strike", min_value=0.0, format="%.2f")
-        long_strike = st.number_input("Long Strike", min_value=0.0, format="%.2f")
-        
-    with c3:
-        expiration = st.date_input("Expiration Date")
-        entry_date = st.date_input("Entry Date")
-        
-    with c4:
-        credit = st.number_input("Credit (Per Share)", min_value=0.0, format="%.2f")
-
-    submitted = st.form_submit_button("Initialize Position")
-
-    if submitted:
-        if not ticker:
-            st.warning("Ticker required.")
-        elif long_strike >= short_strike:
-            st.warning("Long strike must be lower than short strike.")
-        else:
-            trade = {
-                "id": f"{ticker}-{short_strike}-{long_strike}-{expiration.isoformat()}",
-                "ticker": ticker,
-                "contracts": num_contracts, 
-                "short_strike": short_strike,
-                "long_strike": long_strike,
-                "expiration": expiration.isoformat(),
-                "credit": credit,
-                "entry_date": entry_date.isoformat(),
-                "created_at": datetime.utcnow().isoformat(),
-                "cached": {},
-                "pnl_history": []
-            }
-            st.session_state.trades.append(trade)
-            if drive_service:
-                save_to_drive(drive_service, st.session_state.trades)
-            st.success(f"Position initialized: {num_contracts}x {ticker} Puts.")
-
-st.markdown("---")
-
 # ---------------- Display Trades ----------------
 st.subheader("Active Portfolio")
 
 if not st.session_state.trades:
-    st.info("No active trades.")
+    st.info("No active trades. Go to 'Spread Finder' to scan for new opportunities.")
 else:
     for i, t in enumerate(st.session_state.trades):
         cached = t.get("cached", {})
@@ -277,24 +196,17 @@ else:
         contracts = t.get("contracts", 1) 
         
         width = abs(t["short_strike"] - t["long_strike"])
-        
-        # Max Gain = Credit * 100 * Contracts
         max_gain_total = t["credit"] * 100 * contracts
-        
-        # Max Loss = (Width - Credit) * 100 * Contracts
         max_loss_total = (width - t["credit"]) * 100 * contracts
 
-        # Backend Data
         current_price = cached.get("current_price")
         abs_delta = cached.get("abs_delta") 
         if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
         
-        # --- THETA CALCULATION ---
         net_theta = cached.get("net_theta", 0.0)
         daily_theta_dollars = net_theta * 100.0 * contracts 
 
-        # --- POP CALCULATION (1 - Delta) ---
         pop_percent = 0.0
         if abs_delta is not None:
             pop_percent = (1.0 - abs_delta) * 100.0
@@ -323,16 +235,11 @@ else:
             status_msg = "TARGET REACHED"
             status_color = SUCCESS_COLOR
 
-        # --- Color Coding ---
         delta_color = WARNING_COLOR if abs_delta and abs_delta >= 0.40 else SUCCESS_COLOR
         delta_val = f"{abs_delta:.2f}" if abs_delta is not None else "Pending"
-
         spread_color = WARNING_COLOR if spread_value and spread_value >= 150 else SUCCESS_COLOR
         spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
-
         dte_color = WARNING_COLOR if current_dte <= 7 else SUCCESS_COLOR
-        
-        # POP Color
         pop_color = SUCCESS_COLOR if pop_percent >= 60 else "#FFA726"
         if pop_percent < 50: pop_color = WARNING_COLOR
 
@@ -359,10 +266,8 @@ else:
             price_display = f"${current_price:.2f}" if current_price else "$-.--"
             theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
             
-            # --- CARD HTML UPDATE (With Price & Contracts) ---
             left_card_html = (
                 f"<div style='line-height: 1.4; font-size: 15px;'>"
-                # HEADER ROW (Ticker + Price + Theta)
                 f"<div style='display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;'>"
                     f"<h3 style='margin: 0; display: flex; align-items: center; gap: 8px;'>"
                     f"{t['ticker']} "
@@ -371,7 +276,6 @@ else:
                     f"{arrow} {change_str}"
                     f"</span>"
                     f"</h3>"
-                    # Right side: Label + Badge
                     f"<div style='display:flex; flex-direction:column; align-items:flex-end; gap:2px;'>"
                         f"<span style='font-size:10px; color:gray; text-transform:uppercase; letter-spacing:0.5px;'>Daily Theta Gain</span>"
                         f"<div style='background-color: rgba(0, 200, 83, 0.1); border: 1px solid {SUCCESS_COLOR}; color: {SUCCESS_COLOR}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;'>"
@@ -380,21 +284,16 @@ else:
                     f"</div>"
                 f"</div>"
                 
-                # DATA GRID
                 f"<div style='display: grid; grid-template-columns: 1fr 1fr; gap: 2px;'>"
                     f"<div><strong>Short:</strong> {t['short_strike']}</div>"
                     f"<div><strong>Max Gain:</strong> {format_money(max_gain_total)}</div>"
-                    
                     f"<div><strong>Long:</strong> {t['long_strike']}</div>"
                     f"<div><strong>Max Loss:</strong> {format_money(max_loss_total)}</div>"
-                    
                     f"<div><strong>Width:</strong> {width:.2f}</div>"
                     f"<div><strong>Contracts:</strong> {contracts}</div>"
-                    
                     f"<div style='grid-column: span 2;'><strong>Exp:</strong> {t['expiration']}</div>"
                 f"</div>"
                 
-                # STATUS FOOTER (Flexbox for Status Left / POP Right)
                 f"<div style='margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; display: flex; justify-content: space-between; align-items: center;'>"
                     f"<div style='color: {status_color}; font-weight: bold;'>"
                     f"{status_icon} {status_msg}"
