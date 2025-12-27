@@ -10,18 +10,20 @@ from datetime import datetime, timedelta
 from persistence import (
     build_drive_service_from_session,
     save_to_drive,
-    load_from_drive
+    load_from_drive,
+    logout # Added logout for header parity
 )
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Sniper Pro")
 
-# --- CONSTANTS & COLORS (MATCHING DASHBOARD) ---
+# --- CONSTANTS & COLORS ---
 SUCCESS_COLOR = "#00C853"
 WARNING_COLOR = "#d32f2f"
 BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
+WHITE_DIVIDER_HTML = "<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: 10px; margin-bottom: 10px;'>"
 
 # --- INITIALIZE DRIVE SERVICE ---
 drive_service = None
@@ -190,23 +192,18 @@ def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
     last_60 = hist.tail(60).copy()
     dates = last_60.index
     
-    # Ensure Open column exists, fill with Close if missing (for safety)
     if 'Open' not in last_60.columns: last_60['Open'] = last_60['Close']
 
     # 2. Draw Bars (Dashboard Style - Green up, Red down)
-    # Determine colors based on Close vs Open
     bar_colors = np.where(last_60['Close'] >= last_60['Open'], SUCCESS_COLOR, WARNING_COLOR)
-    # Calculate bar height and bottom for ax.bar
     heights = last_60['Close'] - last_60['Open']
     bottoms = last_60['Open']
     
-    #Plot the bars
     ax.bar(dates, heights, bottom=bottoms, color=bar_colors, width=0.8, align='center', alpha=0.9)
 
     # 3. Draw Strikes
     ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, alpha=0.9)
     ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
-    # Shade between strikes across historical data
     ax.fill_between(dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.1)
 
     # 4. Draw IV Cone (Projected future)
@@ -217,35 +214,61 @@ def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
     lower_cone = current_price - vol_move
     future_dates = [dates[-1] + timedelta(days=int(i)) for i in range(1, days_proj+1)]
     
-    # Overlay Cone
     ax.fill_between(future_dates, lower_cone, upper_cone, color='#00FFAA', alpha=0.1)
     ax.plot(future_dates, upper_cone, color='gray', linestyle=':', lw=0.5)
     ax.plot(future_dates, lower_cone, color='gray', linestyle=':', lw=0.5)
     
-    # Shade strikes into the future as well
     ax.fill_between(future_dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.08)
 
     # 5. Formatting
     ax.grid(True, which='major', linestyle=':', color=GRID_COLOR, alpha=0.3)
-    ax.axis('off') # Keep axis off for sparkline look
+    ax.axis('off') 
     
-    # Ensure tight layout so it fits the card well
     plt.tight_layout(pad=0.1)
     return fig
 
 # --- MAIN UI ---
-st.title("🦅 Spread Sniper: Pro")
+
+# ---------------- Header (Matches Dashboard) ----------------
+header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
+
+with header_col1:
+    try:
+        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
+    except Exception:
+        st.write("**DR CAPITAL**")
+
+with header_col2:
+    st.markdown("""
+    <div style='text-align: left; padding-top: 10px;'>
+        <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Spread Finder</h1>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with header_col3:
+    st.write("") 
+    if st.button("Log out"):
+        try:
+            logout()
+        except Exception:
+            st.session_state.pop("credentials", None)
+        st.rerun()
+
+# Solid White Divider
+st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # --- SIDEBAR CONTROLS ---
 with st.sidebar:
     st.header("Scanner Settings")
-    dev_mode = st.checkbox("🛠 Dev Mode (Bypass Filters)", value=True, help="Check this to see ALL valid spread structures.")
+    # Dev Mode OFF by default
+    dev_mode = st.checkbox("🛠 Dev Mode (Bypass Filters)", value=False, help="Check this to see ALL valid spread structures.")
     
     if dev_mode:
         st.warning("⚠️ DEV MODE ACTIVE: Filters are disabled.")
 
-# --- SCAN BUTTON LOGIC ---
-if st.button(f"🔎 Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", type="primary"):
+# --- SCAN BUTTON LOGIC (Removed Emoji) ---
+if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}", type="primary"):
     
     status = st.empty()
     progress = st.progress(0)
@@ -357,8 +380,11 @@ if st.session_state.scan_results is not None:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # --- ADD TO DASHBOARD LOGIC (With Auth Check) ---
+                    # --- ADD TO DASHBOARD LOGIC ---
                     add_key = f"add_mode_{t}_{i}"
+                    
+                    # Spacer to push button down slightly
+                    st.write("") 
                     
                     if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
                         # AUTH CHECK: Only open input if logged in
@@ -368,12 +394,14 @@ if st.session_state.scan_results is not None:
                             st.session_state[add_key] = True
 
                     if st.session_state.get(add_key, False):
-                        st.info("⚙️ Position Sizing")
+                        # Replaced st.info("⚙️...") with clean header
+                        st.markdown("##### Position Sizing")
                         num_contracts = st.number_input(f"Contracts for {t}", min_value=1, value=1, step=1, key=f"contracts_{t}_{i}")
                         
                         col_conf, col_can = st.columns(2)
                         with col_conf:
-                            if st.button("✅ Confirm", key=f"conf_{t}_{i}"):
+                            # Primary button (matches theme/green usually)
+                            if st.button("✅ Confirm", key=f"conf_{t}_{i}", type="primary"):
                                 new_trade = {
                                     "id": f"{t}-{s['short']}-{s['long']}-{s['expiration']}",
                                     "ticker": t,
