@@ -4,82 +4,55 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats as si
-import google.generativeai as genai
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Spread Sniper")
+st.set_page_config(layout="wide", page_title="Spread Sniper Pro")
 
-# 1. Initialize Gemini
-try:
-    if "GOOGLE_API_KEY" in st.secrets:
-        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-except Exception:
-    pass
-
-# 2. UNIVERSE: EXPANDED LIQUIDITY LIST (~60 Tickers)
-# Includes Top Holdings of S&P 500, Nasdaq 100, and High-Beta Momentum Stocks
+# 1. UNIVERSE: LIQUIDITY LIST (~60 Tickers)
 LIQUID_TICKERS = [
-    # INDICES & ETFS
     "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "SMH", "ARKK",
-    # MAGNIFICENT 7 + TECH
     "NVDA", "TSLA", "AAPL", "MSFT", "AMD", "AMZN", "META", "GOOGL", "NFLX", 
     "AVGO", "QCOM", "INTC", "MU", "ARM", "PLTR", "CRM", "ADBE",
-    # HIGH BETA / CRYPTO PROXIES
     "COIN", "MSTR", "HOOD", "DKNG", "UBER", "ABNB", "SQ", "ROKU", "SHOP",
-    # FINANCIALS
     "JPM", "BAC", "WFC", "GS", "MS", "C", "V", "MA", "PYPL",
-    # RETAIL & CONSUMER
     "DIS", "NKE", "SBUX", "MCD", "WMT", "TGT", "COST", "HD", "LOW",
-    # INDUSTRIAL & ENERGY
     "BA", "CAT", "GE", "F", "GM", "XOM", "CVX", "COP"
 ]
 
 # --- CUSTOM CSS ---
 st.markdown("""
 <style>
-    /* Metric Typography */
     .metric-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px; }
     .metric-value { font-size: 16px; font-weight: 700; color: #FFF; }
-    
-    /* Pills & Badges */
     .price-pill-red { background-color: rgba(255, 75, 75, 0.15); color: #ff4b4b; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
     .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
     .strategy-badge { border: 1px solid #d4ac0d; color: #d4ac0d; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
-    
-    /* Footer Box */
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
+    .warning-box { background-color: rgba(255, 165, 0, 0.1); border: 1px solid rgba(255, 165, 0, 0.3); color: orange; padding: 5px; font-size: 12px; border-radius: 4px; margin-bottom: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
-
-# --- MATH & CALCULATORS ---
-
-def newton_vol_put(S, K, T, P, r, sigma):
-    """Back-solves IV for a Put option."""
-    try:
-        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        d2 = (np.log(S / K) + (r - 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        fx = K * np.exp(-r * T) * si.norm.cdf(-d2, 0.0, 1.0) - S * si.norm.cdf(-d1, 0.0, 1.0) - P
-        vega = S * np.sqrt(T) * si.norm.pdf(d1, 0.0, 1.0)
-        return sigma - fx / vega
-    except:
-        return sigma
-
+# --- MATH HELPER ---
 def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_rate=0.045):
-    """Wrapper for Newton-Raphson solver."""
-    sigma = 0.5 
+    """Approximation for display purposes."""
     try:
-        for i in range(50):
-            diff = newton_vol_put(price, strike, time_to_exp, market_price, risk_free_rate, sigma)
-            sigma = diff
-            if abs(diff - sigma) < 1e-5: break
+        # Simplified IV Newton-Raphson
+        sigma = 0.5
+        for i in range(20):
+            d1 = (np.log(price / strike) + (risk_free_rate + 0.5 * sigma ** 2) * time_to_exp) / (sigma * np.sqrt(time_to_exp))
+            d2 = d1 - sigma * np.sqrt(time_to_exp)
+            put_price = strike * np.exp(-risk_free_rate * time_to_exp) * si.norm.cdf(-d2) - price * si.norm.cdf(-d1)
+            vega = price * np.sqrt(time_to_exp) * si.norm.pdf(d1)
+            diff = put_price - market_price
+            if abs(diff) < 1e-5: break
+            sigma = sigma - diff / vega
         return abs(sigma)
     except: return 0.0
 
+# --- DATA FETCHING ---
 @st.cache_data(ttl=3600)
 def get_stock_data(ticker):
-    """Fetches history and calculates Volatility Rank (Proxy)."""
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="1y")
@@ -89,7 +62,7 @@ def get_stock_data(ticker):
         prev_price = hist['Close'].iloc[-2]
         change_pct = ((current_price - prev_price) / prev_price) * 100
         
-        # --- PROXY: REALIZED VOLATILITY RANK ---
+        # 1. HV Rank (Proxy for IV Rank)
         hist['Returns'] = hist['Close'].pct_change()
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
         
@@ -99,140 +72,185 @@ def get_stock_data(ticker):
             if mx != mn: 
                 rank = ((hist['HV'].iloc[-1] - mn) / (mx - mn)) * 100
 
-        result = {
+        # 2. Earnings Check
+        earnings_days = 999
+        try:
+            cal = stock.calendar
+            if cal is not None and not cal.empty:
+                # Handle different yfinance return formats
+                potential_date = cal.iloc[0][0] 
+                if isinstance(potential_date, (list, tuple)):
+                    future = [d for d in potential_date if d > datetime.now().date()]
+                    if future: earnings_days = (future[0] - datetime.now().date()).days
+                elif hasattr(potential_date, 'date'):
+                    if potential_date.date() > datetime.now().date():
+                        earnings_days = (potential_date.date() - datetime.now().date()).days
+        except: pass
+
+        return {
             "price": current_price,
             "change_pct": change_pct,
             "rank": rank,
+            "earnings_days": earnings_days,
             "hist": hist
         }
-        return result
     except: return None
 
-def find_credit_spread(stock_obj, current_price, target_dte=30, width=5.0):
-    """Finds the 30-Delta Put Credit Spread."""
+# --- TRADE LOGIC ---
+def find_optimal_spread(stock_obj, current_price, target_dte=30):
+    """
+    Finds a High Quality Put Credit Spread.
+    Criteria: 
+    - ~30 Delta Short
+    - $5 Width
+    - Min Credit > $0.40
+    - Liquid (Tight Bid/Ask)
+    """
     try:
         exps = stock_obj.options
         if not exps: return None
+        
+        # 1. Expiration (30-45 Days ideal)
         target_date = datetime.now() + timedelta(days=target_dte)
         best_exp = min(exps, key=lambda x: abs((datetime.strptime(x, "%Y-%m-%d") - target_date).days))
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
-        if dte < 7: return None 
+        
+        # Reject if too close (<20 days) or too far (>50 days)
+        if dte < 20 or dte > 50: return None 
 
         chain = stock_obj.option_chain(best_exp)
         puts = chain.puts
         
-        # Target 30 Delta
-        target_strike = current_price * 0.96
+        # 2. Short Leg Selection (Proxy: 4-5% OTM for High IV stocks)
+        # For Rank > 80, we want to be slightly further OTM than usual to be safe
+        target_strike = current_price * 0.95 
         short_leg = puts.iloc[(puts['strike'] - target_strike).abs().argsort()[:1]]
         if short_leg.empty: return None
         
         short_strike = short_leg.iloc[0]['strike']
-        short_mid = (short_leg.iloc[0]['bid'] + short_leg.iloc[0]['ask']) / 2
+        short_bid = short_leg.iloc[0]['bid']
+        short_ask = short_leg.iloc[0]['ask']
         
-        long_leg = puts.iloc[(puts['strike'] - (short_strike - width)).abs().argsort()[:1]]
-        if long_leg.empty: return None
-        long_strike = long_leg.iloc[0]['strike']
-        
-        # Strict Width Check (Allowing small variance for weird strikes)
-        if abs((short_strike - long_strike) - width) > 1.0: return None
+        # 3. Liquidity Check (Spread tightness)
+        if (short_ask - short_bid) > 0.50: # Spread is too wide, hard to fill
+            return None
 
-        credit = short_leg.iloc[0]['bid'] - long_leg.iloc[0]['ask']
+        # 4. Long Leg Selection ($5 Width)
+        long_strike_target = short_strike - 5.0
+        long_leg = puts.iloc[(puts['strike'] - long_strike_target).abs().argsort()[:1]]
+        if long_leg.empty: return None
+        
+        long_strike = long_leg.iloc[0]['strike']
+        long_ask = long_leg.iloc[0]['ask']
+        
+        # Verify Width
+        if abs((short_strike - long_strike) - 5.0) > 1.0: return None
+
+        # 5. Credit & ROI Calculation
+        credit = short_bid - long_ask # Conservative: Sell at Bid, Buy at Ask
         max_loss = (short_strike - long_strike) - credit
         
-        # Calculate Spread IV (Live)
-        iv = get_implied_volatility(current_price, short_strike, dte/365, short_mid) * 100
+        # 6. Minimum Premium Filter (The "Penny Picker" Check)
+        if credit < 0.40: # If we aren't collecting at least $0.40, it's not worth the risk
+            return None
+
         roi = (credit / max_loss) * 100 if max_loss > 0 else 0
+        iv = get_implied_volatility(current_price, short_strike, dte/365, (short_bid+short_ask)/2) * 100
 
-        result = {
-            "expiration": best_exp, 
-            "dte": dte, 
-            "short": short_strike, 
-            "long": long_strike,
-            "credit": credit, 
-            "max_loss": max_loss, 
-            "iv": iv,
-            "roi": roi
+        return {
+            "expiration": best_exp, "dte": dte, 
+            "short": short_strike, "long": long_strike,
+            "credit": credit, "max_loss": max_loss, 
+            "iv": iv, "roi": roi
         }
-        return result
+    except: return None
 
-    except Exception:
-        return None
-
-def plot_sparkline_cone(hist, price, iv):
-    """Generates the mini chart with expected move cone."""
+def plot_cone(hist, price, iv):
+    """Visualizes the risk cone."""
     fig, ax = plt.subplots(figsize=(4, 1.2)) 
     fig.patch.set_facecolor('#0E1117')
     ax.set_facecolor('#0E1117')
     
-    # Last 60 Days History
     last_60 = hist['Close'].tail(60)
     dates = last_60.index
     
-    # Projected Cone (30 Days out)
     days_proj = 30
-    safe_iv = iv if iv > 0 else 20 
+    safe_iv = iv if iv > 0 else 30
     vol_move = price * (safe_iv/100) * np.sqrt(np.arange(1, days_proj+1)/365)
     
     upper = price + vol_move
     lower = price - vol_move
     future_dates = [dates[-1] + timedelta(days=int(i)) for i in range(1, days_proj+1)]
     
-    # Plotting
     ax.plot(dates, last_60, color='#00FFAA', lw=1.2)
     ax.fill_between(future_dates, lower, upper, color='#00FFAA', alpha=0.15)
     ax.plot(future_dates, upper, color='gray', linestyle=':', lw=0.5)
     ax.plot(future_dates, lower, color='gray', linestyle=':', lw=0.5)
-    
     ax.axis('off')
     return fig
 
 # --- MAIN UI ---
-st.title("🦅 Spread Sniper")
-st.markdown("Scanning for **Rank > 80%**, **30 DTE**, **30 Delta** Put Credit Spreads.")
+st.title("🦅 Spread Sniper: Pro")
+st.markdown("""
+Scanning for **"Best of Best"** opportunities:
+* **Rank > 80%** (Extreme Fear)
+* **Credit > $0.40** (Meaningful Yield)
+* **Earnings Safe** (No binary events during trade)
+""")
 
-if st.button("🔎 Scan Market (Wide Net)", type="primary"):
+if st.button("🔎 Scan Market (Quality Filter)", type="primary"):
     
     status = st.empty()
     progress = st.progress(0)
-    
     results = []
     
-    # 1. SCAN LOOP
     for i, ticker in enumerate(LIQUID_TICKERS):
         status.caption(f"Analyzing {ticker}...")
         progress.progress((i + 1) / len(LIQUID_TICKERS))
         
-        # A. Fetch Data & Calculate Rank
+        # 1. Fetch & Rank
         data = get_stock_data(ticker)
         if not data: continue
         
-        # B. STRICT 80% FILTER
-        if data['rank'] < 80:
-            continue 
+        # FILTER 1: Volatility Rank
+        if data['rank'] < 80: continue 
 
-        # C. Find Trade Structure
+        # 2. Find Trade
         obj = yf.Ticker(ticker)
-        spread = find_credit_spread(obj, data['price'])
+        spread = find_optimal_spread(obj, data['price'])
         
         if spread:
-            # Score = Rank (High is good) + ROI (High is good)
+            # FILTER 2: Earnings Safety Check
+            # If Earnings are happening BEFORE expiration, it's risky.
+            is_earnings_risky = False
+            if data['earnings_days'] < spread['dte'] + 2:
+                is_earnings_risky = True
+                # In "Sniper" mode, we might skip these entirely, 
+                # or just flag them heavily. Let's SKIP them for "Best of Best".
+                continue 
+
+            # Score = Rank + ROI
             score = data['rank'] + spread['roi']
             results.append({"ticker": ticker, "data": data, "spread": spread, "score": score})
     
     progress.empty()
     status.empty()
     
-    # 2. RESULTS DISPLAY
     if not results:
-        st.info("Market is extremely quiet. Even with 60+ tickers, no 80% Rank setups were found.")
-        st.caption("Try checking back during market hours or when VIX > 15.")
+        st.info("No 'Perfect' setups found.")
+        st.markdown("""
+        **Why?** The filters are very strict:
+        1. IV Rank must be > 80%.
+        2. Must collect > $0.40 credit.
+        3. Must NOT have earnings in the next 30 days.
+        
+        *Try checking back when market fear (VIX) is higher.*
+        """)
     else:
         results = sorted(results, key=lambda x: x['score'], reverse=True)
-        
-        st.success(f"Found {len(results)} High-Probability Opportunities")
+        st.success(f"Found {len(results)} Prime Opportunities")
         
         cols = st.columns(3)
-        
         for i, res in enumerate(results):
             t = res['ticker']
             d = res['data']
@@ -240,8 +258,6 @@ if st.button("🔎 Scan Market (Wide Net)", type="primary"):
             
             with cols[i % 3]:
                 with st.container(border=True):
-                    
-                    # --- HEADER ---
                     pill_class = "price-pill-red" if d['change_pct'] < 0 else "price-pill-green"
                     st.markdown(f"""
                     <div style="display: flex; justify-content: space-between; align-items: flex-start;">
@@ -249,13 +265,12 @@ if st.button("🔎 Scan Market (Wide Net)", type="primary"):
                             <div style="font-size: 22px; font-weight: 900; color: white; line-height: 1;">{t}</div>
                             <div style="margin-top: 4px;"><span class="{pill_class}">${d['price']:.2f} ({d['change_pct']:.2f}%)</span></div>
                         </div>
-                        <div class="strategy-badge">PUT SPREAD</div>
+                        <div class="strategy-badge">PRIME SETUP</div>
                     </div>
                     """, unsafe_allow_html=True)
                     
                     st.divider()
 
-                    # --- METRICS GRID ---
                     c1, c2 = st.columns(2)
                     with c1:
                         st.markdown(f"""
@@ -276,10 +291,9 @@ if st.button("🔎 Scan Market (Wide Net)", type="primary"):
 
                     st.markdown("---")
                     
-                    # --- VISUAL & RANK ---
                     vc1, vc2 = st.columns([2, 1])
                     with vc1:
-                         st.pyplot(plot_sparkline_cone(d['hist'], d['price'], s['iv']), use_container_width=True)
+                         st.pyplot(plot_cone(d['hist'], d['price'], s['iv']), use_container_width=True)
                     with vc2:
                         st.markdown(f"""
                         <div class="metric-label" style="text-align: right;">IV Rank</div>
@@ -289,7 +303,6 @@ if st.button("🔎 Scan Market (Wide Net)", type="primary"):
                         <div class="metric-value" style="text-align: right; color: #d4ac0d;">{res['score']:.0f}</div>
                         """, unsafe_allow_html=True)
 
-                    # --- FOOTER ---
                     st.markdown(f"""
                     <div class="roc-box">
                         <span style="font-size:11px; color: #00c864; text-transform: uppercase; letter-spacing: 1px;">Return on Capital</span><br>
@@ -297,7 +310,7 @@ if st.button("🔎 Scan Market (Wide Net)", type="primary"):
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    if st.button(f"Add {t} to Dashboard", key=f"btn_{t}", use_container_width=True):
+                    if st.button(f"Add {t}", key=f"btn_{t}", use_container_width=True):
                         if 'portfolio' not in st.session_state: st.session_state.portfolio = []
                         st.session_state.portfolio.append(res)
-                        st.toast(f"{t} added to tracking!")
+                        st.toast(f"{t} added!")
