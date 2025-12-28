@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import numpy as np
 from datetime import datetime
 
 # Import persistence
@@ -15,10 +16,26 @@ from persistence import (
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Sniper: Journal")
 
-# --- CONSTANTS ---
+# --- CONSTANTS & STYLING ---
 SUCCESS_COLOR = "#00C853"
 WARNING_COLOR = "#d32f2f"
 NEUTRAL_COLOR = "#757575"
+BG_COLOR = '#0E1117'
+TEXT_COLOR = '#FAFAFA'
+
+# Configure Matplotlib for Dark Theme
+plt.rcParams.update({
+    "figure.facecolor": BG_COLOR,
+    "axes.facecolor": BG_COLOR,
+    "axes.edgecolor": "#444444",
+    "axes.labelcolor": TEXT_COLOR,
+    "xtick.color": TEXT_COLOR,
+    "ytick.color": TEXT_COLOR,
+    "text.color": TEXT_COLOR,
+    "axes.grid": True,
+    "grid.color": "#444444",
+    "grid.alpha": 0.3
+})
 
 # --- AUTH CHECK ---
 drive_service = None
@@ -62,7 +79,7 @@ if not raw_logs:
 # Convert to DataFrame
 df = pd.DataFrame(raw_logs)
 
-# Data Cleaning (Ensure types)
+# Data Cleaning
 try:
     df['Realized_PL'] = pd.to_numeric(df['Realized_PL'], errors='coerce').fillna(0.0)
     df['Contracts'] = pd.to_numeric(df['Contracts'], errors='coerce').fillna(1)
@@ -73,7 +90,7 @@ except Exception as e:
     st.error(f"Data formatting error: {e}")
     st.stop()
 
-# --- ANALYTICS ENGINE ("The Edge Hunter") ---
+# --- ANALYTICS ENGINE ---
 total_trades = len(df)
 wins = df[df['Realized_PL'] > 0]
 losses = df[df['Realized_PL'] <= 0]
@@ -84,13 +101,9 @@ win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
 avg_win = wins['Realized_PL'].mean() if not wins.empty else 0
 avg_loss = losses['Realized_PL'].mean() if not losses.empty else 0
 
-# Profit Factor
 gross_profit = wins['Realized_PL'].sum()
 gross_loss = abs(losses['Realized_PL'].sum())
 profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float('inf')
-
-# Expectancy per trade
-expectancy = (total_pl / total_trades) if total_trades > 0 else 0
 
 # --- METRICS ROW ---
 m1, m2, m3, m4, m5 = st.columns(5)
@@ -102,45 +115,74 @@ m5.metric("Avg Loss", f"${avg_loss:.2f}", delta_color="inverse")
 
 st.markdown("---")
 
-# --- VISUALIZATION ROW ---
+# --- CHARTS (Matplotlib) ---
 c1, c2 = st.columns([2, 1])
 
 with c1:
     st.subheader("Equity Curve")
-    # Sort by date for proper curve
-    df_sorted = df.sort_values(by="Exit_Date")
-    df_sorted['Cumulative_PL'] = df_sorted['Realized_PL'].cumsum()
-    
-    fig_equity = px.line(df_sorted, x='Exit_Date', y='Cumulative_PL', 
-                         markers=True, title="Account Growth")
-    fig_equity.update_layout(xaxis_title="Date", yaxis_title="Total P&L ($)", 
-                             plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-    fig_equity.update_traces(line_color=SUCCESS_COLOR, line_width=3)
-    st.plotly_chart(fig_equity, use_container_width=True)
+    if not df.empty:
+        df_sorted = df.sort_values(by="Exit_Date")
+        df_sorted['Cumulative_PL'] = df_sorted['Realized_PL'].cumsum()
+        
+        fig, ax = plt.subplots(figsize=(8, 4))
+        
+        # Plot Line
+        ax.plot(df_sorted['Exit_Date'], df_sorted['Cumulative_PL'], color=SUCCESS_COLOR, linewidth=2, marker='o', markersize=4)
+        
+        # Fill Area
+        ax.fill_between(df_sorted['Exit_Date'], df_sorted['Cumulative_PL'], color=SUCCESS_COLOR, alpha=0.1)
+        
+        # Formatting
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+        ax.set_ylabel("Total P&L ($)")
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        st.pyplot(fig, use_container_width=True)
+    else:
+        st.caption("Not enough data for chart.")
 
 with c2:
-    st.subheader("Win/Loss Distribution")
-    fig_pie = px.pie(names=['Wins', 'Losses'], values=[len(wins), len(losses)], 
-                     color=['Wins', 'Losses'], 
-                     color_discrete_map={'Wins': SUCCESS_COLOR, 'Losses': WARNING_COLOR},
-                     hole=0.4)
-    fig_pie.update_layout(showlegend=False, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-    st.plotly_chart(fig_pie, use_container_width=True)
+    st.subheader("Win/Loss Ratio")
+    if total_trades > 0:
+        fig2, ax2 = plt.subplots(figsize=(4, 4))
+        
+        sizes = [len(wins), len(losses)]
+        labels = ['Wins', 'Losses']
+        colors = [SUCCESS_COLOR, WARNING_COLOR]
+        
+        # Donut Chart
+        wedges, texts, autotexts = ax2.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', 
+                                           startangle=90, pctdistance=0.85, textprops={'color':"white"})
+        
+        # Draw Circle for Donut
+        centre_circle = plt.Circle((0,0),0.70,fc=BG_COLOR)
+        fig2.gca().add_artist(centre_circle)
+        
+        ax2.axis('equal')  
+        st.pyplot(fig2, use_container_width=True)
+    else:
+        st.caption("No trades.")
 
-# --- TICKER PERFORMANCE (Bar Chart) ---
+# --- TICKER PERFORMANCE (Matplotlib Bar) ---
 st.subheader("Performance by Ticker")
-ticker_perf = df.groupby('Ticker')['Realized_PL'].sum().reset_index()
-ticker_perf = ticker_perf.sort_values(by='Realized_PL', ascending=False)
+if not df.empty:
+    ticker_perf = df.groupby('Ticker')['Realized_PL'].sum().reset_index()
+    ticker_perf = ticker_perf.sort_values(by='Realized_PL', ascending=False)
 
-# Color bars green/red
-colors = [SUCCESS_COLOR if x > 0 else WARNING_COLOR for x in ticker_perf['Realized_PL']]
-
-fig_bar = go.Figure(data=[
-    go.Bar(x=ticker_perf['Ticker'], y=ticker_perf['Realized_PL'], marker_color=colors)
-])
-fig_bar.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', 
-                      xaxis_title="Ticker", yaxis_title="Net P&L ($)")
-st.plotly_chart(fig_bar, use_container_width=True)
+    fig3, ax3 = plt.subplots(figsize=(10, 4))
+    
+    # Color mapping
+    bar_colors = [SUCCESS_COLOR if x > 0 else WARNING_COLOR for x in ticker_perf['Realized_PL']]
+    
+    ax3.bar(ticker_perf['Ticker'], ticker_perf['Realized_PL'], color=bar_colors, alpha=0.9)
+    
+    ax3.set_ylabel("Net P&L ($)")
+    ax3.axhline(0, color='gray', linewidth=0.8)
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
+    
+    st.pyplot(fig3, use_container_width=True)
 
 st.markdown("---")
 
@@ -179,8 +221,7 @@ for i, row in df.iloc[::-1].iterrows():
             with c_act:
                 # Delete Button
                 # Note: We pass 'i' which is the DataFrame index. 
-                # This matches the list order assuming we haven't sorted the DF drastically differently than the sheet order.
-                # For safety in a real app, match by ID, but for this simpler version, index works if not filtered.
+                # This ensures we are targeting the correct row in the original list.
                 if st.button("🗑 Delete Log", key=f"del_{i}"):
                     if delete_log_entry(drive_service, i):
                         st.success("Deleted. Refreshing...")
