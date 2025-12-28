@@ -36,6 +36,21 @@ def _get_oauth_config() -> Dict[str, str]:
         st.stop()
     return st.secrets["google_oauth"]
 
+def _get_web_client_config(cfg: Dict[str, str]) -> Dict[str, Any]:
+    """
+    Constructs the full client config dictionary required by google_auth_oauthlib.
+    Injects standard Google auth URIs if missing.
+    """
+    return {
+        "web": {
+            "client_id": cfg["client_id"],
+            "client_secret": cfg["client_secret"],
+            "redirect_uris": [cfg["redirect_uri"]],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
+
 def _save_local_token(creds_dict: Dict[str, Any]) -> None:
     try:
         with open(LOCAL_TOKEN_FILE, "w") as f:
@@ -94,7 +109,7 @@ def get_creds_from_session():
             return creds
         return creds
     except Exception as e:
-        st.error(f"Auth Refresh Error: {e}")
+        # Silently fail refresh to force re-login
         return None
 
 def build_drive_service_from_session():
@@ -119,21 +134,29 @@ def ensure_logged_in():
     if "code" in st.query_params:
         from google_auth_oauthlib.flow import Flow
         cfg = _get_oauth_config()
-        flow = Flow.from_client_config(
-            {"web": cfg}, scopes=SCOPES, redirect_uri=cfg["redirect_uri"]
-        )
-        flow.fetch_token(code=st.query_params["code"])
-        creds_dict = _oauth_to_credentials_dict(flow.credentials)
-        st.session_state["credentials"] = creds_dict
-        _save_local_token(creds_dict)
-        st.query_params.clear()
-        st.rerun()
+        client_config = _get_web_client_config(cfg)
+        
+        try:
+            flow = Flow.from_client_config(
+                client_config, scopes=SCOPES, redirect_uri=cfg["redirect_uri"]
+            )
+            flow.fetch_token(code=st.query_params["code"])
+            creds_dict = _oauth_to_credentials_dict(flow.credentials)
+            st.session_state["credentials"] = creds_dict
+            _save_local_token(creds_dict)
+            st.query_params.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Login failed: {e}")
+            st.stop()
 
     # Otherwise show login button
     from google_auth_oauthlib.flow import Flow
     cfg = _get_oauth_config()
+    client_config = _get_web_client_config(cfg)
+    
     flow = Flow.from_client_config(
-        {"web": cfg}, scopes=SCOPES, redirect_uri=cfg["redirect_uri"]
+        client_config, scopes=SCOPES, redirect_uri=cfg["redirect_uri"]
     )
     auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline", include_granted_scopes="true")
     
@@ -359,26 +382,4 @@ def delete_log_entry(drive_service, row_index):
                 sheet_id = s['properties']['sheetId']
                 break
         
-        # Row 0 in data is Row 2 in Sheet (Row 1 is header)
-        # API uses 0-based index for whole sheet.
-        # Header is index 0. Data start at index 1.
-        # So data_row_index 0 -> Sheet Row Index 1.
-        sheet_row_index = row_index + 1
-
-        body = {
-            "requests": [{
-                "deleteDimension": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "dimension": "ROWS",
-                        "startIndex": sheet_row_index,
-                        "endIndex": sheet_row_index + 1
-                    }
-                }
-            }]
-        }
-        sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
-        return True
-    except Exception as e:
-        print(f"Delete Error: {e}")
-        return False
+        # Row 0 in data is Row 2 in Sheet (
