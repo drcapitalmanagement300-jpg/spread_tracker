@@ -63,19 +63,6 @@ st.markdown("""
     .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
     .strategy-badge { border: 1px solid #d4ac0d; color: #d4ac0d; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
-    
-    /* MATCHING BUTTON STYLE EXACTLY */
-    .earnings-box { 
-        background-color: transparent; 
-        border: 1px solid rgba(250, 250, 250, 0.2); 
-        color: white; 
-        padding: 0.5rem; 
-        border-radius: 0.5rem; 
-        text-align: center; 
-        margin-top: 12px;
-        font-size: 14px;
-        font-weight: 500;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -115,21 +102,19 @@ def get_stock_data(ticker):
             if mx != mn: 
                 rank = ((hist['HV'].iloc[-1] - mn) / (mx - mn)) * 100
 
-        # --- ROBUST EARNINGS FETCH ---
+        # --- ROBUST EARNINGS FETCH (Used for filtering, not display) ---
         earnings_days = 999
         next_earnings_date_str = "Unknown"
         
         try:
             future_dates = []
             
-            # Method 1: get_earnings_dates() - Most reliable for future
+            # Method 1: get_earnings_dates()
             try:
                 dates_df = stock.get_earnings_dates(limit=8)
                 if dates_df is not None and not dates_df.empty:
                     for d in dates_df.index:
-                        # Ensure timezone naive for comparison
-                        if d.tzinfo:
-                            d = d.tz_localize(None)
+                        if d.tzinfo: d = d.tz_localize(None)
                         if d.date() > datetime.now().date():
                             future_dates.append(d.date())
             except: pass
@@ -139,7 +124,6 @@ def get_stock_data(ticker):
                 try:
                     cal = stock.calendar
                     if cal is not None:
-                        # Handle Dict return
                         if isinstance(cal, dict):
                             for k in ['Earnings Date', 'Earnings High']:
                                 if k in cal:
@@ -148,7 +132,6 @@ def get_stock_data(ticker):
                                         for d in ds:
                                             if d.date() > datetime.now().date():
                                                 future_dates.append(d.date())
-                        # Handle DataFrame return
                         elif isinstance(cal, pd.DataFrame) and not cal.empty:
                             for val in cal.values.flatten():
                                 if isinstance(val, (datetime, pd.Timestamp)):
@@ -159,7 +142,7 @@ def get_stock_data(ticker):
             if future_dates:
                 next_date = min(future_dates)
                 earnings_days = (next_date - datetime.now().date()).days
-                next_earnings_date_str = next_date.strftime("%b %d") # e.g. "Feb 21"
+                next_earnings_date_str = next_date.strftime("%b %d")
                 
         except Exception:
             pass 
@@ -410,14 +393,6 @@ if st.session_state.scan_results is not None:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # --- EARNINGS DISPLAY (Updated Style) ---
-                    earnings_label = d['earnings_date_str'] if d['earnings_date_str'] != "Unknown" else "Unknown"
-                    st.markdown(f"""
-                    <div class="earnings-box">
-                        Next Earnings: {earnings_label}
-                    </div>
-                    """, unsafe_allow_html=True)
-
                     # --- ADD TO DASHBOARD LOGIC ---
                     add_key = f"add_mode_{t}_{i}"
                     
