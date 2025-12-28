@@ -11,7 +11,7 @@ from persistence import (
     build_drive_service_from_session,
     save_to_drive,
     load_from_drive,
-    log_completed_trade, # <--- Using the new Sheets logger
+    log_completed_trade, 
     logout,
 )
 
@@ -28,10 +28,8 @@ WHITE_DIVIDER_HTML = "<hr style='border: 0; border-top: 1px solid #FFFFFF; margi
 st_autorefresh(interval=60_000, key="ui_refresh")
 
 # ---------------- Auth / Drive ----------------
-try:
-    ensure_logged_in()
-except Exception:
-    st.warning("Google OAuth configured.")
+# FIXED: Removed the try/except block that was hiding the login button
+ensure_logged_in()
 
 drive_service = None
 try:
@@ -418,9 +416,6 @@ with ctl2:
             if loaded is not None:
                 st.session_state.trades = loaded
                 st.rerun()
-
-# Solid White Divider
-st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # ---------------- External Tools ----------------
 st.subheader("External Tools")
