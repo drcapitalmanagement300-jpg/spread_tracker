@@ -6,13 +6,12 @@ import matplotlib.dates as mdates
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- Persistence ----------------
-# UPDATED IMPORTS: Added log_completed_trade, removed log_trade_to_csv
 from persistence import (
     ensure_logged_in,
     build_drive_service_from_session,
     save_to_drive,
     load_from_drive,
-    log_completed_trade, 
+    log_completed_trade, # <--- Using the new Sheets logger
     logout,
 )
 
@@ -335,10 +334,10 @@ else:
                         with col_log2:
                             close_notes = st.text_area("Notes", height=70)
                         
-                        # --- UPDATED CLOSE LOGIC START ---
+                        # --- UPDATED CLOSE LOGIC ---
                         if st.form_submit_button("Confirm Close"):
                             if drive_service:
-                                # Prepare data dictionary for the new logging function
+                                # Prepare trade data for logging
                                 trade_data = t.copy()
                                 trade_data['debit_paid'] = debit_paid
                                 trade_data['notes'] = close_notes
@@ -357,7 +356,6 @@ else:
                                 st.session_state.trades.pop(i)
                                 del st.session_state[f"close_mode_{i}"]
                                 st.rerun()
-                        # --- UPDATED CLOSE LOGIC END ---
 
                     if st.button("Cancel", key=f"cancel_{i}"):
                         del st.session_state[f"close_mode_{i}"]
