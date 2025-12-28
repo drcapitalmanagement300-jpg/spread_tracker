@@ -6,12 +6,13 @@ import matplotlib.dates as mdates
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- Persistence ----------------
+# UPDATED IMPORTS: Added log_completed_trade, removed log_trade_to_csv
 from persistence import (
     ensure_logged_in,
     build_drive_service_from_session,
     save_to_drive,
     load_from_drive,
-    log_trade_to_csv, 
+    log_completed_trade, 
     logout,
 )
 
@@ -334,20 +335,30 @@ else:
                         with col_log2:
                             close_notes = st.text_area("Notes", height=70)
                         
+                        # --- UPDATED CLOSE LOGIC START ---
                         if st.form_submit_button("Confirm Close"):
                             if drive_service:
-                                if log_trade_to_csv(drive_service, t, debit_paid, close_notes):
+                                # Prepare data dictionary for the new logging function
+                                trade_data = t.copy()
+                                trade_data['debit_paid'] = debit_paid
+                                trade_data['notes'] = close_notes
+                                
+                                # Use new function: log_completed_trade
+                                if log_completed_trade(drive_service, trade_data):
                                     st.success(f"Logged {t['ticker']}")
                                     st.session_state.trades.pop(i)
                                     save_to_drive(drive_service, st.session_state.trades)
                                     del st.session_state[f"close_mode_{i}"]
                                     st.rerun()
                                 else:
-                                    st.error("Drive Error")
+                                    st.error("Drive Error: Could not log to sheet.")
                             else:
+                                # Fallback if no drive service (just delete locally)
                                 st.session_state.trades.pop(i)
                                 del st.session_state[f"close_mode_{i}"]
                                 st.rerun()
+                        # --- UPDATED CLOSE LOGIC END ---
+
                     if st.button("Cancel", key=f"cancel_{i}"):
                         del st.session_state[f"close_mode_{i}"]
                         st.rerun()
