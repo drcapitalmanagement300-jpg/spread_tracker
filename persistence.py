@@ -2,17 +2,15 @@ import streamlit as st
 import json
 import io
 import os
-import csv
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
-from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials as OAuthCredentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
-# --- IMPORT LOCK MANAGER ---
+# --- IMPORT LOCK MANAGER (Optional) ---
 try:
     from google_drive import DriveLockManager
 except ImportError:
@@ -20,50 +18,24 @@ except ImportError:
 
 # ----------------------------- Config -----------------------------
 DRIVE_FILE_NAME = "credit_spreads.json"
-DRIVE_SCOPES = [
+SPREADSHEET_NAME = "SpreadSniper_Data"
+
+# Scopes: Drive for JSON file, Spreadsheets for Log
+SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets"
 ]
 LOCAL_TOKEN_FILE = "google_oauth_token.json"
 DRIVE_TOKEN_FILE = "credit_spreads_token.json"
 
-# ----------------------------- OAuth Config Utilities -----------------------------
+# ----------------------------- OAuth Helpers -----------------------------
 def _get_oauth_config() -> Dict[str, str]:
-    """Load OAuth credentials from Streamlit secrets."""
     if "google_oauth" not in st.secrets:
         st.error("Missing google_oauth in Streamlit secrets.")
         st.stop()
+    return st.secrets["google_oauth"]
 
-    cfg = st.secrets["google_oauth"]
-    for key in ("client_id", "client_secret", "redirect_uri"):
-        if key not in cfg:
-            st.error(f"google_oauth secret missing required key: {key}")
-            st.stop()
-
-    return cfg
-
-def _get_redirect_uri() -> str:
-    return st.secrets["google_oauth"]["redirect_uri"]
-
-def get_flow() -> Flow:
-    """Create OAuth flow object."""
-    cfg = _get_oauth_config()
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": cfg["client_id"],
-                "client_secret": cfg["client_secret"],
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [cfg["redirect_uri"]],
-            }
-        },
-        scopes=DRIVE_SCOPES,
-    )
-    flow.redirect_uri = cfg["redirect_uri"]
-    return flow
-
-# ----------------------------- Helper: local token store -----------------------------
 def _save_local_token(creds_dict: Dict[str, Any]) -> None:
     try:
         with open(LOCAL_TOKEN_FILE, "w") as f:
@@ -75,108 +47,14 @@ def _load_local_token() -> Optional[Dict[str, Any]]:
     try:
         if os.path.exists(LOCAL_TOKEN_FILE):
             with open(LOCAL_TOKEN_FILE, "r") as f:
-                data = json.load(f)
-                return data
+                return json.load(f)
     except Exception:
         return None
-    return None
-
-# ----------------------------- Drive file helpers -----------------------------
-def _find_file_id(service, filename: str) -> Optional[str]:
-    try:
-        q = f"name = '{filename}' and trashed = false"
-        resp = service.files().list(
-            q=q,
-            spaces="drive",
-            fields="files(id,name)"
-        ).execute()
-        files = resp.get("files", [])
-        return files[0]["id"] if files else None
-    except Exception:
-        return None
-
-def _download_file(service, file_id: str) -> Optional[str]:
-    try:
-        request = service.files().get_media(fileId=file_id)
-        buf = io.BytesIO()
-        downloader = MediaIoBaseDownload(buf, request)
-
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-
-        buf.seek(0)
-        return buf.read().decode("utf-8")
-    except Exception:
-        return None
-
-def _upload_file(service, filename: str, content: str) -> bool:
-    try:
-        file_id = _find_file_id(service, filename)
-        data = io.BytesIO(content.encode("utf-8"))
-        media = MediaIoBaseUpload(data, mimetype="application/json", resumable=False)
-
-        if file_id:
-            service.files().update(fileId=file_id, media_body=media).execute()
-        else:
-            service.files().create(body={"name": filename}, media_body=media).execute()
-
-        return True
-    except Exception:
-        return False
-
-def _download_file_by_name(service, filename: str) -> Optional[str]:
-    file_id = _find_file_id(service, filename)
-    if not file_id:
-        return None
-    return _download_file(service, file_id)
-
-# ----------------------------- OAuth Flow -----------------------------
-def exchange_code_for_credentials(code: str) -> Optional[Dict[str, Any]]:
-    try:
-        flow = get_flow()
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-
-        creds_dict = {
-            "token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-            "client_secret": creds.client_secret,
-            "scopes": list(creds.scopes),
-        }
-
-        _save_local_token(creds_dict)
-        st.session_state["credentials"] = creds_dict
-
-        try:
-            service = build_drive_service_from_session()
-            if service:
-                _upload_file(service, DRIVE_TOKEN_FILE, json.dumps(creds_dict))
-        except Exception:
-            pass
-
-        return creds_dict
-    except Exception as e:
-        st.error(f"OAuth token exchange failed: {e}")
-        return None
-
-def logout():
-    st.session_state.pop("credentials", None)
-    try:
-        if os.path.exists(LOCAL_TOKEN_FILE):
-            os.remove(LOCAL_TOKEN_FILE)
-    except Exception:
-        pass
-    st.success("Logged out.")
-    st.rerun()
 
 def _credentials_dict_to_oauth(creds_dict: Dict[str, Any]) -> Optional[OAuthCredentials]:
     try:
-        if not creds_dict:
-            return None
-        creds = OAuthCredentials(
+        if not creds_dict: return None
+        return OAuthCredentials(
             token=creds_dict.get("token"),
             refresh_token=creds_dict.get("refresh_token"),
             token_uri=creds_dict.get("token_uri"),
@@ -184,7 +62,6 @@ def _credentials_dict_to_oauth(creds_dict: Dict[str, Any]) -> Optional[OAuthCred
             client_secret=creds_dict.get("client_secret"),
             scopes=creds_dict.get("scopes"),
         )
-        return creds
     except Exception:
         return None
 
@@ -198,10 +75,14 @@ def _oauth_to_credentials_dict(creds: OAuthCredentials) -> Dict[str, Any]:
         "scopes": list(creds.scopes) if creds.scopes else [],
     }
 
-def build_drive_service_from_session():
+# ----------------------------- Service Builders -----------------------------
+def get_creds_from_session():
+    """Retrieves and refreshes credentials if needed."""
     cred_dict = st.session_state.get("credentials")
     if not cred_dict:
-        return None
+        # Try local cache
+        cred_dict = _load_local_token()
+        if not cred_dict: return None
 
     try:
         creds = _credentials_dict_to_oauth(cred_dict)
@@ -210,270 +91,192 @@ def build_drive_service_from_session():
             new_dict = _oauth_to_credentials_dict(creds)
             st.session_state["credentials"] = new_dict
             _save_local_token(new_dict)
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
+            return creds
+        return creds
     except Exception as e:
-        st.error(f"Drive service error: {e}")
+        st.error(f"Auth Refresh Error: {e}")
         return None
 
-def _try_load_credentials() -> Optional[Dict[str, Any]]:
-    if st.session_state.get("credentials"):
-        return st.session_state.get("credentials")
+def build_drive_service_from_session():
+    """Builds the Drive API (v3) Service."""
+    creds = get_creds_from_session()
+    if not creds: return None
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-    local = _load_local_token()
-    if local:
-        creds = _credentials_dict_to_oauth(local)
-        try:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-                new = _oauth_to_credentials_dict(creds)
-                st.session_state["credentials"] = new
-                _save_local_token(new)
-                return new
-            else:
-                st.session_state["credentials"] = local
-                return local
-        except Exception:
-            pass
+def build_sheets_service_from_session():
+    """Builds the Sheets API (v4) Service."""
+    creds = get_creds_from_session()
+    if not creds: return None
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
-    return None
-
+# ----------------------------- Auth Flow -----------------------------
 def ensure_logged_in():
-    """
-    Blocks execution until the user is logged in via Google OAuth.
-    """
-    creds_dict = _try_load_credentials()
-    if creds_dict:
-        st.session_state["credentials"] = creds_dict
+    """Blocking call to ensure user is logged in."""
+    if get_creds_from_session():
         return
 
-    # Using st.query_params (dict-like)
-    if "code" in st.query_params and not st.session_state.get("credentials"):
-        code = st.query_params["code"]
-        creds = exchange_code_for_credentials(code)
-        if creds:
-            st.session_state["credentials"] = creds
-            st.query_params.clear()
-            st.rerun()
+    # If code is in URL, exchange it
+    if "code" in st.query_params:
+        from google_auth_oauthlib.flow import Flow
+        cfg = _get_oauth_config()
+        flow = Flow.from_client_config(
+            {"web": cfg}, scopes=SCOPES, redirect_uri=cfg["redirect_uri"]
+        )
+        flow.fetch_token(code=st.query_params["code"])
+        creds_dict = _oauth_to_credentials_dict(flow.credentials)
+        st.session_state["credentials"] = creds_dict
+        _save_local_token(creds_dict)
+        st.query_params.clear()
+        st.rerun()
 
-    flow = get_flow()
-    auth_url, _ = flow.authorization_url(
-        prompt="consent",
-        access_type="offline",
-        include_granted_scopes="true",
+    # Otherwise show login button
+    from google_auth_oauthlib.flow import Flow
+    cfg = _get_oauth_config()
+    flow = Flow.from_client_config(
+        {"web": cfg}, scopes=SCOPES, redirect_uri=cfg["redirect_uri"]
     )
-    st.markdown("### Sign in with Google to enable Drive persistence")
-    # st.link_button requires Streamlit 1.27+. If using an older version, use st.markdown with HTML.
-    if hasattr(st, "link_button"):
-        st.link_button("Sign in with Google", auth_url, type="primary")
-    else:
-        st.markdown(f"[Sign in with Google]({auth_url})")
+    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline", include_granted_scopes="true")
     
+    st.markdown(f"### [Sign in with Google]({auth_url})")
     st.stop()
 
-# ----------------------------- Drive Helpers (public) -----------------------------
+def logout():
+    st.session_state.pop("credentials", None)
+    if os.path.exists(LOCAL_TOKEN_FILE):
+        try: os.remove(LOCAL_TOKEN_FILE)
+        except: pass
+    st.success("Logged out.")
+    st.rerun()
 
+# ----------------------------- Drive Helpers (Internal) -----------------------------
+def _find_file_id(service, filename: str) -> Optional[str]:
+    try:
+        q = f"name = '{filename}' and trashed = false"
+        resp = service.files().list(q=q, spaces="drive", fields="files(id,name)").execute()
+        files = resp.get("files", [])
+        return files[0]["id"] if files else None
+    except Exception:
+        return None
+
+def _download_file(service, file_id: str) -> Optional[str]:
+    try:
+        request = service.files().get_media(fileId=file_id)
+        buf = io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        buf.seek(0)
+        return buf.read().decode("utf-8")
+    except Exception:
+        return None
+
+def _upload_file(service, filename: str, content: str) -> bool:
+    try:
+        file_id = _find_file_id(service, filename)
+        data = io.BytesIO(content.encode("utf-8"))
+        media = MediaIoBaseUpload(data, mimetype="application/json", resumable=False)
+        if file_id:
+            service.files().update(fileId=file_id, media_body=media).execute()
+        else:
+            service.files().create(body={"name": filename}, media_body=media).execute()
+        return True
+    except Exception:
+        return False
+
+# ----------------------------- Active Trades (JSON) -----------------------------
 def load_from_drive(service) -> List[Dict[str, Any]]:
-    """Load and deserialize trades from Drive."""
     file_id = _find_file_id(service, DRIVE_FILE_NAME)
-    if not file_id:
-        return []
-
+    if not file_id: return []
+    
     raw = _download_file(service, file_id)
-    if not raw:
-        return []
+    if not raw: return []
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return []
 
+    # Date parsing
     parsed = []
     for t in data:
-        ct = {}
+        ct = t.copy()
         for k, v in t.items():
             if isinstance(v, str):
-                try:
-                    if len(v) == 10 and v[4] == '-' and v[7] == '-':  # YYYY-MM-DD
-                        ct[k] = date.fromisoformat(v)
-                    elif "T" in v and len(v) > 10:  # datetime
-                        ct[k] = datetime.fromisoformat(v)
-                    else:
-                        ct[k] = v
-                except Exception:
-                    ct[k] = v
-            else:
-                ct[k] = v
+                # Try parsing ISO dates
+                if len(v) == 10 and v[4] == '-' and v[7] == '-':
+                    try: ct[k] = date.fromisoformat(v)
+                    except: pass
+                elif "T" in v and len(v) > 10:
+                    try: ct[k] = datetime.fromisoformat(v)
+                    except: pass
         parsed.append(ct)
-
     return parsed
 
 def save_to_drive(service, trades: List[Dict[str, Any]]) -> bool:
-    """
-    Serialize and upload trade list to Drive with Lock protection.
-    """
-    file_id = _find_file_id(service, DRIVE_FILE_NAME)
-    lock = None
-    if DriveLockManager:
-        lock = DriveLockManager(service, file_id)
-    
-    try:
-        if lock:
-            lock.acquire()
-            
-        latest_drive_trades = load_from_drive(service)
-        drive_map = {t['id']: t for t in latest_drive_trades if 'id' in t}
-        
-        merged_trades = []
-        for user_trade in trades:
-            t_id = user_trade.get('id')
-            if t_id and t_id in drive_map:
-                drive_trade = drive_map[t_id]
-                if 'cached' in drive_trade:
-                    user_trade['cached'] = drive_trade['cached']
-                if 'pnl_history' in drive_trade:
-                    user_trade['pnl_history'] = drive_trade['pnl_history']
-                if 'last_heartbeat_date' in drive_trade:
-                    user_trade['last_heartbeat_date'] = drive_trade['last_heartbeat_date']
-            merged_trades.append(user_trade)
-            
-        serializable = []
-        for t in merged_trades:
-            ct = {}
-            for k, v in t.items():
-                if isinstance(v, (date, datetime)):
-                    ct[k] = v.isoformat()
-                else:
-                    ct[k] = v
-            serializable.append(ct)
+    # Serialize dates to string
+    serializable = []
+    for t in trades:
+        ct = {}
+        for k, v in t.items():
+            if isinstance(v, (date, datetime)):
+                ct[k] = v.isoformat()
+            else:
+                ct[k] = v
+        serializable.append(ct)
+    return _upload_file(service, DRIVE_FILE_NAME, json.dumps(serializable, indent=2))
 
-        return _upload_file(service, DRIVE_FILE_NAME, json.dumps(serializable, indent=2))
-        
-    except Exception as e:
-        print(f"Save failed: {e}")
-        return False
-    finally:
-        if lock:
-            lock.release()
+# ----------------------------- LOGGING (Google Sheets) -----------------------------
 
-# ----------------------------- CSV Journaling -----------------------------
-
-def log_trade_to_csv(service, trade_data: Dict[str, Any], debit_paid: float, notes: str) -> bool:
-    """
-    Logs a closed trade to 'trade_journal.csv' on Drive.
-    """
-    FILENAME = "trade_journal.csv"
+def _get_or_create_spreadsheet(drive_service, sheets_service):
+    """Finds the spreadsheet ID or creates it if missing."""
+    q = f"name = '{SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+    files = drive_service.files().list(q=q).execute().get('files', [])
     
-    try:
-        credit = float(trade_data.get("credit", 0))
-        pnl_val = (credit - debit_paid) * 100
-        
-        entry_date_str = trade_data.get("entry_date", date.today().isoformat())
-        if isinstance(entry_date_str, str) and "T" in entry_date_str:
-            entry_date = datetime.fromisoformat(entry_date_str).date()
-        elif isinstance(entry_date_str, (date, datetime)):
-            entry_date = entry_date_str if isinstance(entry_date_str, date) else entry_date_str.date()
-        else:
-            entry_date = date.fromisoformat(entry_date_str)
-            
-        close_date = date.today()
-        days_held = (close_date - entry_date).days
-        
-        if pnl_val > 0:
-            result = "WIN"
-        elif pnl_val < 0:
-            result = "LOSS"
-        else:
-            result = "BREAK-EVEN"
-        
-    except Exception as e:
-        print(f"Error calculating metrics: {e}")
-        pnl_val = 0
-        days_held = 0
-        result = "UNKNOWN"
-        credit = 0
-
-    new_row = [
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        trade_data.get("ticker"),
-        "Put Credit Spread",
-        trade_data.get("short_strike"),
-        trade_data.get("long_strike"),
-        trade_data.get("expiration"),
-        entry_date_str,
-        days_held,
-        f"{credit:.2f}",
-        f"{debit_paid:.2f}",
-        f"{pnl_val:.2f}",
-        result,
-        notes
-    ]
-    
-    headers = [
-        "Timestamp", "Ticker", "Type", "Short Strike", "Long Strike", 
-        "Expiry", "Entry Date", "Days Held", "Credit", "Debit", 
-        "PnL", "Result", "Notes"
-    ]
-
-    file_id = _find_file_id(service, FILENAME)
-    existing_content = ""
-    
-    if file_id:
-        existing_content = _download_file(service, file_id)
-    
-    output = io.StringIO()
-    writer = csv.writer(output)
-    
-    final_csv_str = ""
-    if not existing_content:
-        writer.writerow(headers)
-        writer.writerow(new_row)
-        final_csv_str = output.getvalue()
+    if files:
+        return files[0]['id']
     else:
-        if not existing_content.endswith("\n"):
-            existing_content += "\n"
-        
-        writer.writerow(new_row)
-        new_row_str = output.getvalue()
-        final_csv_str = existing_content + new_row_str
+        # Create new spreadsheet via Sheets API
+        spreadsheet = {'properties': {'title': SPREADSHEET_NAME}}
+        spreadsheet = sheets_service.spreadsheets().create(body=spreadsheet, fields='spreadsheetId').execute()
+        return spreadsheet.get('spreadsheetId')
 
-    return _upload_file(service, FILENAME, final_csv_str)
-
-# --- ADD TO persistence.py ---
-
-def log_completed_trade(service, trade_data):
+def log_completed_trade(drive_service, trade_data):
     """
     Appends a closed trade to the 'TradeLog' worksheet.
-    Creates the sheet and headers if they don't exist.
+    Uses Sheets API v4.
     """
     try:
-        # 1. Get Spreadsheet ID
-        q = "name = 'SpreadSniper_Data' and mimeType = 'application/vnd.google-apps.spreadsheet'"
-        files = service.drive().files().list(q=q).execute().get('files', [])
-        if not files: return False
-        spreadsheet_id = files[0]['id']
+        sheets_service = build_sheets_service_from_session()
+        if not sheets_service: return False
 
-        # 2. Check if 'TradeLog' sheet exists, create if not
-        ss_meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        spreadsheet_id = _get_or_create_spreadsheet(drive_service, sheets_service)
+
+        # Check for 'TradeLog' sheet
+        ss_meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         sheet_exists = any(s['properties']['title'] == "TradeLog" for s in ss_meta['sheets'])
         
         if not sheet_exists:
-            # Create Sheet
+            # Create Sheet & Header
             body = {"requests": [{"addSheet": {"properties": {"title": "TradeLog"}}}]}
-            service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
-            # Add Headers
+            sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
             headers = [["Trade_ID", "Ticker", "Short_Strike", "Long_Strike", "Contracts", 
                         "Entry_Date", "Exit_Date", "Credit", "Debit_Paid", "Realized_PL", "Notes"]]
-            service.spreadsheets().values().update(
+            sheets_service.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id, range="TradeLog!A1",
                 valueInputOption="RAW", body={"values": headers}
             ).execute()
 
-        # 3. Format Data for Row
-        # Calculate Realized PL: (Credit - Debit) * Contracts * 100
+        # Format Data
         credit = float(trade_data.get('credit', 0))
         debit = float(trade_data.get('debit_paid', 0))
         contracts = int(trade_data.get('contracts', 1))
         pl = (credit - debit) * contracts * 100
+
+        # Handle entry date possibly being a date object
+        entry_d = trade_data.get('entry_date', '')
+        if isinstance(entry_d, (date, datetime)):
+            entry_d = entry_d.isoformat()
 
         row = [[
             trade_data.get('id', ''),
@@ -481,25 +284,101 @@ def log_completed_trade(service, trade_data):
             trade_data.get('short_strike', ''),
             trade_data.get('long_strike', ''),
             contracts,
-            trade_data.get('entry_date', ''),
-            datetime.now().date().isoformat(), # Exit Date (Today)
+            entry_d,
+            date.today().isoformat(), # Exit Date
             credit,
             debit,
             pl,
             trade_data.get('notes', '')
         ]]
 
-        # 4. Append to Sheet
-        service.spreadsheets().values().append(
+        # Append
+        sheets_service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
             range="TradeLog!A1",
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
             body={"values": row}
         ).execute()
-        
         return True
 
     except Exception as e:
         print(f"Log Error: {e}")
+        return False
+
+def get_trade_log(drive_service):
+    """Fetches the entire TradeLog worksheet."""
+    try:
+        sheets_service = build_sheets_service_from_session()
+        if not sheets_service: return []
+
+        q = f"name = '{SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+        files = drive_service.files().list(q=q).execute().get('files', [])
+        if not files: return []
+        
+        spreadsheet_id = files[0]['id']
+        
+        result = sheets_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range="TradeLog!A:Z"
+        ).execute()
+        
+        rows = result.get('values', [])
+        if len(rows) < 2: return []
+        
+        headers = rows[0]
+        data = []
+        for r in rows[1:]:
+            item = {}
+            for i, h in enumerate(headers):
+                val = r[i] if i < len(r) else ""
+                item[h] = val
+            data.append(item)
+        return data
+
+    except Exception as e:
+        print(f"Fetch Error: {e}")
+        return []
+
+def delete_log_entry(drive_service, row_index):
+    """Deletes a row from TradeLog (row_index is 0-based index of DATA, excluding header)."""
+    try:
+        sheets_service = build_sheets_service_from_session()
+        if not sheets_service: return False
+
+        q = f"name = '{SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+        files = drive_service.files().list(q=q).execute().get('files', [])
+        if not files: return False
+        
+        spreadsheet_id = files[0]['id']
+        
+        # Get Sheet ID for "TradeLog"
+        ss_meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        sheet_id = 0
+        for s in ss_meta['sheets']:
+            if s['properties']['title'] == "TradeLog":
+                sheet_id = s['properties']['sheetId']
+                break
+        
+        # Row 0 in data is Row 2 in Sheet (Row 1 is header)
+        # API uses 0-based index for whole sheet.
+        # Header is index 0. Data start at index 1.
+        # So data_row_index 0 -> Sheet Row Index 1.
+        sheet_row_index = row_index + 1
+
+        body = {
+            "requests": [{
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": sheet_row_index,
+                        "endIndex": sheet_row_index + 1
+                    }
+                }
+            }]
+        }
+        sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
+        return True
+    except Exception as e:
+        print(f"Delete Error: {e}")
         return False
