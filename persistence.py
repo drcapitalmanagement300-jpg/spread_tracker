@@ -382,4 +382,23 @@ def delete_log_entry(drive_service, row_index):
                 sheet_id = s['properties']['sheetId']
                 break
         
-        # Row 0 in data is Row 2 in Sheet (
+        # Row 0 in data is Row 2 in Sheet (Row 1 is header)
+        sheet_row_index = row_index + 1
+
+        body = {
+            "requests": [{
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": sheet_row_index,
+                        "endIndex": sheet_row_index + 1
+                    }
+                }
+            }]
+        }
+        sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
+        return True
+    except Exception as e:
+        print(f"Delete Error: {e}")
+        return False
