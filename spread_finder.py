@@ -63,7 +63,19 @@ st.markdown("""
     .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
     .strategy-badge { border: 1px solid #d4ac0d; color: #d4ac0d; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
-    .earnings-box { background-color: rgba(255, 255, 255, 0.05); border: 1px solid #444; border-radius: 6px; padding: 8px; text-align: center; margin-top: 10px; font-size: 13px; color: #E8EAED; }
+    
+    /* Updated Earnings Box to match Button Style */
+    .earnings-box { 
+        background-color: #262730; 
+        border: 1px solid rgba(250, 250, 250, 0.2); 
+        color: white; 
+        padding: 0.5rem; 
+        border-radius: 0.5rem; 
+        text-align: center; 
+        margin-top: 12px;
+        font-size: 14px;
+        font-weight: 500;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -103,37 +115,57 @@ def get_stock_data(ticker):
             if mx != mn: 
                 rank = ((hist['HV'].iloc[-1] - mn) / (mx - mn)) * 100
 
-        # --- EARNINGS LOGIC ---
+        # --- ROBUST EARNINGS FETCH ---
         earnings_days = 999
-        next_earnings_date_str = "N/A"
+        next_earnings_date_str = "Unknown"
+        
         try:
-            # Try getting calendar
-            cal = stock.calendar
+            # 1. Try get_calendar() first (newer yfinance)
+            cal = None
+            try:
+                cal = stock.get_calendar()
+            except:
+                pass
+            
+            # 2. Fallback to .calendar property
+            if cal is None or (isinstance(cal, pd.DataFrame) and cal.empty) or (isinstance(cal, dict) and not cal):
+                try:
+                    cal = stock.calendar
+                except:
+                    pass
+
             future_dates = []
             
-            # Handle different yfinance versions/return types
-            if cal is not None and not cal.empty:
-                if isinstance(cal, pd.DataFrame):
-                    # Transpose if needed or grab the first row/column
-                    # Often cal.iloc[0] contains the dates
-                    dates = cal.iloc[0].values if not cal.iloc[0].empty else cal.index
-                else:
-                    dates = cal.values() # If dict
+            # Process Dictionary (Common in new versions)
+            if isinstance(cal, dict):
+                # Look for 'Earnings Date' or 'Earnings High' keys
+                for key in ['Earnings Date', 'Earnings High', 'Earnings Low']:
+                    if key in cal:
+                        dates = cal[key]
+                        # Handle list of dates
+                        if isinstance(dates, list):
+                            for d in dates:
+                                if isinstance(d, (datetime, pd.Timestamp)):
+                                    if d.date() > datetime.now().date():
+                                        future_dates.append(d.date())
+                        break # Found it
+            
+            # Process DataFrame (Old versions)
+            elif isinstance(cal, pd.DataFrame) and not cal.empty:
+                # Often index is 0, 1... and columns are dates, OR index is "Earnings Date"
+                # We flatten everything to find valid future dates
+                for val in cal.values.flatten():
+                     if isinstance(val, (datetime, pd.Timestamp)):
+                        if val.date() > datetime.now().date():
+                            future_dates.append(val.date())
+            
+            if future_dates:
+                next_date = min(future_dates)
+                earnings_days = (next_date - datetime.now().date()).days
+                next_earnings_date_str = next_date.strftime("%b %d") # e.g. "Feb 21"
                 
-                for d in dates:
-                    # Convert to datetime object if needed
-                    if isinstance(d, (np.datetime64, pd.Timestamp, datetime)):
-                        d_date = pd.to_datetime(d).date()
-                        if d_date > datetime.now().date():
-                            future_dates.append(d_date)
-                
-                if future_dates:
-                    next_date = min(future_dates)
-                    earnings_days = (next_date - datetime.now().date()).days
-                    next_earnings_date_str = next_date.strftime("%b %d, %Y")
-        except: 
-            # Fallback if calendar fails
-            next_earnings_date_str = "Unknown"
+        except Exception:
+            pass # Keep default "Unknown"
 
         return {
             "price": current_price,
@@ -381,12 +413,11 @@ if st.session_state.scan_results is not None:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # --- EARNINGS DISPLAY (Replaces AI) ---
-                    # Show the actual date or N/A
+                    # --- EARNINGS DISPLAY (Updated Style) ---
                     earnings_label = d['earnings_date_str'] if d['earnings_date_str'] != "Unknown" else "Unknown"
                     st.markdown(f"""
                     <div class="earnings-box">
-                        <span style="color: #AAA;">Next Earnings:</span> <strong style="color: white;">{earnings_label}</strong>
+                        Next Earnings: {earnings_label}
                     </div>
                     """, unsafe_allow_html=True)
 
