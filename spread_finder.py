@@ -64,9 +64,9 @@ st.markdown("""
     .strategy-badge { border: 1px solid #d4ac0d; color: #d4ac0d; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
     
-    /* Updated Earnings Box to match Button Style */
+    /* MATCHING BUTTON STYLE EXACTLY */
     .earnings-box { 
-        background-color: #262730; 
+        background-color: transparent; 
         border: 1px solid rgba(250, 250, 250, 0.2); 
         color: white; 
         padding: 0.5rem; 
@@ -120,52 +120,49 @@ def get_stock_data(ticker):
         next_earnings_date_str = "Unknown"
         
         try:
-            # 1. Try get_calendar() first (newer yfinance)
-            cal = None
-            try:
-                cal = stock.get_calendar()
-            except:
-                pass
-            
-            # 2. Fallback to .calendar property
-            if cal is None or (isinstance(cal, pd.DataFrame) and cal.empty) or (isinstance(cal, dict) and not cal):
-                try:
-                    cal = stock.calendar
-                except:
-                    pass
-
             future_dates = []
             
-            # Process Dictionary (Common in new versions)
-            if isinstance(cal, dict):
-                # Look for 'Earnings Date' or 'Earnings High' keys
-                for key in ['Earnings Date', 'Earnings High', 'Earnings Low']:
-                    if key in cal:
-                        dates = cal[key]
-                        # Handle list of dates
-                        if isinstance(dates, list):
-                            for d in dates:
-                                if isinstance(d, (datetime, pd.Timestamp)):
-                                    if d.date() > datetime.now().date():
-                                        future_dates.append(d.date())
-                        break # Found it
-            
-            # Process DataFrame (Old versions)
-            elif isinstance(cal, pd.DataFrame) and not cal.empty:
-                # Often index is 0, 1... and columns are dates, OR index is "Earnings Date"
-                # We flatten everything to find valid future dates
-                for val in cal.values.flatten():
-                     if isinstance(val, (datetime, pd.Timestamp)):
-                        if val.date() > datetime.now().date():
-                            future_dates.append(val.date())
-            
+            # Method 1: get_earnings_dates() - Most reliable for future
+            try:
+                dates_df = stock.get_earnings_dates(limit=8)
+                if dates_df is not None and not dates_df.empty:
+                    for d in dates_df.index:
+                        # Ensure timezone naive for comparison
+                        if d.tzinfo:
+                            d = d.tz_localize(None)
+                        if d.date() > datetime.now().date():
+                            future_dates.append(d.date())
+            except: pass
+
+            # Method 2: Calendar fallback
+            if not future_dates:
+                try:
+                    cal = stock.calendar
+                    if cal is not None:
+                        # Handle Dict return
+                        if isinstance(cal, dict):
+                            for k in ['Earnings Date', 'Earnings High']:
+                                if k in cal:
+                                    ds = cal[k]
+                                    if isinstance(ds, list):
+                                        for d in ds:
+                                            if d.date() > datetime.now().date():
+                                                future_dates.append(d.date())
+                        # Handle DataFrame return
+                        elif isinstance(cal, pd.DataFrame) and not cal.empty:
+                            for val in cal.values.flatten():
+                                if isinstance(val, (datetime, pd.Timestamp)):
+                                    if val.date() > datetime.now().date():
+                                        future_dates.append(val.date())
+                except: pass
+
             if future_dates:
                 next_date = min(future_dates)
                 earnings_days = (next_date - datetime.now().date()).days
                 next_earnings_date_str = next_date.strftime("%b %d") # e.g. "Feb 21"
                 
         except Exception:
-            pass # Keep default "Unknown"
+            pass 
 
         return {
             "price": current_price,
