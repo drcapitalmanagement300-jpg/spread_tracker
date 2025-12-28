@@ -437,3 +437,93 @@ def log_trade_to_csv(service, trade_data: Dict[str, Any], debit_paid: float, not
         final_csv_str = existing_content + new_row_str
 
     return _upload_file(service, FILENAME, final_csv_str)
+
+# --- ADD THESE TO persistence.py ---
+
+def get_trade_log(service):
+    """Fetches the entire TradeLog worksheet as a list of dicts."""
+    try:
+        sheet = service.spreadsheets()
+        
+        # 1. Find the Spreadsheet ID
+        q = "name = 'SpreadSniper_Data' and mimeType = 'application/vnd.google-apps.spreadsheet'"
+        files = service.drive().files().list(q=q).execute().get('files', [])
+        
+        if not files:
+            return [] # No log exists yet
+            
+        spreadsheet_id = files[0]['id']
+        
+        # 2. Read the "TradeLog" range
+        # We assume headers are in row 1
+        result = sheet.values().get(
+            spreadsheetId=spreadsheet_id, 
+            range="TradeLog!A:Z" 
+        ).execute()
+        
+        rows = result.get('values', [])
+        
+        if len(rows) < 2:
+            return [] # Only headers or empty
+            
+        headers = rows[0]
+        data = []
+        
+        for r in rows[1:]:
+            # Map headers to values, handling missing trailing cells
+            item = {}
+            for i, h in enumerate(headers):
+                val = r[i] if i < len(r) else ""
+                item[h] = val
+            data.append(item)
+            
+        return data
+        
+    except Exception as e:
+        print(f"Error fetching log: {e}")
+        return []
+
+def delete_log_entry(service, row_index):
+    """
+    Deletes a specific row from the TradeLog sheet.
+    row_index is 0-based index relative to the data list (so 0 is actually Row 2 in sheets).
+    """
+    try:
+        # 1. Find ID
+        q = "name = 'SpreadSniper_Data' and mimeType = 'application/vnd.google-apps.spreadsheet'"
+        files = service.drive().files().list(q=q).execute().get('files', [])
+        spreadsheet_id = files[0]['id']
+        
+        # 2. Find SheetId for "TradeLog" (needed for batchUpdate)
+        ss_meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        sheet_id = 0
+        for s in ss_meta['sheets']:
+            if s['properties']['title'] == "TradeLog":
+                sheet_id = s['properties']['sheetId']
+                break
+        
+        # 3. Send Delete Command
+        # Row 0 in data = Row 1 (index) in Sheets (because Row 0 is headers)
+        # So we delete startIndex: row_index + 1, endIndex: row_index + 2
+        actual_row = row_index + 1
+        
+        body = {
+            "requests": [
+                {
+                    "deleteDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": actual_row,
+                            "endIndex": actual_row + 1
+                        }
+                    }
+                }
+            ]
+        }
+        
+        service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
+        return True
+    except Exception as e:
+        print(f"Delete error: {e}")
+        return False
