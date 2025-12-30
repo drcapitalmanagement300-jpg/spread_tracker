@@ -201,12 +201,15 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False)
 
         roi = (credit / max_loss) * 100 if max_loss > 0 else 0
         iv = get_implied_volatility(current_price, short_strike, dte/365, (short_bid+short_ask)/2) * 100
+        
+        # Est P.O.P = 1 - (Credit / Width)
+        est_pop = (1 - (credit / (short_strike - long_strike))) * 100
 
         return {
             "expiration": best_exp, "dte": dte, 
             "short": short_strike, "long": long_strike,
             "credit": credit, "max_loss": max_loss, 
-            "iv": iv, "roi": roi
+            "iv": iv, "roi": roi, "pop": est_pop
         }
     except: return None
 
@@ -309,7 +312,11 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
             if not dev_mode and data['earnings_days'] < spread['dte'] + 2:
                 continue 
 
-            score = data['rank'] + spread['roi']
+            # Normalize Score (0-100 Scale)
+            # Rank (0-100) * 0.6 + ROI (typ 15-25) * 2.0
+            # Example: Rank 80, ROI 20 -> 48 + 40 = 88/100
+            score = (data['rank'] * 0.6) + (spread['roi'] * 2.0)
+            
             results.append({"ticker": ticker, "data": data, "spread": spread, "score": score})
     
     progress.empty()
@@ -362,13 +369,17 @@ if st.session_state.scan_results is not None:
                         <div style="height: 8px;"></div>
                         <div class="metric-label">Credit</div>
                         <div class="metric-value" style="color:{SUCCESS_COLOR}">${s['credit']:.2f}</div>
+                        <div style="height: 8px;"></div>
+                        <div class="metric-label">Est. P.O.P</div>
+                        <div class="metric-value" style="color:#ddd">{s['pop']:.0f}%</div>
                         """, unsafe_allow_html=True)
                     with c2:
                         st.markdown(f"""
                         <div class="metric-label">Expiry</div>
                         <div class="metric-value">{s['dte']} Days</div>
+                        <div style="font-size: 10px; color: gray;">{s['expiration']}</div>
                         <div style="height: 8px;"></div>
-                        <div class="metric-label">Max Risk</div>
+                        <div class="metric-label">Max Risk/Trade Cost</div>
                         <div class="metric-value" style="color:#FF4B4B">${s['max_loss']*100:.0f}</div>
                         """, unsafe_allow_html=True)
 
@@ -383,7 +394,7 @@ if st.session_state.scan_results is not None:
                         <div class="metric-value" style="text-align: right;">{d['rank']:.0f}%</div>
                         <div style="height: 10px;"></div>
                         <div class="metric-label" style="text-align: right;">Opp Score</div>
-                        <div class="metric-value" style="text-align: right; color: #d4ac0d;">{res['score']:.0f}</div>
+                        <div class="metric-value" style="text-align: right; color: #d4ac0d;">{res['score']:.0f} / 100</div>
                         """, unsafe_allow_html=True)
 
                     st.markdown(f"""
