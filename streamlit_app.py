@@ -28,7 +28,6 @@ WHITE_DIVIDER_HTML = "<hr style='border: 0; border-top: 1px solid #FFFFFF; margi
 st_autorefresh(interval=60_000, key="ui_refresh")
 
 # ---------------- Auth / Drive ----------------
-# FIXED: Removed the try/except block that was hiding the login button
 ensure_logged_in()
 
 drive_service = None
@@ -186,8 +185,6 @@ else:
         st.session_state.trades = []
 
 # ---------------- Display Trades ----------------
-st.subheader("Active Portfolio")
-
 if not st.session_state.trades:
     st.info("No active trades. Go to 'Spread Finder' to scan for new opportunities.")
 else:
@@ -411,24 +408,3 @@ else:
 
         # Solid White Divider between trades
         st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
-
-# ---------------- Manual Controls ----------------
-st.write("### Data Sync")
-ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 5])
-with ctl1:
-    if st.button("💾 Save to Drive"):
-        if drive_service and save_to_drive(drive_service, st.session_state.trades):
-            st.success("Saved.")
-with ctl2:
-    if st.button("📥 Reload from Drive"):
-        if drive_service:
-            loaded = load_from_drive(drive_service)
-            if loaded is not None:
-                st.session_state.trades = loaded
-                st.rerun()
-
-# ---------------- External Tools ----------------
-st.subheader("External Tools")
-t1, t2 = st.columns(2)
-with t1: st.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
-with t2: st.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
