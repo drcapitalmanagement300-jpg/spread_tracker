@@ -102,7 +102,7 @@ def get_stock_data(ticker):
             if mx != mn: 
                 rank = ((hist['HV'].iloc[-1] - mn) / (mx - mn)) * 100
 
-        # --- ROBUST EARNINGS FETCH (Used for filtering, not display) ---
+        # --- ROBUST EARNINGS FETCH ---
         earnings_days = 999
         next_earnings_date_str = "Unknown"
         
@@ -205,8 +205,14 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False)
         # Est P.O.P = 1 - (Credit / Width)
         est_pop = (1 - (credit / (short_strike - long_strike))) * 100
 
+        # Format Expiry Date Long Form
+        exp_date_obj = datetime.strptime(best_exp, "%Y-%m-%d")
+        exp_date_str = exp_date_obj.strftime("%b %d, %Y") # Jan 30, 2026
+
         return {
-            "expiration": best_exp, "dte": dte, 
+            "expiration_raw": best_exp, # Keep raw for ID/Logic
+            "expiration": exp_date_str, # Display string
+            "dte": dte, 
             "short": short_strike, "long": long_strike,
             "credit": credit, "max_loss": max_loss, 
             "iv": iv, "roi": roi, "pop": est_pop
@@ -312,12 +318,16 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
             if not dev_mode and data['earnings_days'] < spread['dte'] + 2:
                 continue 
 
-            # Normalize Score (0-100 Scale)
-            # Rank (0-100) * 0.6 + ROI (typ 15-25) * 2.0
-            # Example: Rank 80, ROI 20 -> 48 + 40 = 88/100
-            score = (data['rank'] * 0.6) + (spread['roi'] * 2.0)
+            # Calculate Raw Score: Rank (0-100) * 0.6 + ROI (typ 15-25) * 2.0
+            # Result can be > 100 (e.g., 160). 
+            # Divide by 1.6 to normalize to a 0-100 scale.
+            raw_score = (data['rank'] * 0.6) + (spread['roi'] * 2.0)
+            score = raw_score / 1.6
             
-            results.append({"ticker": ticker, "data": data, "spread": spread, "score": score})
+            # Cap strictly at 100 for display, but use full float for sorting
+            display_score = min(score, 100.0)
+            
+            results.append({"ticker": ticker, "data": data, "spread": spread, "score": score, "display_score": display_score})
     
     progress.empty()
     status.empty()
@@ -363,6 +373,7 @@ if st.session_state.scan_results is not None:
 
                     c1, c2 = st.columns(2)
                     with c1:
+                        # Extra top margin to push EST P.O.P down slightly? No, spacer logic is better.
                         st.markdown(f"""
                         <div class="metric-label">Strikes</div>
                         <div class="metric-value">${s['short']:.0f} / ${s['long']:.0f}</div>
@@ -374,11 +385,12 @@ if st.session_state.scan_results is not None:
                         <div class="metric-value" style="color:#ddd">{s['pop']:.0f}%</div>
                         """, unsafe_allow_html=True)
                     with c2:
+                        # Added spacers. Note the 'height: 26px' gap to push Max Risk down to align with POP
                         st.markdown(f"""
                         <div class="metric-label">Expiry</div>
                         <div class="metric-value">{s['dte']} Days</div>
                         <div style="font-size: 10px; color: gray;">{s['expiration']}</div>
-                        <div style="height: 8px;"></div>
+                        <div style="height: 26px;"></div> 
                         <div class="metric-label">Max Risk/Trade Cost</div>
                         <div class="metric-value" style="color:#FF4B4B">${s['max_loss']*100:.0f}</div>
                         """, unsafe_allow_html=True)
@@ -394,7 +406,7 @@ if st.session_state.scan_results is not None:
                         <div class="metric-value" style="text-align: right;">{d['rank']:.0f}%</div>
                         <div style="height: 10px;"></div>
                         <div class="metric-label" style="text-align: right;">Opp Score</div>
-                        <div class="metric-value" style="text-align: right; color: #d4ac0d;">{res['score']:.0f} / 100</div>
+                        <div class="metric-value" style="text-align: right; color: #d4ac0d;">{res['display_score']:.0f} / 100</div>
                         """, unsafe_allow_html=True)
 
                     st.markdown(f"""
@@ -423,12 +435,12 @@ if st.session_state.scan_results is not None:
                         with col_conf:
                             if st.button("✅ Confirm", key=f"conf_{t}_{i}"):
                                 new_trade = {
-                                    "id": f"{t}-{s['short']}-{s['long']}-{s['expiration']}",
+                                    "id": f"{t}-{s['short']}-{s['long']}-{s['expiration_raw']}",
                                     "ticker": t,
                                     "contracts": num_contracts, 
                                     "short_strike": s['short'],
                                     "long_strike": s['long'],
-                                    "expiration": s['expiration'],
+                                    "expiration": s['expiration_raw'],
                                     "credit": s['credit'],
                                     "entry_date": datetime.now().date().isoformat(),
                                     "created_at": datetime.utcnow().isoformat(),
