@@ -374,7 +374,7 @@ else:
                 # Dollar P/L in top right of card
                 f"<div style='position: absolute; top: 0; right: 0; font-weight: bold; color: {pl_text_color}; font-size: 1.1em;'>{pl_str}</div>"
                 f"<div style='margin-bottom: 4px; padding-right: 70px;'>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em;'>(Must not exceed: 0.40)</span></div>"
-                f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 150%)</span></div>"
+                f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Must not exceed: 150%)</span></div>"
                 f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Must not be less than: 7 days)</span></div>"
                 f"</div>"
             )
