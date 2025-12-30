@@ -408,3 +408,22 @@ else:
 
         # Solid White Divider between trades
         st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
+
+# ---------------- Manual Controls (No Header) ----------------
+ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 5])
+with ctl1:
+    if st.button("💾 Save to Drive"):
+        if drive_service and save_to_drive(drive_service, st.session_state.trades):
+            st.success("Saved.")
+with ctl2:
+    if st.button("📥 Reload from Drive"):
+        if drive_service:
+            loaded = load_from_drive(drive_service)
+            if loaded is not None:
+                st.session_state.trades = loaded
+                st.rerun()
+
+# ---------------- External Tools (No Header) ----------------
+t1, t2 = st.columns(2)
+with t1: st.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
+with t2: st.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
