@@ -390,15 +390,14 @@ if st.session_state.scan_results is not None:
                         <div class="metric-label">Credit</div>
                         <div class="metric-value" style="color:{SUCCESS_COLOR}">${s['credit']:.2f}</div>
                         <div style="height: 8px;"></div>
+                        <div class="metric-label">Max Risk/Trade Cost</div>
+                        <div class="metric-value" style="color:#FF4B4B">${s['max_loss']*100:.0f}</div>
                         """, unsafe_allow_html=True)
                     with c2:
                         st.markdown(f"""
                         <div class="metric-label">Expiry</div>
                         <div class="metric-value">{s['dte']} Days</div>
                         <div style="font-size: 10px; color: gray;">{s['expiration']}</div>
-                        <div style="height: 26px;"></div> 
-                        <div class="metric-label">Max Risk/Trade Cost</div>
-                        <div class="metric-value" style="color:#FF4B4B">${s['max_loss']*100:.0f}</div>
                         """, unsafe_allow_html=True)
 
                     st.markdown("---")
