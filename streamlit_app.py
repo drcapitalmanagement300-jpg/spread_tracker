@@ -170,10 +170,10 @@ def render_profit_bar(profit_pct):
         f'<div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>'
         f'<div style="position: absolute; left: 66.6%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>'
         f'</div>'
-        f'<div style="display:flex; justify-content:space-between; font-size:9px; color:gray; margin-top:2px; padding-left: 2px; padding-right: 2px;">'
-        f'<span>Max Loss</span>'
-        f'<span style="margin-left: 15px;">Break Even</span>'
-        f'<span>TARGET (50%)</span>'
+        f'<div style="position: relative; height: 15px; font-size: 9px; color: gray; margin-top: 2px;">'
+        f'<span style="position: absolute; left: 0;">Max Loss</span>'
+        f'<span style="position: absolute; left: 66.6%; transform: translateX(-50%);">Break Even</span>'
+        f'<span style="position: absolute; right: 0;">TARGET (50%)</span>'
         f'</div>'
         f'</div>'
     )
@@ -361,11 +361,21 @@ else:
 
         # -------- RIGHT CARD --------
         with cols[1]:
+            # Calculate current Dollar P/L for display
+            pl_dollars = 0.0
+            if profit_pct is not None:
+                pl_dollars = max_gain_total * (profit_pct / 100.0)
+            
+            pl_text_color = SUCCESS_COLOR if pl_dollars >= 0 else WARNING_COLOR
+            pl_str = f"{'+' if pl_dollars > 0 else ''}${pl_dollars:.2f}"
+
             right_card_html = (
-                f"<div style='font-size: 14px; margin-bottom: 5px;'>"
-                f"<div style='margin-bottom: 4px;'>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 0.40)</span></div>"
+                f"<div style='font-size: 14px; margin-bottom: 5px; position: relative;'>"
+                # Dollar P/L in top right of card
+                f"<div style='position: absolute; top: 0; right: 0; font-weight: bold; color: {pl_text_color}; font-size: 1.1em;'>{pl_str}</div>"
+                f"<div style='margin-bottom: 4px; padding-right: 70px;'>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em;'>(Must not exceed: 0.40)</span></div>"
                 f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Limit: 150%)</span></div>"
-                f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Min: 7 days)</span></div>"
+                f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Must not be less than: 7 days)</span></div>"
                 f"</div>"
             )
             st.markdown(right_card_html, unsafe_allow_html=True)
