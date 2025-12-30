@@ -43,15 +43,27 @@ if "trades" not in st.session_state:
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 
-# 1. UNIVERSE (~60 Tickers)
+# 1. EXPANDED UNIVERSE (100 Tickers)
 LIQUID_TICKERS = [
-    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "SMH", "ARKK",
+    # Indices & ETFs
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX",
+    "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS",
+    # Mega Cap Tech
     "NVDA", "TSLA", "AAPL", "MSFT", "AMD", "AMZN", "META", "GOOGL", "NFLX", 
-    "AVGO", "QCOM", "INTC", "MU", "ARM", "PLTR", "CRM", "ADBE",
-    "COIN", "MSTR", "HOOD", "DKNG", "UBER", "ABNB", "SQ", "ROKU", "SHOP",
-    "JPM", "BAC", "WFC", "GS", "MS", "C", "V", "MA", "PYPL",
-    "DIS", "NKE", "SBUX", "MCD", "WMT", "TGT", "COST", "HD", "LOW",
-    "BA", "CAT", "GE", "F", "GM", "XOM", "CVX", "COP"
+    # Semiconductors & Hardware
+    "AVGO", "QCOM", "INTC", "MU", "ARM", "TXN", "AMAT", "LRCX", "ADI", "IBM", "CSCO", "ORCL",
+    # Software & Cloud
+    "PLTR", "CRM", "ADBE", "SNOW", "NOW", "WDAY", "PANW", "CRWD", "DDOG", "NET",
+    # Crypto & Fintech
+    "COIN", "MSTR", "HOOD", "SQ", "PYPL", "V", "MA", "AFRM", "SOFI",
+    # Consumer & Retail
+    "DKNG", "UBER", "ABNB", "ROKU", "SHOP", "DIS", "NKE", "SBUX", "MCD", "WMT", "TGT", "COST", "HD", "LOW", "LULU", "CMG",
+    # Financials
+    "JPM", "BAC", "WFC", "GS", "MS", "C", "AXP", "BLK",
+    # Industrials & Energy
+    "BA", "CAT", "GE", "F", "GM", "XOM", "CVX", "COP", "OXY", "SLB", "HAL",
+    # Pharma & Bio
+    "LLY", "UNH", "JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "MRNA"
 ]
 
 # --- CUSTOM CSS ---
@@ -202,9 +214,6 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False)
         roi = (credit / max_loss) * 100 if max_loss > 0 else 0
         iv = get_implied_volatility(current_price, short_strike, dte/365, (short_bid+short_ask)/2) * 100
         
-        # Est P.O.P = 1 - (Credit / Width)
-        est_pop = (1 - (credit / (short_strike - long_strike))) * 100
-
         # Format Expiry Date Long Form
         exp_date_obj = datetime.strptime(best_exp, "%Y-%m-%d")
         exp_date_str = exp_date_obj.strftime("%b %d, %Y") # Jan 30, 2026
@@ -215,7 +224,7 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False)
             "dte": dte, 
             "short": short_strike, "long": long_strike,
             "credit": credit, "max_loss": max_loss, 
-            "iv": iv, "roi": roi, "pop": est_pop
+            "iv": iv, "roi": roi
         }
     except: return None
 
@@ -318,7 +327,8 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
             if not dev_mode and data['earnings_days'] < spread['dte'] + 2:
                 continue 
 
-            # Calculate Raw Score: Rank (0-100) * 0.6 + ROI (typ 15-25) * 2.0
+            # Normalize Score (0-100 Scale)
+            # Rank (0-100) * 0.6 + ROI (typ 15-25) * 2.0
             # Result can be > 100 (e.g., 160). 
             # Divide by 1.6 to normalize to a 0-100 scale.
             raw_score = (data['rank'] * 0.6) + (spread['roi'] * 2.0)
@@ -373,7 +383,6 @@ if st.session_state.scan_results is not None:
 
                     c1, c2 = st.columns(2)
                     with c1:
-                        # Extra top margin to push EST P.O.P down slightly? No, spacer logic is better.
                         st.markdown(f"""
                         <div class="metric-label">Strikes</div>
                         <div class="metric-value">${s['short']:.0f} / ${s['long']:.0f}</div>
@@ -381,11 +390,8 @@ if st.session_state.scan_results is not None:
                         <div class="metric-label">Credit</div>
                         <div class="metric-value" style="color:{SUCCESS_COLOR}">${s['credit']:.2f}</div>
                         <div style="height: 8px;"></div>
-                        <div class="metric-label">Est. P.O.P</div>
-                        <div class="metric-value" style="color:#ddd">{s['pop']:.0f}%</div>
                         """, unsafe_allow_html=True)
                     with c2:
-                        # Added spacers. Note the 'height: 26px' gap to push Max Risk down to align with POP
                         st.markdown(f"""
                         <div class="metric-label">Expiry</div>
                         <div class="metric-value">{s['dte']} Days</div>
