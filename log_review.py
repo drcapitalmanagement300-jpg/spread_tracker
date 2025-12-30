@@ -22,6 +22,7 @@ WARNING_COLOR = "#d32f2f"
 NEUTRAL_COLOR = "#757575"
 BG_COLOR = '#0E1117'
 TEXT_COLOR = '#FAFAFA'
+SAVED_COLOR = '#FFA726' # Orange for "Risk Saved"
 
 # Configure Matplotlib for Dark Theme
 plt.rcParams.update({
@@ -79,13 +80,22 @@ if not raw_logs:
 # Convert to DataFrame
 df = pd.DataFrame(raw_logs)
 
-# Data Cleaning
+# Data Cleaning & Feature Engineering
 try:
-    df['Realized_PL'] = pd.to_numeric(df['Realized_PL'], errors='coerce').fillna(0.0)
-    df['Contracts'] = pd.to_numeric(df['Contracts'], errors='coerce').fillna(1)
+    # Convert numerics
+    cols_to_num = ['Realized_PL', 'Contracts', 'Credit', 'Short_Strike', 'Long_Strike']
+    for c in cols_to_num:
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
+    
+    # Dates
     df['Exit_Date'] = pd.to_datetime(df['Exit_Date'])
     df['Entry_Date'] = pd.to_datetime(df['Entry_Date'])
-    df['Credit'] = pd.to_numeric(df['Credit'], errors='coerce').fillna(0.0)
+    
+    # --- CALCULATE MAX LOSS ---
+    # Width = Short - Long. Max Loss = (Width - Credit) * 100 * Contracts
+    df['Spread_Width'] = (df['Short_Strike'] - df['Long_Strike']).abs()
+    df['Max_Loss_Trade'] = (df['Spread_Width'] - df['Credit']) * 100 * df['Contracts']
+    
 except Exception as e:
     st.error(f"Data formatting error: {e}")
     st.stop()
@@ -105,13 +115,24 @@ gross_profit = wins['Realized_PL'].sum()
 gross_loss = abs(losses['Realized_PL'].sum())
 profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float('inf')
 
+# --- RISK AVERTED CALCULATION ---
+# For every losing trade, how much did we SAVE by not hitting Max Loss?
+# Saved = Max_Loss - Abs(Realized_Loss)
+total_risk_saved = 0.0
+if not losses.empty:
+    losses_calc = losses.copy()
+    losses_calc['Saved'] = losses_calc['Max_Loss_Trade'] - losses_calc['Realized_PL'].abs()
+    total_risk_saved = losses_calc['Saved'].sum()
+
 # --- METRICS ROW ---
-m1, m2, m3, m4, m5 = st.columns(5)
+# Added a 6th column for "Risk Averted"
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Net P&L", f"${total_pl:,.2f}", delta_color="normal")
 m2.metric("Win Rate", f"{win_rate:.1f}%", f"{len(wins)}W - {len(losses)}L")
 m3.metric("Profit Factor", f"{profit_factor:.2f}", help="> 1.5 is healthy")
 m4.metric("Avg Win", f"${avg_win:.2f}")
 m5.metric("Avg Loss", f"${avg_loss:.2f}", delta_color="inverse")
+m6.metric("Risk Averted", f"${total_risk_saved:,.2f}", delta_color="normal", help="Total capital saved by closing losers early vs Max Loss.")
 
 st.markdown("---")
 
@@ -194,20 +215,40 @@ for i, row in df.iloc[::-1].iterrows():
     
     pl = row['Realized_PL']
     is_win = pl > 0
+    
+    # Setup Colors
     border_color = SUCCESS_COLOR if is_win else WARNING_COLOR
     card_bg = "rgba(0, 200, 83, 0.05)" if is_win else "rgba(211, 47, 47, 0.05)"
     
+    # --- LOSS CONTEXT LOGIC ---
+    if not is_win:
+        max_loss_val = row['Max_Loss_Trade']
+        saved_val = max_loss_val - abs(pl)
+        # Display logic: "Lost $50.00 / Max $300.00"
+        pl_display = f"<span style='color:{WARNING_COLOR}'>-${abs(pl):,.2f}</span> <span style='font-size:0.6em; color:#888;'>/ Max -${max_loss_val:,.2f}</span>"
+        
+        # The Psychology "Saved" Badge
+        risk_badge = f"""
+        <div style="margin-top: 8px; font-size: 13px; color: {SAVED_COLOR}; font-weight: 500;">
+            🛡️ Risk Mgmt: Saved <strong>${saved_val:,.2f}</strong> vs Max Loss
+        </div>
+        """
+    else:
+        pl_display = f"<span style='color:{SUCCESS_COLOR}'>+${pl:,.2f}</span>"
+        risk_badge = ""
+
     with st.container():
         st.markdown(f"""
         <div style="border-left: 5px solid {border_color}; background-color: {card_bg}; padding: 15px; border-radius: 5px; margin-bottom: 10px;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <h3 style="margin:0; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span></h3>
-                <h3 style="margin:0; color:{border_color};">${pl:,.2f}</h3>
+                <h3 style="margin:0;">{pl_display}</h3>
             </div>
+            {risk_badge}
             <div style="display:flex; gap: 20px; margin-top: 10px; font-size: 14px; color: #ddd;">
                 <span><strong>Strikes:</strong> {row['Short_Strike']}/{row['Long_Strike']}</span>
                 <span><strong>Credit:</strong> ${row['Credit']}</span>
-                <span><strong>Close Debit:</strong> ${row.get('Debit_Paid', '0.00')}</span>
+                <span><strong>Cost to Close:</strong> ${row.get('Debit_Paid', '0.00')}</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -220,8 +261,6 @@ for i, row in df.iloc[::-1].iterrows():
                 st.caption(f"Trade ID: {row.get('Trade_ID', 'N/A')}")
             with c_act:
                 # Delete Button
-                # Note: We pass 'i' which is the DataFrame index. 
-                # This ensures we are targeting the correct row in the original list.
                 if st.button("🗑 Delete Log", key=f"del_{i}"):
                     if delete_log_entry(drive_service, i):
                         st.success("Deleted. Refreshing...")
