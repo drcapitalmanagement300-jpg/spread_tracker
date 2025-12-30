@@ -169,8 +169,12 @@ def get_stock_data(ticker):
         }
     except: return None
 
-# --- TRADE LOGIC ---
+# --- TRADE LOGIC (DYNAMIC SCAN) ---
 def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False):
+    """
+    Scans OTM puts from furthest OTM upwards to find the safest strike
+    that meets minimum credit requirements.
+    """
     try:
         exps = stock_obj.options
         if not exps: return None
@@ -184,48 +188,63 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False)
         chain = stock_obj.option_chain(best_exp)
         puts = chain.puts
         
-        target_strike = current_price * 0.95 
-        short_leg = puts.iloc[(puts['strike'] - target_strike).abs().argsort()[:1]]
-        if short_leg.empty: return None
+        # 1. Filter for OTM Puts only (Strike < Price)
+        # 2. Sort by Strike Ascending (Deep OTM first -> moving closer to ATM)
+        otm_puts = puts[puts['strike'] < current_price].sort_values('strike', ascending=True)
         
-        short_strike = short_leg.iloc[0]['strike']
-        short_bid = short_leg.iloc[0]['bid']
-        short_ask = short_leg.iloc[0]['ask']
-        
-        if short_ask == 0: return None 
-        if not dev_mode and (short_ask - short_bid) > 0.50: return None
+        if otm_puts.empty: return None
 
-        long_strike_target = short_strike - 5.0
-        long_leg = puts.iloc[(puts['strike'] - long_strike_target).abs().argsort()[:1]]
-        if long_leg.empty: return None
+        # --- RISK MANAGEMENT PATCH ---
+        # Old floor: $0.40. New Floor: $0.80 (Sustainable Expectancy)
+        # 0.80 credit on $5 wide = Risking $4.20 to make $0.80. Ratio 1 : 5.25
+        min_credit = 0.05 if dev_mode else 0.80
         
-        long_strike = long_leg.iloc[0]['strike']
-        long_ask = long_leg.iloc[0]['ask']
-        
-        if abs((short_strike - long_strike) - 5.0) > 1.0: return None
+        best_spread = None
 
-        credit = short_bid - long_ask 
-        max_loss = (short_strike - long_strike) - credit
-        
-        # In Dev Mode, accept any credit > 0
-        min_credit = 0.05 if dev_mode else 0.40
-        if credit < min_credit: return None
+        # 3. Dynamic Sweep: Check every strike starting from the bottom
+        for index, short_row in otm_puts.iterrows():
+            short_strike = short_row['strike']
+            
+            # Find Long Leg ($5 wide)
+            long_strike_target = short_strike - 5.0
+            
+            # Look for exact match first (most liquid chains have $5 increments)
+            long_leg = puts[abs(puts['strike'] - long_strike_target) < 0.1]
+            
+            if long_leg.empty:
+                continue 
+            
+            long_row = long_leg.iloc[0]
+            
+            # Liquidity Check (Short leg Bid/Ask spread)
+            if short_row['ask'] == 0: continue
+            if not dev_mode and (short_row['ask'] - short_row['bid']) > 0.50: continue
 
-        roi = (credit / max_loss) * 100 if max_loss > 0 else 0
-        iv = get_implied_volatility(current_price, short_strike, dte/365, (short_bid+short_ask)/2) * 100
-        
-        # Format Expiry Date Long Form
-        exp_date_obj = datetime.strptime(best_exp, "%Y-%m-%d")
-        exp_date_str = exp_date_obj.strftime("%b %d, %Y") # Jan 30, 2026
+            credit = short_row['bid'] - long_row['ask']
+            
+            # 4. The Trigger: Does this pay enough?
+            if credit >= min_credit:
+                
+                max_loss = (short_strike - long_row['strike']) - credit
+                roi = (credit / max_loss) * 100 if max_loss > 0 else 0
+                iv = get_implied_volatility(current_price, short_strike, dte/365, (short_row['bid']+short_row['ask'])/2) * 100
+                
+                # Format Expiry
+                exp_date_obj = datetime.strptime(best_exp, "%Y-%m-%d")
+                exp_date_str = exp_date_obj.strftime("%b %d, %Y")
 
-        return {
-            "expiration_raw": best_exp, # Keep raw for ID/Logic
-            "expiration": exp_date_str, # Display string
-            "dte": dte, 
-            "short": short_strike, "long": long_strike,
-            "credit": credit, "max_loss": max_loss, 
-            "iv": iv, "roi": roi
-        }
+                best_spread = {
+                    "expiration_raw": best_exp,
+                    "expiration": exp_date_str,
+                    "dte": dte, 
+                    "short": short_strike, "long": long_row['strike'],
+                    "credit": credit, "max_loss": max_loss, 
+                    "iv": iv, "roi": roi
+                }
+                break # Stop scanning, we found the safest valid trade
+        
+        return best_spread
+
     except: return None
 
 # --- PLOTTING FUNCTION ---
@@ -318,7 +337,7 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
         # 2. Filter Rank
         if not dev_mode and data['rank'] < 80: continue 
 
-        # 3. Find Trade
+        # 3. Find Trade (Dynamic OTM Scan)
         obj = yf.Ticker(ticker)
         spread = find_optimal_spread(obj, data['price'], dev_mode=dev_mode)
         
@@ -327,14 +346,15 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
             if not dev_mode and data['earnings_days'] < spread['dte'] + 2:
                 continue 
 
-            # Normalize Score (0-100 Scale)
-            # Rank (0-100) * 0.6 + ROI (typ 15-25) * 2.0
-            # Result can be > 100 (e.g., 160). 
-            # Divide by 1.6 to normalize to a 0-100 scale.
+            # Recalibrated Score for Higher Credit:
+            # Rank (0-100) * 0.6 + ROI (now 19-30%) * 2.0
+            # Example: Rank 80, ROI 19% (min credit) -> 48 + 38 = 86
+            # Example: Rank 100, ROI 25% (great credit) -> 60 + 50 = 110
+            # Divisor 1.1 makes 110 -> 100.
             raw_score = (data['rank'] * 0.6) + (spread['roi'] * 2.0)
-            score = raw_score / 1.6
+            score = raw_score / 1.1
             
-            # Cap strictly at 100 for display, but use full float for sorting
+            # Cap at 100
             display_score = min(score, 100.0)
             
             results.append({"ticker": ticker, "data": data, "spread": spread, "score": score, "display_score": display_score})
@@ -381,6 +401,7 @@ if st.session_state.scan_results is not None:
                     
                     st.divider()
 
+                    # Left Column: Strikes, Credit, Max Risk
                     c1, c2 = st.columns(2)
                     with c1:
                         st.markdown(f"""
@@ -393,6 +414,8 @@ if st.session_state.scan_results is not None:
                         <div class="metric-label">Max Risk/Trade Cost</div>
                         <div class="metric-value" style="color:#FF4B4B">${s['max_loss']*100:.0f}</div>
                         """, unsafe_allow_html=True)
+                    
+                    # Right Column: Expiry (Aligned)
                     with c2:
                         st.markdown(f"""
                         <div class="metric-label">Expiry</div>
