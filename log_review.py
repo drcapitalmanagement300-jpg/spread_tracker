@@ -228,30 +228,28 @@ for i, row in df.iloc[::-1].iterrows():
         pl_display = f"<span style='color:{WARNING_COLOR}'>-${abs(pl):,.2f}</span> <span style='font-size:0.6em; color:#888;'>/ Max -${max_loss_val:,.2f}</span>"
         
         # The Psychology "Saved" Badge
-        risk_badge = f"""
-        <div style="margin-top: 8px; font-size: 13px; color: {SAVED_COLOR}; font-weight: 500;">
-            🛡️ Risk Mgmt: Saved <strong>${saved_val:,.2f}</strong> vs Max Loss
-        </div>
-        """
+        # Note: No extra indentation inside string to prevent Markdown code block issues
+        risk_badge = f"""<div style="margin-top: 8px; font-size: 13px; color: {SAVED_COLOR}; font-weight: 500;">🛡️ Risk Mgmt: Saved <strong>${saved_val:,.2f}</strong> vs Max Loss</div>"""
     else:
         pl_display = f"<span style='color:{SUCCESS_COLOR}'>+${pl:,.2f}</span>"
         risk_badge = ""
 
     with st.container():
+        # FIXED: Removed extra indentation in the HTML string to fix "Raw HTML Visible" error
         st.markdown(f"""
-        <div style="border-left: 5px solid {border_color}; background-color: {card_bg}; padding: 15px; border-radius: 5px; margin-bottom: 10px;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h3 style="margin:0; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span></h3>
-                <h3 style="margin:0;">{pl_display}</h3>
-            </div>
-            {risk_badge}
-            <div style="display:flex; gap: 20px; margin-top: 10px; font-size: 14px; color: #ddd;">
-                <span><strong>Strikes:</strong> {row['Short_Strike']}/{row['Long_Strike']}</span>
-                <span><strong>Credit:</strong> ${row['Credit']}</span>
-                <span><strong>Cost to Close:</strong> ${row.get('Debit_Paid', '0.00')}</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+<div style="border-left: 5px solid {border_color}; background-color: {card_bg}; padding: 15px; border-radius: 5px; margin-bottom: 10px;">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 style="margin:0; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span></h3>
+        <h3 style="margin:0;">{pl_display}</h3>
+    </div>
+    {risk_badge}
+    <div style="display:flex; gap: 20px; margin-top: 10px; font-size: 14px; color: #ddd;">
+        <span><strong>Strikes:</strong> {row['Short_Strike']}/{row['Long_Strike']}</span>
+        <span><strong>Credit:</strong> ${row['Credit']}</span>
+        <span><strong>Cost to Close:</strong> ${row.get('Debit_Paid', '0.00')}</span>
+    </div>
+</div>
+""", unsafe_allow_html=True)
         
         # Expander for details and actions
         with st.expander(f"Details & Notes for {row['Ticker']}"):
