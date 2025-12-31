@@ -25,6 +25,8 @@ STOP_LOSS_COLOR = "#FFA726"
 WHITE_DIVIDER_HTML = "<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: 10px; margin-bottom: 10px;'>"
 
 # ---------------- UI Refresh ----------------
+# This automatically re-runs the script every 60 seconds, 
+# which triggers the load_from_drive() below, keeping data in sync.
 st_autorefresh(interval=60_000, key="ui_refresh")
 
 # ---------------- Auth / Drive ----------------
@@ -178,6 +180,7 @@ def render_profit_bar(profit_pct):
     )
 
 # ---------------- Load Drive State ----------------
+# Automatically fetch the latest data from Drive every time the app reruns.
 if drive_service:
     st.session_state.trades = load_from_drive(drive_service) or []
 else:
@@ -408,20 +411,6 @@ else:
 
         # Solid White Divider between trades
         st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
-
-# ---------------- Manual Controls (No Header) ----------------
-ctl1, ctl2, ctl_spacer = st.columns([1.5, 1.5, 5])
-with ctl1:
-    if st.button("💾 Save to Drive"):
-        if drive_service and save_to_drive(drive_service, st.session_state.trades):
-            st.success("Saved.")
-with ctl2:
-    if st.button("📥 Reload from Drive"):
-        if drive_service:
-            loaded = load_from_drive(drive_service)
-            if loaded is not None:
-                st.session_state.trades = loaded
-                st.rerun()
 
 # ---------------- External Tools (No Header) ----------------
 t1, t2 = st.columns(2)
