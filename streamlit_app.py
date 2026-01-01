@@ -269,6 +269,7 @@ else:
             price_display = f"${current_price:.2f}" if current_price else "$-.--"
             theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
             
+            # --- Modified Divider Color Here (border-top: 1px solid #444) ---
             left_card_html = (
                 f"<div style='line-height: 1.4; font-size: 15px;'>"
                 f"<div style='display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;'>"
@@ -297,7 +298,7 @@ else:
                     f"<div style='grid-column: span 2;'><strong>Exp:</strong> {t['expiration']}</div>"
                 f"</div>"
                 
-                f"<div style='margin-top: 15px; padding-top: 10px; border-top: 1px solid #eee; display: flex; justify-content: space-between; align-items: center;'>"
+                f"<div style='margin-top: 15px; padding-top: 10px; border-top: 1px solid #444; display: flex; justify-content: space-between; align-items: center;'>"
                     f"<div style='color: {status_color}; font-weight: bold;'>"
                     f"{status_icon} {status_msg}"
                     f"</div>"
