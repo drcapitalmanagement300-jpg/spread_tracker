@@ -23,8 +23,6 @@ WARNING_COLOR = "#d32f2f"
 BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
-# CSS FIX: Changed margin-top to -5px to pull the line up
-WHITE_DIVIDER_HTML = "<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: -5px; margin-bottom: 10px;'>"
 
 # --- INITIALIZE DRIVE SERVICE ---
 drive_service = None
@@ -170,16 +168,16 @@ def get_stock_data(ticker):
         }
     except: return None
 
-# --- TRADE LOGIC ---
+# --- TRADE LOGIC (TUNED) ---
 def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev_mode=False):
     try:
         exps = stock_obj.options
         if not exps: return None
         
-        # --- 1. EXPANDED DTE FOR DEV MODE ---
-        # Strict: 30-45 | Dev: 14-60
-        min_days = 14 if dev_mode else 30
-        max_days = 60 if dev_mode else 45
+        # 1. DTE TUNING
+        # Widen slightly to ensure we catch monthly cycles
+        min_days = 14 if dev_mode else 25
+        max_days = 60 if dev_mode else 50
         
         target_min_date = datetime.now() + timedelta(days=min_days)
         target_max_date = datetime.now() + timedelta(days=max_days)
@@ -196,7 +194,7 @@ def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev
         best_exp = max(valid_exps) 
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
 
-        # --- 2. CLIFF-PROOF SAFETY ---
+        # 2. SAFETY: CLIFF-PROOF
         if not dev_mode and earnings_days <= dte + 1:
             return None
 
@@ -206,26 +204,29 @@ def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev
         atm_puts = puts[abs(puts['strike'] - current_price) == abs(puts['strike'] - current_price).min()]
         imp_vol = atm_puts.iloc[0]['impliedVolatility'] if not atm_puts.empty else (current_hv / 100.0)
 
-        # --- 3. EDGE TARGETING & DEV MODE FALLBACK ---
-        expected_move = current_price * imp_vol * np.sqrt(dte/365) * 0.85
+        # 3. TARGETING (0.75x EM)
+        # Using 0.75x instead of 0.85x to ensure we find candidates in lower vol environments
+        expected_move = current_price * imp_vol * np.sqrt(dte/365) * 0.75
         target_short_strike = current_price - expected_move
         
         otm_puts = puts[puts['strike'] <= target_short_strike].sort_values('strike', ascending=False)
         
-        # CRITICAL FIX: If standard targeting returns nothing, and we are in Dev Mode, 
-        # fallback to ALL OTM puts so at least something shows up.
+        # Fallback for Dev Mode
         if otm_puts.empty:
             if dev_mode:
                 otm_puts = puts[puts['strike'] < current_price].sort_values('strike', ascending=False)
             else:
-                return None
-        
+                # Try one last check closer to money (standard 1SD)
+                target_short_fallback = current_price * 0.95
+                otm_puts = puts[puts['strike'] <= target_short_fallback].sort_values('strike', ascending=False)
+
         if otm_puts.empty: return None
 
-        # --- 4. WIPEOUT FACTOR & LIQUIDITY ---
+        # 4. WIPEOUT FACTOR (REALISTIC)
         width = 5.0
-        min_credit = width * 0.25 # 25% rule
-        if dev_mode: min_credit = 0.05 # Relaxed credit requirement
+        # Min Credit: $0.70 (14% Yield)
+        min_credit = 0.70 
+        if dev_mode: min_credit = 0.05
 
         best_spread = None
 
@@ -234,26 +235,20 @@ def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev
             bid = short_row['bid']
             ask = short_row['ask']
             
-            # Skip invalid data
             if ask <= 0: continue
             
-            # --- LIQUIDITY CHECK ---
+            # Liquidity: Tolerant logic
             spread_width = ask - bid
             slippage_pct = spread_width / ask
-            
-            # Liquid if: Spread <= 0.05 OR Slippage <= 15% OR Dev Mode
-            is_liquid = dev_mode or (spread_width <= 0.05) or (slippage_pct <= 0.15)
+            is_liquid = dev_mode or (spread_width <= 0.05) or (slippage_pct <= 0.20)
             
             if not is_liquid: continue
 
-            # --- LONG LEG CHECK ---
+            # Long Leg
             long_strike_target = short_strike - width
-            long_leg = puts[abs(puts['strike'] - long_strike_target) < 0.1]
+            long_leg = puts[abs(puts['strike'] - long_strike_target) < 0.2] 
             
-            # If standard $5 width fails in Dev Mode, try $2.5 or $10 (Optional resilience)
-            if long_leg.empty:
-                continue 
-            
+            if long_leg.empty: continue 
             long_row = long_leg.iloc[0]
             mid_credit = bid - long_row['ask']
             
@@ -329,8 +324,7 @@ with header_col2:
         <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
     </div>""", unsafe_allow_html=True)
 
-# THE WHITE LINE
-st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
+# NO DIVIDER LINE HERE - Removed as requested
 
 with st.sidebar:
     st.header("Scanner Settings")
@@ -384,11 +378,13 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
                 credit_ratio = spread['credit'] / width
                 if credit_ratio >= 0.30: score += 20
                 elif credit_ratio >= 0.25: score += 15
+                elif credit_ratio >= 0.15: score += 10 # Added tier for acceptable credit
             if data['is_above_sma']: score += 10
             
             display_score = min(score, 100.0)
             
-            if dev_mode or display_score >= 60:
+            # Lowered display threshold slightly to catch 'Good' trades
+            if dev_mode or display_score >= 50:
                 results.append({"ticker": ticker, "data": data, "spread": spread, "score": score, "display_score": display_score})
     
     progress.empty()
@@ -414,7 +410,7 @@ if st.session_state.scan_results is not None:
                     badge_text = "ELITE EDGE" if res['display_score'] >= 80 else "SOLID SETUP"
                     badge_style = "border: 1px solid #00C853; color: #00C853;" if res['display_score'] >= 80 else "border: 1px solid #d4ac0d; color: #d4ac0d;"
                     
-                    if dev_mode and res['display_score'] < 60:
+                    if dev_mode and res['display_score'] < 50:
                         badge_text = "TEST RESULT"
                         badge_style = "border: 1px solid gray; color: gray;"
 
