@@ -14,7 +14,7 @@ from persistence import (
 )
 
 # --- CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Spread Sniper: Journal")
+st.set_page_config(layout="wide", page_title="Log Review")
 
 # --- CONSTANTS & STYLING ---
 SUCCESS_COLOR = "#00C853"
