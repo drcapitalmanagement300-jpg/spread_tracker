@@ -15,7 +15,7 @@ from persistence import (
 )
 
 # --- CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Spread Sniper Pro")
+st.set_page_config(layout="wide", page_title="Spread Finder")
 
 # --- CONSTANTS & COLORS ---
 SUCCESS_COLOR = "#00C853"
