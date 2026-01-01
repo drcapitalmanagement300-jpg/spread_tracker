@@ -16,7 +16,7 @@ from persistence import (
 )
 
 # ---------------- Page config ----------------
-st.set_page_config(page_title="Put Credit Spread Monitor", layout="wide")
+st.set_page_config(page_title="Dashboard", layout="wide")
 
 # ---------------- Constants ----------------
 SUCCESS_COLOR = "#00C853"
