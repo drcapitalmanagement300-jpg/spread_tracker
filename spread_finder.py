@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import scipy.stats as si
 from datetime import datetime, timedelta
 
-# Import persistence (Ensure persistence.py is in the same folder)
+# Import persistence
 from persistence import (
     build_drive_service_from_session,
     save_to_drive,
@@ -23,7 +23,8 @@ WARNING_COLOR = "#d32f2f"
 BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
-WHITE_DIVIDER_HTML = "<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: 10px; margin-bottom: 10px;'>"
+# CSS FIX: Changed margin-top to -5px to pull the line up
+WHITE_DIVIDER_HTML = "<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: -5px; margin-bottom: 10px;'>"
 
 # --- INITIALIZE DRIVE SERVICE ---
 drive_service = None
@@ -43,26 +44,17 @@ if "trades" not in st.session_state:
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 
-# 1. EXPANDED UNIVERSE (100 Tickers)
+# 1. EXPANDED UNIVERSE
 LIQUID_TICKERS = [
-    # Indices & ETFs
     "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX",
     "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS",
-    # Mega Cap Tech
     "NVDA", "TSLA", "AAPL", "MSFT", "AMD", "AMZN", "META", "GOOGL", "NFLX", 
-    # Semiconductors & Hardware
     "AVGO", "QCOM", "INTC", "MU", "ARM", "TXN", "AMAT", "LRCX", "ADI", "IBM", "CSCO", "ORCL",
-    # Software & Cloud
     "PLTR", "CRM", "ADBE", "SNOW", "NOW", "WDAY", "PANW", "CRWD", "DDOG", "NET",
-    # Crypto & Fintech
     "COIN", "MSTR", "HOOD", "SQ", "PYPL", "V", "MA", "AFRM", "SOFI",
-    # Consumer & Retail
     "DKNG", "UBER", "ABNB", "ROKU", "SHOP", "DIS", "NKE", "SBUX", "MCD", "WMT", "TGT", "COST", "HD", "LOW", "LULU", "CMG",
-    # Financials
     "JPM", "BAC", "WFC", "GS", "MS", "C", "AXP", "BLK",
-    # Industrials & Energy
     "BA", "CAT", "GE", "F", "GM", "XOM", "CVX", "COP", "OXY", "SLB", "HAL",
-    # Pharma & Bio
     "LLY", "UNH", "JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "MRNA"
 ]
 
@@ -96,20 +88,13 @@ def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_r
 
 # --- MARKET HEALTH CHECK ---
 def get_market_health():
-    """
-    Checks if SPY is above its 200 SMA.
-    Returns (bool, current_price, sma_200)
-    """
     try:
         spy = yf.Ticker("SPY")
-        # Need at least 200 candles + buffer
         hist = spy.history(period="1y") 
         if hist.empty or len(hist) < 200:
-            return True, 0, 0 # Default to True if data fails to avoid blocking users unnecessarily
-        
+            return True, 0, 0 
         current_price = hist['Close'].iloc[-1]
         sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
-        
         is_healthy = current_price > sma_200
         return is_healthy, current_price, sma_200
     except Exception as e:
@@ -127,28 +112,23 @@ def get_stock_data(ticker):
         prev_price = hist['Close'].iloc[-2]
         change_pct = ((current_price - prev_price) / prev_price) * 100
         
-        # Volatility Calc
         hist['Returns'] = hist['Close'].pct_change()
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
         current_hv = hist['HV'].iloc[-1] if not pd.isna(hist['HV'].iloc[-1]) else 0
 
-        # Technical Check (SMA 100)
         sma_100 = hist['Close'].rolling(window=100).mean().iloc[-1] if len(hist) >= 100 else current_price
         is_above_sma = current_price > sma_100
 
-        # IV Rank Proxy
         rank = 50
         if not hist['HV'].empty:
             mn, mx = hist['HV'].min(), hist['HV'].max()
             if mx != mn: 
                 rank = ((current_hv - mn) / (mx - mn)) * 100
 
-        # Earnings Logic
         earnings_days = 999
         next_earnings_date_str = "Unknown"
         try:
             future_dates = []
-            # ... (Existing robust earnings logic) ...
             try:
                 dates_df = stock.get_earnings_dates(limit=8)
                 if dates_df is not None and not dates_df.empty:
@@ -159,7 +139,6 @@ def get_stock_data(ticker):
             except: pass
 
             if not future_dates:
-                # Calendar Fallback
                 try:
                     cal = stock.calendar
                     if cal is not None:
@@ -197,9 +176,13 @@ def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev
         exps = stock_obj.options
         if not exps: return None
         
-        # 1. DTE Sweet Spot (30-45 Days)
-        target_min_date = datetime.now() + timedelta(days=30)
-        target_max_date = datetime.now() + timedelta(days=45)
+        # --- 1. EXPANDED DTE FOR DEV MODE ---
+        # Strict: 30-45 | Dev: 14-60
+        min_days = 14 if dev_mode else 30
+        max_days = 60 if dev_mode else 45
+        
+        target_min_date = datetime.now() + timedelta(days=min_days)
+        target_max_date = datetime.now() + timedelta(days=max_days)
         
         valid_exps = []
         for e in exps:
@@ -210,31 +193,39 @@ def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev
             except: pass
             
         if not valid_exps: return None
-        best_exp = max(valid_exps) # Prefer 45 DTE
+        best_exp = max(valid_exps) 
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
 
-        # 2. Cliff-Proof Safety
+        # --- 2. CLIFF-PROOF SAFETY ---
         if not dev_mode and earnings_days <= dte + 1:
             return None
 
         chain = stock_obj.option_chain(best_exp)
         puts = chain.puts
         
-        # Estimate ATM IV
         atm_puts = puts[abs(puts['strike'] - current_price) == abs(puts['strike'] - current_price).min()]
         imp_vol = atm_puts.iloc[0]['impliedVolatility'] if not atm_puts.empty else (current_hv / 100.0)
 
-        # 3. Edge Targeting (0.85x Expected Move)
+        # --- 3. EDGE TARGETING & DEV MODE FALLBACK ---
         expected_move = current_price * imp_vol * np.sqrt(dte/365) * 0.85
         target_short_strike = current_price - expected_move
         
         otm_puts = puts[puts['strike'] <= target_short_strike].sort_values('strike', ascending=False)
+        
+        # CRITICAL FIX: If standard targeting returns nothing, and we are in Dev Mode, 
+        # fallback to ALL OTM puts so at least something shows up.
+        if otm_puts.empty:
+            if dev_mode:
+                otm_puts = puts[puts['strike'] < current_price].sort_values('strike', ascending=False)
+            else:
+                return None
+        
         if otm_puts.empty: return None
 
-        # 4. Wipeout Factor
+        # --- 4. WIPEOUT FACTOR & LIQUIDITY ---
         width = 5.0
-        min_credit = width * 0.25 # 25% rule ($1.25 on $5 wide)
-        if dev_mode: min_credit = 0.10
+        min_credit = width * 0.25 # 25% rule
+        if dev_mode: min_credit = 0.05 # Relaxed credit requirement
 
         best_spread = None
 
@@ -243,30 +234,27 @@ def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev
             bid = short_row['bid']
             ask = short_row['ask']
             
-            # --- UPDATED LIQUIDITY LOGIC (RELATIVE SLIPPAGE) ---
-            # Rule: We tolerate high spreads ONLY if they are a small % of the total premium.
-            # Max allowed slippage: 15% of the Ask price OR absolute $0.05 min floor.
-            
-            spread_width = ask - bid
-            
-            # If ask is 0 (illiquid garbage), skip
+            # Skip invalid data
             if ask <= 0: continue
             
+            # --- LIQUIDITY CHECK ---
+            spread_width = ask - bid
             slippage_pct = spread_width / ask
             
-            # Pass if strict mode is OFF, OR if spread is small (<=0.05), OR if slippage is reasonable (<=15%)
+            # Liquid if: Spread <= 0.05 OR Slippage <= 15% OR Dev Mode
             is_liquid = dev_mode or (spread_width <= 0.05) or (slippage_pct <= 0.15)
             
-            if not is_liquid:
-                continue
+            if not is_liquid: continue
 
-            # Check Long Leg
+            # --- LONG LEG CHECK ---
             long_strike_target = short_strike - width
             long_leg = puts[abs(puts['strike'] - long_strike_target) < 0.1]
-            if long_leg.empty: continue 
-            long_row = long_leg.iloc[0]
             
-            # Conservative Credit Calculation
+            # If standard $5 width fails in Dev Mode, try $2.5 or $10 (Optional resilience)
+            if long_leg.empty:
+                continue 
+            
+            long_row = long_leg.iloc[0]
             mid_credit = bid - long_row['ask']
             
             if mid_credit >= min_credit:
@@ -340,6 +328,8 @@ with header_col2:
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Spread Finder</h1>
         <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
     </div>""", unsafe_allow_html=True)
+
+# THE WHITE LINE
 st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 with st.sidebar:
@@ -361,7 +351,7 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
             <p style="color: #bbb; font-size: 14px;">Put Credit Spreads are high-risk in this environment. Enable <b>Dev Mode</b> if you wish to proceed anyway.</p>
         </div>
         """, unsafe_allow_html=True)
-        st.stop() # Halts execution here
+        st.stop()
 
     # 2. PROCEED IF HEALTHY
     status = st.empty()
@@ -424,6 +414,10 @@ if st.session_state.scan_results is not None:
                     badge_text = "ELITE EDGE" if res['display_score'] >= 80 else "SOLID SETUP"
                     badge_style = "border: 1px solid #00C853; color: #00C853;" if res['display_score'] >= 80 else "border: 1px solid #d4ac0d; color: #d4ac0d;"
                     
+                    if dev_mode and res['display_score'] < 60:
+                        badge_text = "TEST RESULT"
+                        badge_style = "border: 1px solid gray; color: gray;"
+
                     st.markdown(f"""
                     <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                         <div>
