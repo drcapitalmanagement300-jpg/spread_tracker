@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import scipy.stats as si
 from datetime import datetime, timedelta
 
-# Import persistence
+# Import persistence (Ensure persistence.py is in the same folder)
 from persistence import (
     build_drive_service_from_session,
     save_to_drive,
@@ -75,6 +75,7 @@ st.markdown("""
     .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
     .strategy-badge { border: 1px solid #d4ac0d; color: #d4ac0d; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
+    .warning-box { background-color: rgba(211, 47, 47, 0.1); border: 1px solid #d32f2f; border-radius: 8px; padding: 15px; margin-bottom: 20px; text-align: center; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -93,35 +94,61 @@ def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_r
         return abs(sigma)
     except: return 0.0
 
+# --- MARKET HEALTH CHECK ---
+def get_market_health():
+    """
+    Checks if SPY is above its 200 SMA.
+    Returns (bool, current_price, sma_200)
+    """
+    try:
+        spy = yf.Ticker("SPY")
+        # Need at least 200 candles + buffer
+        hist = spy.history(period="1y") 
+        if hist.empty or len(hist) < 200:
+            return True, 0, 0 # Default to True if data fails to avoid blocking users unnecessarily
+        
+        current_price = hist['Close'].iloc[-1]
+        sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
+        
+        is_healthy = current_price > sma_200
+        return is_healthy, current_price, sma_200
+    except Exception as e:
+        return True, 0, 0
+
 # --- DATA FETCHING ---
 @st.cache_data(ttl=3600)
 def get_stock_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="1y")
+        hist = stock.history(period="6mo") 
         if hist.empty: return None
         
         current_price = hist['Close'].iloc[-1]
         prev_price = hist['Close'].iloc[-2]
         change_pct = ((current_price - prev_price) / prev_price) * 100
         
+        # Volatility Calc
         hist['Returns'] = hist['Close'].pct_change()
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
-        
+        current_hv = hist['HV'].iloc[-1] if not pd.isna(hist['HV'].iloc[-1]) else 0
+
+        # Technical Check (SMA 100)
+        sma_100 = hist['Close'].rolling(window=100).mean().iloc[-1] if len(hist) >= 100 else current_price
+        is_above_sma = current_price > sma_100
+
+        # IV Rank Proxy
         rank = 50
         if not hist['HV'].empty:
             mn, mx = hist['HV'].min(), hist['HV'].max()
             if mx != mn: 
-                rank = ((hist['HV'].iloc[-1] - mn) / (mx - mn)) * 100
+                rank = ((current_hv - mn) / (mx - mn)) * 100
 
-        # --- ROBUST EARNINGS FETCH ---
+        # Earnings Logic
         earnings_days = 999
         next_earnings_date_str = "Unknown"
-        
         try:
             future_dates = []
-            
-            # Method 1: get_earnings_dates()
+            # ... (Existing robust earnings logic) ...
             try:
                 dates_df = stock.get_earnings_dates(limit=8)
                 if dates_df is not None and not dates_df.empty:
@@ -131,8 +158,8 @@ def get_stock_data(ticker):
                             future_dates.append(d.date())
             except: pass
 
-            # Method 2: Calendar fallback
             if not future_dates:
+                # Calendar Fallback
                 try:
                     cal = stock.calendar
                     if cal is not None:
@@ -144,92 +171,109 @@ def get_stock_data(ticker):
                                         for d in ds:
                                             if d.date() > datetime.now().date():
                                                 future_dates.append(d.date())
-                        elif isinstance(cal, pd.DataFrame) and not cal.empty:
-                            for val in cal.values.flatten():
-                                if isinstance(val, (datetime, pd.Timestamp)):
-                                    if val.date() > datetime.now().date():
-                                        future_dates.append(val.date())
                 except: pass
 
             if future_dates:
                 next_date = min(future_dates)
                 earnings_days = (next_date - datetime.now().date()).days
                 next_earnings_date_str = next_date.strftime("%b %d")
-                
-        except Exception:
-            pass 
+        except: pass 
 
         return {
             "price": current_price,
             "change_pct": change_pct,
             "rank": rank,
+            "hv": current_hv,
+            "is_above_sma": is_above_sma,
             "earnings_days": earnings_days,
             "earnings_date_str": next_earnings_date_str,
             "hist": hist
         }
     except: return None
 
-# --- TRADE LOGIC (DYNAMIC SCAN) ---
-def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False):
-    """
-    Scans OTM puts from furthest OTM upwards to find the safest strike
-    that meets minimum credit requirements.
-    """
+# --- TRADE LOGIC ---
+def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev_mode=False):
     try:
         exps = stock_obj.options
         if not exps: return None
         
-        target_date = datetime.now() + timedelta(days=target_dte)
-        best_exp = min(exps, key=lambda x: abs((datetime.strptime(x, "%Y-%m-%d") - target_date).days))
-        dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
+        # 1. DTE Sweet Spot (30-45 Days)
+        target_min_date = datetime.now() + timedelta(days=30)
+        target_max_date = datetime.now() + timedelta(days=45)
         
-        if dte < 20 or dte > 50: return None 
+        valid_exps = []
+        for e in exps:
+            try:
+                edate = datetime.strptime(e, "%Y-%m-%d")
+                if target_min_date <= edate <= target_max_date:
+                    valid_exps.append(e)
+            except: pass
+            
+        if not valid_exps: return None
+        best_exp = max(valid_exps) # Prefer 45 DTE
+        dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
+
+        # 2. Cliff-Proof Safety
+        if not dev_mode and earnings_days <= dte + 1:
+            return None
 
         chain = stock_obj.option_chain(best_exp)
         puts = chain.puts
         
-        # 1. Filter for OTM Puts only (Strike < Price)
-        # 2. Sort by Strike Ascending (Deep OTM first -> moving closer to ATM)
-        otm_puts = puts[puts['strike'] < current_price].sort_values('strike', ascending=True)
+        # Estimate ATM IV
+        atm_puts = puts[abs(puts['strike'] - current_price) == abs(puts['strike'] - current_price).min()]
+        imp_vol = atm_puts.iloc[0]['impliedVolatility'] if not atm_puts.empty else (current_hv / 100.0)
+
+        # 3. Edge Targeting (0.85x Expected Move)
+        expected_move = current_price * imp_vol * np.sqrt(dte/365) * 0.85
+        target_short_strike = current_price - expected_move
         
+        otm_puts = puts[puts['strike'] <= target_short_strike].sort_values('strike', ascending=False)
         if otm_puts.empty: return None
 
-        # --- RISK MANAGEMENT PATCH ---
-        # Old floor: $0.40. New Floor: $0.80 (Sustainable Expectancy)
-        # 0.80 credit on $5 wide = Risking $4.20 to make $0.80. Ratio 1 : 5.25
-        min_credit = 0.05 if dev_mode else 0.80
-        
+        # 4. Wipeout Factor
+        width = 5.0
+        min_credit = width * 0.25 # 25% rule ($1.25 on $5 wide)
+        if dev_mode: min_credit = 0.10
+
         best_spread = None
 
-        # 3. Dynamic Sweep: Check every strike starting from the bottom
         for index, short_row in otm_puts.iterrows():
             short_strike = short_row['strike']
+            bid = short_row['bid']
+            ask = short_row['ask']
             
-            # Find Long Leg ($5 wide)
-            long_strike_target = short_strike - 5.0
+            # --- UPDATED LIQUIDITY LOGIC (RELATIVE SLIPPAGE) ---
+            # Rule: We tolerate high spreads ONLY if they are a small % of the total premium.
+            # Max allowed slippage: 15% of the Ask price OR absolute $0.05 min floor.
             
-            # Look for exact match first (most liquid chains have $5 increments)
+            spread_width = ask - bid
+            
+            # If ask is 0 (illiquid garbage), skip
+            if ask <= 0: continue
+            
+            slippage_pct = spread_width / ask
+            
+            # Pass if strict mode is OFF, OR if spread is small (<=0.05), OR if slippage is reasonable (<=15%)
+            is_liquid = dev_mode or (spread_width <= 0.05) or (slippage_pct <= 0.15)
+            
+            if not is_liquid:
+                continue
+
+            # Check Long Leg
+            long_strike_target = short_strike - width
             long_leg = puts[abs(puts['strike'] - long_strike_target) < 0.1]
-            
-            if long_leg.empty:
-                continue 
-            
+            if long_leg.empty: continue 
             long_row = long_leg.iloc[0]
             
-            # Liquidity Check (Short leg Bid/Ask spread)
-            if short_row['ask'] == 0: continue
-            if not dev_mode and (short_row['ask'] - short_row['bid']) > 0.50: continue
-
-            credit = short_row['bid'] - long_row['ask']
+            # Conservative Credit Calculation
+            mid_credit = bid - long_row['ask']
             
-            # 4. The Trigger: Does this pay enough?
-            if credit >= min_credit:
+            if mid_credit >= min_credit:
+                max_loss = width - mid_credit
+                roi = (mid_credit / max_loss) * 100 if max_loss > 0 else 0
+                iv = short_row['impliedVolatility'] * 100
                 
-                max_loss = (short_strike - long_row['strike']) - credit
-                roi = (credit / max_loss) * 100 if max_loss > 0 else 0
-                iv = get_implied_volatility(current_price, short_strike, dte/365, (short_row['bid']+short_row['ask'])/2) * 100
-                
-                # Format Expiry
                 exp_date_obj = datetime.strptime(best_exp, "%Y-%m-%d")
                 exp_date_str = exp_date_obj.strftime("%b %d, %Y")
 
@@ -238,10 +282,11 @@ def find_optimal_spread(stock_obj, current_price, target_dte=30, dev_mode=False)
                     "expiration": exp_date_str,
                     "dte": dte, 
                     "short": short_strike, "long": long_row['strike'],
-                    "credit": credit, "max_loss": max_loss, 
-                    "iv": iv, "roi": roi
+                    "credit": mid_credit, "max_loss": max_loss, 
+                    "iv": iv, "roi": roi,
+                    "em": expected_move
                 }
-                break # Stop scanning, we found the safest valid trade
+                break 
         
         return best_spread
 
@@ -255,7 +300,6 @@ def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
     
     last_60 = hist.tail(60).copy()
     dates = last_60.index
-    
     if 'Open' not in last_60.columns: last_60['Open'] = last_60['Close']
 
     bar_colors = np.where(last_60['Close'] >= last_60['Open'], SUCCESS_COLOR, WARNING_COLOR)
@@ -263,11 +307,11 @@ def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
     bottoms = last_60['Open']
     
     ax.bar(dates, heights, bottom=bottoms, color=bar_colors, width=0.8, align='center', alpha=0.9)
-
     ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, alpha=0.9)
     ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
     ax.fill_between(dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.1)
 
+    # Vol Cone
     days_proj = 30
     safe_iv = iv if iv > 0 else 30
     vol_move = current_price * (safe_iv/100) * np.sqrt(np.arange(1, days_proj+1)/365)
@@ -278,50 +322,48 @@ def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
     ax.fill_between(future_dates, lower_cone, upper_cone, color='#00FFAA', alpha=0.1)
     ax.plot(future_dates, upper_cone, color='gray', linestyle=':', lw=0.5)
     ax.plot(future_dates, lower_cone, color='gray', linestyle=':', lw=0.5)
-    
     ax.fill_between(future_dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.08)
 
     ax.grid(True, which='major', linestyle=':', color=GRID_COLOR, alpha=0.3)
     ax.axis('off') 
-    
     plt.tight_layout(pad=0.1)
     return fig
 
 # --- MAIN UI ---
-
-# ---------------- Header ----------------
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
-
 with header_col1:
-    try:
-        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
-    except Exception:
-        st.write("**DR CAPITAL**")
-
+    try: st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
+    except: st.write("**DR CAPITAL**")
 with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Spread Finder</h1>
         <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-with header_col3:
-    st.write("") 
-
+    </div>""", unsafe_allow_html=True)
 st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
-# --- SIDEBAR CONTROLS ---
 with st.sidebar:
     st.header("Scanner Settings")
-    dev_mode = st.checkbox("🛠 Dev Mode (Bypass Filters)", value=False, help="Check this to see ALL valid spread structures.")
-    
-    if dev_mode:
-        st.warning("⚠️ DEV MODE ACTIVE: Filters are disabled.")
+    dev_mode = st.checkbox("🛠 Dev Mode (Bypass Filters)", value=False, help="Check this to test in bear markets.")
+    if dev_mode: st.warning("⚠️ DEV MODE ACTIVE: Safety Filters Disabled.")
 
-# --- SCAN BUTTON LOGIC ---
+# --- SCAN BUTTON ---
 if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     
+    # 1. MARKET HEALTH CHECK
+    market_healthy, spy_price, spy_sma = get_market_health()
+    
+    if not market_healthy and not dev_mode:
+        st.markdown(f"""
+        <div class="warning-box">
+            <h3 style="color: #d32f2f; margin-bottom: 0px;">🚫 MARKET CAUTION: BEAR REGIME DETECTED</h3>
+            <p style="color: white; font-size: 16px;">SPY is trading at <b>${spy_price:.2f}</b>, below the 200 SMA (<b>${spy_sma:.2f}</b>).</p>
+            <p style="color: #bbb; font-size: 14px;">Put Credit Spreads are high-risk in this environment. Enable <b>Dev Mode</b> if you wish to proceed anyway.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop() # Halts execution here
+
+    # 2. PROCEED IF HEALTHY
     status = st.empty()
     progress = st.progress(0)
     results = []
@@ -330,49 +372,46 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
         status.caption(f"Analyzing {ticker}...")
         progress.progress((i + 1) / len(LIQUID_TICKERS))
         
-        # 1. Fetch
         data = get_stock_data(ticker)
         if not data: continue
         
-        # 2. Filter Rank
-        if not dev_mode and data['rank'] < 80: continue 
-
-        # 3. Find Trade (Dynamic OTM Scan)
-        obj = yf.Ticker(ticker)
-        spread = find_optimal_spread(obj, data['price'], dev_mode=dev_mode)
+        spread = find_optimal_spread(
+            yf.Ticker(ticker), 
+            data['price'], 
+            data['hv'], 
+            data['earnings_days'], 
+            dev_mode=dev_mode
+        )
         
         if spread:
-            # 4. Filter Earnings
-            if not dev_mode and data['earnings_days'] < spread['dte'] + 2:
-                continue 
-
-            # Recalibrated Score for Higher Credit:
-            # Rank (0-100) * 0.6 + ROI (now 19-30%) * 2.0
-            # Example: Rank 80, ROI 19% (min credit) -> 48 + 38 = 86
-            # Example: Rank 100, ROI 25% (great credit) -> 60 + 50 = 110
-            # Divisor 1.1 makes 110 -> 100.
-            raw_score = (data['rank'] * 0.6) + (spread['roi'] * 2.0)
-            score = raw_score / 1.1
+            # Score Logic
+            score = 0
+            if spread['iv'] > (data['hv'] + 5.0): score += 40
+            elif spread['iv'] > data['hv']: score += 20
+            score += 30 # Safety passed
+            width = spread['short'] - spread['long']
+            if width > 0:
+                credit_ratio = spread['credit'] / width
+                if credit_ratio >= 0.30: score += 20
+                elif credit_ratio >= 0.25: score += 15
+            if data['is_above_sma']: score += 10
             
-            # Cap at 100
             display_score = min(score, 100.0)
             
-            results.append({"ticker": ticker, "data": data, "spread": spread, "score": score, "display_score": display_score})
+            if dev_mode or display_score >= 60:
+                results.append({"ticker": ticker, "data": data, "spread": spread, "score": score, "display_score": display_score})
     
     progress.empty()
     status.empty()
-    
     st.session_state.scan_results = sorted(results, key=lambda x: x['score'], reverse=True)
 
 # --- DISPLAY LOGIC ---
 if st.session_state.scan_results is not None:
     results = st.session_state.scan_results
-    
     if not results:
-        st.info("No setups found.")
+        st.info("No setups found meeting criteria.")
     else:
-        st.success(f"Found {len(results)} Opportunities")
-        
+        st.success(f"Found {len(results)} High-Probability Opportunities")
         cols = st.columns(3)
         for i, res in enumerate(results):
             t = res['ticker']
@@ -382,13 +421,9 @@ if st.session_state.scan_results is not None:
             with cols[i % 3]:
                 with st.container(border=True):
                     pill_class = "price-pill-red" if d['change_pct'] < 0 else "price-pill-green"
+                    badge_text = "ELITE EDGE" if res['display_score'] >= 80 else "SOLID SETUP"
+                    badge_style = "border: 1px solid #00C853; color: #00C853;" if res['display_score'] >= 80 else "border: 1px solid #d4ac0d; color: #d4ac0d;"
                     
-                    badge_text = "PRIME SETUP"
-                    badge_style = "border: 1px solid #d4ac0d; color: #d4ac0d;" 
-                    if dev_mode and (d['rank'] < 80 or s['credit'] < 0.40):
-                        badge_text = "TEST RESULT"
-                        badge_style = "border: 1px solid gray; color: gray;"
-
                     st.markdown(f"""
                     <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                         <div>
@@ -398,10 +433,8 @@ if st.session_state.scan_results is not None:
                         <div class="strategy-badge" style="{badge_style}">{badge_text}</div>
                     </div>
                     """, unsafe_allow_html=True)
-                    
                     st.divider()
-
-                    # Left Column: Strikes, Credit, Max Risk
+                    
                     c1, c2 = st.columns(2)
                     with c1:
                         st.markdown(f"""
@@ -410,83 +443,53 @@ if st.session_state.scan_results is not None:
                         <div style="height: 8px;"></div>
                         <div class="metric-label">Credit</div>
                         <div class="metric-value" style="color:{SUCCESS_COLOR}">${s['credit']:.2f}</div>
-                        <div style="height: 8px;"></div>
-                        <div class="metric-label">Max Risk/Trade Cost</div>
-                        <div class="metric-value" style="color:#FF4B4B">${s['max_loss']*100:.0f}</div>
                         """, unsafe_allow_html=True)
-                    
-                    # Right Column: Expiry (Aligned)
                     with c2:
                         st.markdown(f"""
                         <div class="metric-label">Expiry</div>
                         <div class="metric-value">{s['dte']} Days</div>
                         <div style="font-size: 10px; color: gray;">{s['expiration']}</div>
+                        <div style="height: 8px;"></div>
+                        <div class="metric-label">Implied Vol</div>
+                        <div class="metric-value">{s['iv']:.1f}%</div>
                         """, unsafe_allow_html=True)
-
-                    st.markdown("---")
                     
+                    st.markdown("---")
                     vc1, vc2 = st.columns([2, 1])
-                    with vc1:
-                         st.pyplot(plot_sparkline_cone(d['hist'], d['price'], s['iv'], s['short'], s['long']), use_container_width=True)
+                    with vc1: st.pyplot(plot_sparkline_cone(d['hist'], d['price'], s['iv'], s['short'], s['long']), use_container_width=True)
                     with vc2:
                         st.markdown(f"""
-                        <div class="metric-label" style="text-align: right;">IV Rank</div>
-                        <div class="metric-value" style="text-align: right;">{d['rank']:.0f}%</div>
-                        <div style="height: 10px;"></div>
-                        <div class="metric-label" style="text-align: right;">Opp Score</div>
-                        <div class="metric-value" style="text-align: right; color: #d4ac0d;">{res['display_score']:.0f} / 100</div>
+                        <div class="metric-label" style="text-align: right;">Edge Score</div>
+                        <div class="metric-value" style="text-align: right; color: #d4ac0d;">{res['display_score']:.0f}</div>
                         """, unsafe_allow_html=True)
-
-                    st.markdown(f"""
-                    <div class="roc-box">
-                        <span style="font-size:11px; color: #00c864; text-transform: uppercase; letter-spacing: 1px;">Return on Capital</span><br>
-                        <span style="font-size:18px; font-weight:800; color: #00c864;">{s['roi']:.2f}%</span>
-                    </div>
-                    """, unsafe_allow_html=True)
                     
-                    # --- ADD TO DASHBOARD LOGIC ---
+                    st.markdown(f"""<div class="roc-box"><span style="font-size:11px; color: #00c864; text-transform: uppercase;">Return on Capital</span><br><span style="font-size:18px; font-weight:800; color: #00c864;">{s['roi']:.2f}%</span></div>""", unsafe_allow_html=True)
+                    
                     add_key = f"add_mode_{t}_{i}"
-                    
                     st.write("") 
-                    
-                    if st.button(f"Add {t} to Dashboard", key=f"btn_{t}_{i}", use_container_width=True):
-                        if not drive_service:
-                            st.error("Please sign in with Google on the Dashboard page first.")
-                        else:
-                            st.session_state[add_key] = True
+                    if st.button(f"Add {t}", key=f"btn_{t}_{i}", use_container_width=True):
+                        st.session_state[add_key] = True
 
                     if st.session_state.get(add_key, False):
-                        st.markdown("##### Position Sizing")
-                        num_contracts = st.number_input(f"Contracts for {t}", min_value=1, value=1, step=1, key=f"contracts_{t}_{i}")
-                        
-                        col_conf, col_can = st.columns(2)
-                        with col_conf:
-                            if st.button("✅ Confirm", key=f"conf_{t}_{i}"):
+                        st.markdown("##### Size")
+                        num = st.number_input(f"Contracts", min_value=1, value=1, key=f"c_{t}_{i}")
+                        cc1, cc2 = st.columns(2)
+                        with cc1:
+                            if st.button("✅", key=f"ok_{t}_{i}"):
                                 new_trade = {
-                                    "id": f"{t}-{s['short']}-{s['long']}-{s['expiration_raw']}",
-                                    "ticker": t,
-                                    "contracts": num_contracts, 
-                                    "short_strike": s['short'],
-                                    "long_strike": s['long'],
-                                    "expiration": s['expiration_raw'],
-                                    "credit": s['credit'],
+                                    "id": f"{t}-{s['short']}-{s['expiration_raw']}",
+                                    "ticker": t, "contracts": num, 
+                                    "short_strike": s['short'], "long_strike": s['long'],
+                                    "expiration": s['expiration_raw'], "credit": s['credit'],
                                     "entry_date": datetime.now().date().isoformat(),
-                                    "created_at": datetime.utcnow().isoformat(),
-                                    "cached": {},
                                     "pnl_history": []
                                 }
-                                
                                 st.session_state.trades.append(new_trade)
-                                
-                                if drive_service:
-                                    save_to_drive(drive_service, st.session_state.trades)
-                                    st.success(f"Success: Added {num_contracts}x {t} to Dashboard!")
-                                    st.toast(f"Successfully added {num_contracts}x {t} to Dashboard!")
-                                
+                                if drive_service: save_to_drive(drive_service, st.session_state.trades)
+                                st.toast(f"Added {t}")
                                 del st.session_state[add_key]
                                 st.rerun()
-                                
-                        with col_can:
-                            if st.button("❌ Cancel", key=f"canc_{t}_{i}"):
+                        with cc2:
+                            if st.button("❌", key=f"no_{t}_{i}"):
                                 del st.session_state[add_key]
                                 st.rerun()
