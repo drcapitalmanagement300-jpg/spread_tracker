@@ -38,6 +38,26 @@ plt.rcParams.update({
     "grid.alpha": 0.3
 })
 
+# --- COMPACT CSS ---
+st.markdown("""
+<style>
+    /* Reduce top padding for main container */
+    .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+    
+    /* Compact Metrics */
+    div[data-testid="stMetricValue"] { font-size: 20px !important; }
+    div[data-testid="stMetricLabel"] { font-size: 12px !important; }
+    
+    /* Compact Cards */
+    .trade-card { padding: 10px 15px !important; margin-bottom: 8px !important; }
+    .trade-card h3 { font-size: 16px !important; }
+    .trade-details { font-size: 12px !important; margin-top: 5px !important; }
+    
+    /* Risk Badge */
+    .risk-badge { font-size: 11px; margin-top: 4px; color: #FFA726; font-weight: 500; }
+</style>
+""", unsafe_allow_html=True)
+
 # --- AUTH CHECK ---
 drive_service = None
 try:
@@ -49,26 +69,24 @@ if not drive_service:
     st.warning("Please sign in on the Dashboard page to view your Journal.")
     st.stop()
 
-# --- HEADER ---
+# --- HEADER (No White Line) ---
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
     try:
-        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
+        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=110)
     except:
         st.write("**DR CAPITAL**")
 
 with header_col2:
     st.markdown("""
-    <div style='text-align: left; padding-top: 10px;'>
-        <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Trade Journal</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Performance Analytics & Post-Mortem</p>
+    <div style='text-align: left; padding-top: 5px;'>
+        <h2 style='margin-bottom: 0px; padding-bottom: 0px;'>Trade Journal</h2>
+        <p style='margin-top: 0px; font-size: 14px; color: gray;'>Performance Analytics & Efficiency Audit</p>
     </div>
     """, unsafe_allow_html=True)
 
 with header_col3:
     st.write("") 
-
-st.markdown("<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: 10px; margin-bottom: 10px;'>", unsafe_allow_html=True)
 
 # --- FETCH DATA ---
 raw_logs = get_trade_log(drive_service)
@@ -91,11 +109,19 @@ try:
     df['Exit_Date'] = pd.to_datetime(df['Exit_Date'])
     df['Entry_Date'] = pd.to_datetime(df['Entry_Date'])
     
-    # --- CALCULATE MAX LOSS ---
-    # Width = Short - Long. Max Loss = (Width - Credit) * 100 * Contracts
+    # Duration
+    df['Duration'] = (df['Exit_Date'] - df['Entry_Date']).dt.days
+    df['Duration'] = df['Duration'].replace(0, 1) # Prevent div by zero
+    
+    # Max Loss & Risk Saved
     df['Spread_Width'] = (df['Short_Strike'] - df['Long_Strike']).abs()
     df['Max_Loss_Trade'] = (df['Spread_Width'] - df['Credit']) * 100 * df['Contracts']
     
+    # Risk Saved Logic: Only applies to losses. 
+    # If P&L < 0: Saved = Max_Loss - |Realized_Loss|
+    # If P&L > 0: Saved = 0 (We didn't avert a disaster, we just won)
+    df['Risk_Saved'] = df.apply(lambda x: (x['Max_Loss_Trade'] - abs(x['Realized_PL'])) if x['Realized_PL'] < 0 else 0, axis=1)
+
 except Exception as e:
     st.error(f"Data formatting error: {e}")
     st.stop()
@@ -106,104 +132,77 @@ wins = df[df['Realized_PL'] > 0]
 losses = df[df['Realized_PL'] <= 0]
 
 total_pl = df['Realized_PL'].sum()
+total_risk_saved = df['Risk_Saved'].sum()
 win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
+profit_factor = (wins['Realized_PL'].sum() / abs(losses['Realized_PL'].sum())) if not losses.empty else float('inf')
 
-avg_win = wins['Realized_PL'].mean() if not wins.empty else 0
-avg_loss = losses['Realized_PL'].mean() if not losses.empty else 0
+# --- EFFICIENCY RATIO ENGINE ---
+# Compare "Fast Trades" (<14 Days) vs "Slow Trades" (>=14 Days)
+fast_trades = df[df['Duration'] < 14]
+slow_trades = df[df['Duration'] >= 14]
 
-gross_profit = wins['Realized_PL'].sum()
-gross_loss = abs(losses['Realized_PL'].sum())
-profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float('inf')
+fast_pl_daily = (fast_trades['Realized_PL'] / fast_trades['Duration']).mean() if not fast_trades.empty else 0
+slow_pl_daily = (slow_trades['Realized_PL'] / slow_trades['Duration']).mean() if not slow_trades.empty else 0
 
-# --- RISK AVERTED CALCULATION ---
-# For every losing trade, how much did we SAVE by not hitting Max Loss?
-# Saved = Max_Loss - Abs(Realized_Loss)
-total_risk_saved = 0.0
-if not losses.empty:
-    losses_calc = losses.copy()
-    losses_calc['Saved'] = losses_calc['Max_Loss_Trade'] - losses_calc['Realized_PL'].abs()
-    total_risk_saved = losses_calc['Saved'].sum()
+eff_insight = "Data insufficient for efficiency analysis."
+eff_color = "gray"
+
+if not fast_trades.empty and not slow_trades.empty:
+    if fast_pl_daily > slow_pl_daily:
+        ratio = fast_pl_daily / slow_pl_daily if slow_pl_daily > 0 else 1.0
+        eff_insight = f"⚡️ **Velocity Alert:** Fast trades earn **{ratio:.1f}x** more per day than held trades. **Close sooner.**"
+        eff_color = SUCCESS_COLOR
+    else:
+        eff_insight = "🐢 **Patience Pays:** Longer duration trades are currently yielding higher daily returns."
+        eff_color = "#FFA726"
 
 # --- METRICS ROW ---
-# Added a 6th column for "Risk Averted"
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Net P&L", f"${total_pl:,.2f}", delta_color="normal")
-m2.metric("Win Rate", f"{win_rate:.1f}%", f"{len(wins)}W - {len(losses)}L")
-m3.metric("Profit Factor", f"{profit_factor:.2f}", help="> 1.5 is healthy")
-m4.metric("Avg Win", f"${avg_win:.2f}")
-m5.metric("Avg Loss", f"${avg_loss:.2f}", delta_color="inverse")
-m6.metric("Risk Averted", f"${total_risk_saved:,.2f}", delta_color="normal", help="Total capital saved by closing losers early vs Max Loss.")
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Net P&L", f"${total_pl:,.0f}", delta_color="normal")
+m2.metric("Win Rate", f"{win_rate:.0f}%", f"{len(wins)}W - {len(losses)}L")
+m3.metric("Profit Factor", f"{profit_factor:.2f}")
+m4.metric("Risk Averted", f"${total_risk_saved:,.0f}", delta_color="normal", help="Total capital saved by closing losers before Max Loss.")
+m5.metric("Avg Duration", f"{df['Duration'].mean():.0f} Days")
 
-st.markdown("---")
+st.markdown(f"<div style='background-color: rgba(255,255,255,0.05); padding: 8px 15px; border-radius: 5px; border-left: 3px solid {eff_color}; font-size: 14px; margin-bottom: 20px;'>{eff_insight}</div>", unsafe_allow_html=True)
 
 # --- CHARTS (Matplotlib) ---
-c1, c2 = st.columns([2, 1])
+c1, c2 = st.columns(2)
 
+df_sorted = df.sort_values(by="Exit_Date")
+
+# 1. EQUITY CURVE
 with c1:
-    st.subheader("Equity Curve")
+    st.markdown("**💰 Equity Curve**")
     if not df.empty:
-        df_sorted = df.sort_values(by="Exit_Date")
         df_sorted['Cumulative_PL'] = df_sorted['Realized_PL'].cumsum()
         
-        fig, ax = plt.subplots(figsize=(8, 4))
-        
-        # Plot Line
-        ax.plot(df_sorted['Exit_Date'], df_sorted['Cumulative_PL'], color=SUCCESS_COLOR, linewidth=2, marker='o', markersize=4)
-        
-        # Fill Area
+        fig, ax = plt.subplots(figsize=(6, 2.5))
+        ax.plot(df_sorted['Exit_Date'], df_sorted['Cumulative_PL'], color=SUCCESS_COLOR, linewidth=2)
         ax.fill_between(df_sorted['Exit_Date'], df_sorted['Cumulative_PL'], color=SUCCESS_COLOR, alpha=0.1)
-        
-        # Formatting
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
-        ax.set_ylabel("Total P&L ($)")
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        
         st.pyplot(fig, use_container_width=True)
     else:
-        st.caption("Not enough data for chart.")
+        st.caption("No data.")
 
+# 2. RISK AVERTED CURVE (The "Psychology Graph")
 with c2:
-    st.subheader("Win/Loss Ratio")
-    if total_trades > 0:
-        fig2, ax2 = plt.subplots(figsize=(4, 4))
+    st.markdown(f"**🛡️ Cumulative Risk Averted** <span style='font-size:0.8em; color:{SAVED_COLOR}'> (The 'Smart Exit' Chart)</span>", unsafe_allow_html=True)
+    if not df.empty:
+        df_sorted['Cumulative_Saved'] = df_sorted['Risk_Saved'].cumsum()
         
-        sizes = [len(wins), len(losses)]
-        labels = ['Wins', 'Losses']
-        colors = [SUCCESS_COLOR, WARNING_COLOR]
+        fig2, ax2 = plt.subplots(figsize=(6, 2.5))
         
-        # Donut Chart
-        wedges, texts, autotexts = ax2.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', 
-                                           startangle=90, pctdistance=0.85, textprops={'color':"white"})
-        
-        # Draw Circle for Donut
-        centre_circle = plt.Circle((0,0),0.70,fc=BG_COLOR)
-        fig2.gca().add_artist(centre_circle)
-        
-        ax2.axis('equal')  
+        ax2.plot(df_sorted['Exit_Date'], df_sorted['Cumulative_Saved'], color=SAVED_COLOR, linewidth=2, linestyle='--')
+        ax2.fill_between(df_sorted['Exit_Date'], df_sorted['Cumulative_Saved'], color=SAVED_COLOR, alpha=0.1)
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
         st.pyplot(fig2, use_container_width=True)
     else:
-        st.caption("No trades.")
-
-# --- TICKER PERFORMANCE (Matplotlib Bar) ---
-st.subheader("Performance by Ticker")
-if not df.empty:
-    ticker_perf = df.groupby('Ticker')['Realized_PL'].sum().reset_index()
-    ticker_perf = ticker_perf.sort_values(by='Realized_PL', ascending=False)
-
-    fig3, ax3 = plt.subplots(figsize=(10, 4))
-    
-    # Color mapping
-    bar_colors = [SUCCESS_COLOR if x > 0 else WARNING_COLOR for x in ticker_perf['Realized_PL']]
-    
-    ax3.bar(ticker_perf['Ticker'], ticker_perf['Realized_PL'], color=bar_colors, alpha=0.9)
-    
-    ax3.set_ylabel("Net P&L ($)")
-    ax3.axhline(0, color='gray', linewidth=0.8)
-    ax3.spines['top'].set_visible(False)
-    ax3.spines['right'].set_visible(False)
-    
-    st.pyplot(fig3, use_container_width=True)
+        st.caption("No losses managed yet.")
 
 st.markdown("---")
 
@@ -216,52 +215,42 @@ for i, row in df.iloc[::-1].iterrows():
     pl = row['Realized_PL']
     is_win = pl > 0
     
-    # Setup Colors
+    # Compact Colors
     border_color = SUCCESS_COLOR if is_win else WARNING_COLOR
     card_bg = "rgba(0, 200, 83, 0.05)" if is_win else "rgba(211, 47, 47, 0.05)"
     
-    # --- LOSS CONTEXT LOGIC ---
+    # --- LOSS CONTEXT ---
     if not is_win:
         max_loss_val = row['Max_Loss_Trade']
-        saved_val = max_loss_val - abs(pl)
-        # Display logic: "Lost $50.00 / Max $300.00"
-        pl_display = f"<span style='color:{WARNING_COLOR}'>-${abs(pl):,.2f}</span> <span style='font-size:0.6em; color:#888;'>/ Max -${max_loss_val:,.2f}</span>"
+        saved_val = row['Risk_Saved']
+        pl_display = f"<span style='color:{WARNING_COLOR}'>-${abs(pl):,.2f}</span> <span style='font-size:0.8em; color:#666;'>/ -${max_loss_val:,.0f} Max</span>"
         
-        # The Psychology "Saved" Badge
-        # Note: No extra indentation inside string to prevent Markdown code block issues
-        risk_badge = f"""<div style="margin-top: 8px; font-size: 13px; color: {SAVED_COLOR}; font-weight: 500;">🛡️ Risk Mgmt: Saved <strong>${saved_val:,.2f}</strong> vs Max Loss</div>"""
+        risk_badge = f"""<div class="risk-badge">🛡️ Saved <strong>${saved_val:,.2f}</strong> by stopping out.</div>"""
     else:
         pl_display = f"<span style='color:{SUCCESS_COLOR}'>+${pl:,.2f}</span>"
         risk_badge = ""
 
     with st.container():
-        # FIXED: Removed extra indentation in the HTML string to fix "Raw HTML Visible" error
         st.markdown(f"""
-<div style="border-left: 5px solid {border_color}; background-color: {card_bg}; padding: 15px; border-radius: 5px; margin-bottom: 10px;">
-    <div style="display:flex; justify-content:space-between; align-items:center;">
-        <h3 style="margin:0; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span></h3>
-        <h3 style="margin:0;">{pl_display}</h3>
-    </div>
-    {risk_badge}
-    <div style="display:flex; gap: 20px; margin-top: 10px; font-size: 14px; color: #ddd;">
-        <span><strong>Strikes:</strong> {row['Short_Strike']}/{row['Long_Strike']}</span>
-        <span><strong>Credit:</strong> ${row['Credit']}</span>
-        <span><strong>Cost to Close:</strong> ${row.get('Debit_Paid', '0.00')}</span>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+        <div class="trade-card" style="border-left: 4px solid {border_color}; background-color: {card_bg}; padding: 10px; border-radius: 4px; margin-bottom: 8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h3 style="margin:0; font-size: 16px; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span></h3>
+                <h3 style="margin:0; font-size: 16px;">{pl_display}</h3>
+            </div>
+            {risk_badge}
+            <div class="trade-details" style="display:flex; gap: 15px; margin-top: 5px; font-size: 12px; color: #aaa;">
+                <span><strong>Strikes:</strong> {row['Short_Strike']:.0f}/{row['Long_Strike']:.0f}</span>
+                <span><strong>Duration:</strong> {int(row['Duration'])}d</span>
+                <span><strong>Efficiency:</strong> ${row['Realized_PL']/row['Duration']:.2f}/day</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
         
-        # Expander for details and actions
-        with st.expander(f"Details & Notes for {row['Ticker']}"):
-            c_note, c_act = st.columns([3, 1])
+        with st.expander(f"Details", expanded=False):
+            c_note, c_act = st.columns([4, 1])
             with c_note:
-                st.write(f"**Notes:** {row.get('Notes', 'No notes.')}")
-                st.caption(f"Trade ID: {row.get('Trade_ID', 'N/A')}")
+                st.write(f"**Notes:** {row.get('Notes', '-')}")
             with c_act:
-                # Delete Button
-                if st.button("🗑 Delete Log", key=f"del_{i}"):
+                if st.button("Delete", key=f"del_{i}"):
                     if delete_log_entry(drive_service, i):
-                        st.success("Deleted. Refreshing...")
                         st.rerun()
-                    else:
-                        st.error("Failed to delete.")
