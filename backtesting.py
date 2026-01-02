@@ -34,7 +34,9 @@ plt.rcParams.update({
 # --- BLACK-SCHOLES SOLVER ---
 def black_scholes_put(S, K, T, r, sigma):
     try:
+        # Force float type to prevent array errors
         S, K, T, sigma = float(S), float(K), float(T), float(sigma)
+        
         if T <= 0 or sigma <= 0: 
             return max(K - S, 0.0), -1.0 if K > S else 0.0
         
@@ -50,48 +52,75 @@ def black_scholes_put(S, K, T, r, sigma):
 # --- SIMULATION ENGINE ---
 @st.cache_data(ttl=3600)
 def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger):
+    # 1. DATA LOADING
     try:
         stock = yf.Ticker(ticker)
         df = stock.history(period="10y") 
-        if df.empty: return pd.DataFrame()
+        if df.empty: 
+            st.error(f"YFinance returned no data for {ticker}")
+            return pd.DataFrame()
         
-        df.index = df.index.tz_localize(None)
+        # Timezone Cleanup (Robust)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+            
+        # Volatility Calc
         df['Returns'] = df['Close'].pct_change()
         df['HV'] = df['Returns'].rolling(window=30).std() * np.sqrt(252)
+        
+        # CLEANUP: Drop NaNs (First 30 days) to avoid crashing the solver
         df = df.dropna()
         df = df[~df.index.duplicated(keep='first')]
-    except Exception:
+        
+    except Exception as e:
+        st.error(f"Data Processing Error: {e}")
         return pd.DataFrame()
 
     trades = []
     entry_dates = df.index
+    total_days = len(entry_dates)
+    
+    if total_days < 50:
+        st.error("Not enough historical data points to run simulation.")
+        return pd.DataFrame()
+
+    # Progress UI
     progress_bar = st.progress(0)
     status_text = st.empty()
-    total_days = len(entry_dates)
+    
     r = 0.045 # Risk Free Rate
+    skipped_low_credit = 0
     
     for i, entry_date in enumerate(entry_dates):
-        if i % 100 == 0:
+        if i % 50 == 0:
             progress_bar.progress((i + 1) / total_days)
             status_text.caption(f"Simulating Trade {i+1}/{total_days}...")
 
+        # Inner Loop - We use specific error catching to skip bad days but not kill the whole sim
         try:
             entry_row = df.loc[entry_date]
             S_entry = float(entry_row['Close'])
             sigma_entry = float(entry_row['HV'])
             
+            # Target Expiry (45 Days)
             target_expiry = entry_date + timedelta(days=45)
+            
+            # Slice future data efficiently
             future_data = df.loc[entry_date:]
             valid_expiries = future_data.index[future_data.index >= target_expiry]
             
-            if valid_expiries.empty: break
+            if valid_expiries.empty: continue # End of dataset
             expiry_date = valid_expiries[0]
             T_entry = (expiry_date - entry_date).days / 365.0
             
-            # --- STRIKE FINDER ---
-            best_strike = S_entry * 0.8
+            # --- STRIKE FINDER (Iterative) ---
+            # Scan for strike closest to Target Delta
+            best_strike = S_entry * 0.8 # Start low
             min_delta_diff = 1.0
-            scan_strikes = np.linspace(S_entry * 0.70, S_entry, 40)
+            
+            # Create a range of strikes: 70% to 100% of Spot
+            scan_strikes = np.linspace(S_entry * 0.70, S_entry, 30)
+            
             for k_candidate in scan_strikes:
                 _, d_test = black_scholes_put(S_entry, k_candidate, T_entry, r, sigma_entry)
                 diff = abs(abs(d_test) - abs(entry_delta))
@@ -99,17 +128,22 @@ def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exi
                     min_delta_diff = diff
                     best_strike = k_candidate
 
+            # Snap to grid
             strike_step = 5.0 if S_entry > 200 else 1.0
             short_strike = round(best_strike / strike_step) * strike_step
             long_strike = short_strike - 5.0
             
+            # Calculate Entry Economics
             p_short, d_short = black_scholes_put(S_entry, short_strike, T_entry, r, sigma_entry)
             p_long, _ = black_scholes_put(S_entry, long_strike, T_entry, r, sigma_entry)
             entry_credit = p_short - p_long
             
-            if entry_credit < 0.10: continue 
+            # Filter: Minimum Credit
+            if entry_credit < 0.10: 
+                skipped_low_credit += 1
+                continue 
             
-            # --- TRADE EXECUTION ---
+            # --- TRADE ACTIVE ---
             trade_res = {
                 'entry_date': entry_date,
                 'short_strike': short_strike,
@@ -119,7 +153,10 @@ def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exi
                 'exit_date': expiry_date
             }
             
+            # Walk Forward (Check daily for exit triggers)
+            # Use slice for speed
             trade_path = df.loc[entry_date:expiry_date].iloc[1:]
+            
             for curr_date, row in trade_path.iterrows():
                 S_curr = float(row['Close'])
                 T_curr = (expiry_date - curr_date).days / 365.0
@@ -128,9 +165,11 @@ def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exi
                 
                 curr_p_short, curr_d_short = black_scholes_put(S_curr, short_strike, T_curr, r, sigma_curr)
                 curr_p_long, _ = black_scholes_put(S_curr, long_strike, T_curr, r, sigma_curr)
+                
                 spread_val = curr_p_short - curr_p_long
                 spread_pct = (spread_val / entry_credit) * 100
                 
+                # Exit Triggers
                 if days_left < exit_dte_trigger:
                     trade_res.update({'exit_reason': f"DTE < {exit_dte_trigger}", 'pnl': entry_credit - spread_val, 'exit_date': curr_date})
                     break
@@ -145,16 +184,23 @@ def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exi
                     break
                     
             trades.append(trade_res)
-        except: continue
+            
+        except Exception:
+            continue
         
     progress_bar.empty()
     status_text.empty()
     
     results = pd.DataFrame(trades)
+    
+    if results.empty and skipped_low_credit > 0:
+        st.warning(f"Simulation ran but filtered out {skipped_low_credit} trades due to Low Credit (<$0.10). Try increasing Delta or using a more volatile ticker.")
+        
     if not results.empty:
-        # Pre-format dates for display, but keep original for calculation if needed
+        # Format dates for display
         results['display_entry'] = pd.to_datetime(results['entry_date']).dt.strftime('%Y-%m-%d')
         results['display_exit'] = pd.to_datetime(results['exit_date']).dt.strftime('%Y-%m-%d')
+        
     return results
 
 # --- HEADER ---
@@ -182,7 +228,7 @@ if run_btn:
         results = run_simulation(ticker, 0.20, exit_delta, exit_spread_pct, exit_dte)
     
     if results.empty:
-        st.error("Simulation failed. No trades found.")
+        st.error("No valid trades found. Check if the Ticker has 10 years of data or if the Entry Delta is too low.")
     else:
         # --- CALCULATIONS ---
         total_trades = len(results)
@@ -193,37 +239,36 @@ if run_btn:
         avg_win = wins['pnl'].mean() * 100 if not wins.empty else 0
         avg_loss = losses['pnl'].mean() * 100 if not losses.empty else 0
         
-        # --- RETURN ON MAX RISK CALCULATION ---
-        # 1. Convert to datetime objects
+        # Return on Max Risk
         dates_entry = pd.to_datetime(results['entry_date'])
         dates_exit = pd.to_datetime(results['exit_date'])
         
-        # 2. Determine date range
+        # Calculate Max Overlap (Capital Usage)
         min_date = dates_entry.min()
         max_date = dates_exit.max()
-        all_days = pd.date_range(min_date, max_date)
         
-        # 3. Calculate max overlapping trades
-        # This tells us the maximum margin collateral used at any one time
-        max_overlap = 0
-        # Optimization: We don't need to check every single day, just entry dates
-        # but checking all days is safer for exact overlap
-        daily_overlaps = []
-        for d in all_days:
-            # How many trades were open on day 'd'?
-            open_count = ((dates_entry <= d) & (dates_exit >= d)).sum()
-            daily_overlaps.append(open_count)
+        # Sampling daily overlap
+        date_range = pd.date_range(min_date, max_date, freq='D')
+        
+        # Vectorized overlap calc roughly
+        overlaps = []
+        # Check every 7th day to speed up overlapping calc
+        check_days = date_range[::7] 
+        for d in check_days:
+            count = ((dates_entry <= d) & (dates_exit >= d)).sum()
+            overlaps.append(count)
             
-        max_concurrent_trades = max(daily_overlaps) if daily_overlaps else 1
-        max_capital_required = max_concurrent_trades * 500 # $500 margin per spread
+        max_concurrent_trades = max(overlaps) if overlaps else 1
+        # Prevent 0
+        max_concurrent_trades = max(1, max_concurrent_trades)
         
-        # 4. Calculate Percentage Return
-        roi_pct = (total_pnl / max_capital_required) * 100
+        max_margin = max_concurrent_trades * 500 # $500 per spread
+        roi_pct = (total_pnl / max_margin) * 100
         
-        # --- METRICS DISPLAY ---
+        # --- METRICS ---
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Total P&L", f"${total_pnl:,.0f}")
-        m2.metric("Return %", f"{roi_pct:,.1f}%", help=f"Return on Max Margin Used (${max_capital_required:,.0f})")
+        m2.metric("Return %", f"{roi_pct:,.1f}%", help=f"Return on Max Margin Needed (${max_margin:,.0f})")
         m3.metric("Win Rate", f"{win_rate:.1f}%", f"{len(wins)}W | {len(losses)}L")
         m4.metric("Avg Win", f"${avg_win:.0f}")
         m5.metric("Avg Loss", f"${avg_loss:.0f}")
@@ -259,7 +304,6 @@ if run_btn:
         
         # --- LOG ---
         st.subheader("Detailed Log")
-        # Use the formatted string dates for cleaner display
         st.dataframe(
             results[['display_entry', 'display_exit', 'short_strike', 'credit', 'exit_reason', 'pnl']],
             use_container_width=True,
