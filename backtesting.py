@@ -3,34 +3,19 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import os
-import requests
-from datetime import datetime, timedelta
+import yfinance as yf
+import scipy.stats as si
+from datetime import timedelta
 
-# Import the Cloud Persistence
-from persistence import (
-    build_drive_service_from_session, 
-    download_large_file_from_drive, 
-    upload_large_file_to_drive,
-    ensure_logged_in
-)
-
+# --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Options Lab")
 
-# --- AUTH CHECK (MANDATORY FOR CLOUD) ---
-ensure_logged_in()
-
-# --- CONFIG ---
+# --- CONSTANTS ---
 SUCCESS_COLOR = "#00C853"
 WARNING_COLOR = "#d32f2f"
 BG_COLOR = '#0E1117'
 TEXT_COLOR = '#FAFAFA'
 GRID_COLOR = '#444444'
-
-# --- CACHE (Ephemeral Cloud Storage) ---
-CACHE_DIR = "options_cache"
-if not os.path.exists(CACHE_DIR):
-    os.makedirs(CACHE_DIR)
 
 # --- MATPLOTLIB STYLE ---
 plt.rcParams.update({
@@ -46,160 +31,273 @@ plt.rcParams.update({
     "grid.alpha": 0.3
 })
 
-# --- DATA PIPELINE ---
-def download_from_web(url, local_path):
-    try:
-        with requests.get(url, stream=True) as r:
-            r.raise_for_status()
-            total_size = int(r.headers.get('content-length', 0))
-            prog_bar = st.progress(0)
-            status = st.empty()
-            
-            downloaded = 0
-            with open(local_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        prog_bar.progress(min(downloaded / total_size, 1.0))
-                        status.caption(f"Fetching: {int(downloaded/1024/1024)}MB")
-            
-            prog_bar.empty()
-            status.empty()
-            return True
-    except Exception as e:
-        st.error(f"Web source failed: {e}")
-        return False
-
-@st.cache_data(ttl=3600*24, show_spinner=False)
-def load_data_pipeline(ticker, _drive_service):
+# --- BLACK-SCHOLES SOLVER ---
+def black_scholes_put(S, K, T, r, sigma):
     """
-    1. Check Ephemeral Cache
-    2. Check Google Drive
-    3. Download from Web -> Upload to Drive
+    Calculates theoretical Put Price and Delta.
+    S: Spot Price
+    K: Strike Price
+    T: Time to Expiry (years)
+    r: Risk Free Rate
+    sigma: Volatility (annualized)
     """
-    filename = f"{ticker}_options.parquet"
-    local_path = os.path.join(CACHE_DIR, filename)
-    web_url = f"https://static.philippdubach.com/data/options/{ticker}/options.parquet"
-    
-    source = "Local Cache"
-
-    if not os.path.exists(local_path):
-        st.info(f"Searching Google Drive for {ticker}...")
-        drive_bar = st.progress(0)
-        
-        # Try downloading from Drive
-        if download_large_file_from_drive(_drive_service, filename, local_path, drive_bar):
-            source = "Google Drive"
-            st.toast(f"Restored {ticker} from Drive", icon="☁️")
-        else:
-            # Fallback to Web
-            st.warning(f"Not in Drive. Downloading {ticker} from source... (This happens once)")
-            if download_from_web(web_url, local_path):
-                source = "Web Source"
-                st.info("Backing up to Drive for next time...")
-                up_bar = st.progress(0)
-                upload_large_file_to_drive(_drive_service, local_path, filename, up_bar)
-                up_bar.empty()
-                st.toast("Backup Created!", icon="💾")
-            else:
-                return None, None
-        drive_bar.empty()
-
-    # Load into Pandas (Pruned Columns)
     try:
-        cols = ['quote_date', 'expire_date', 'strike', 'option_type', 'delta', 'bid', 'ask']
-        df = pd.read_parquet(local_path, columns=cols)
-        df = df[df['option_type'] == 'P'] # Puts only
+        if T <= 0 or sigma <= 0: 
+            # Intrinsic value at expiry
+            return max(K - S, 0), -1.0 if K > S else 0.0
         
-        # Optimizations
-        df['quote_date'] = pd.to_datetime(df['quote_date'])
-        df['expire_date'] = pd.to_datetime(df['expire_date'])
-        df['dte'] = (df['expire_date'] - df['quote_date']).dt.days
-        df['mid'] = (df['bid'] + df['ask']) / 2
-        return df, source
-    except Exception as e:
-        st.error(f"Data Load Error: {e}")
-        return None, None
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        
+        put_price = (K * np.exp(-r * T) * si.norm.cdf(-d2)) - (S * si.norm.cdf(-d1))
+        put_delta = si.norm.cdf(d1) - 1
+        
+        return put_price, put_delta
+    except:
+        return 0.0, 0.0
 
-# --- UI ---
-st.title("Options Lab (Cloud Edition)")
-
-drive_service = build_drive_service_from_session()
-if not drive_service:
-    st.error("Auth Error: No Drive Service. Refresh page.")
-    st.stop()
-
-col1, col2, col3, col4 = st.columns(4)
-with col1: ticker = st.selectbox("Ticker", ["QQQ", "IWM", "SPY"])
-with col2: e_delta = st.number_input("Exit Delta", 0.1, 1.0, 0.4)
-with col3: e_stop = st.number_input("Stop %", 100, 500, 200)
-with col4: e_dte = st.number_input("Exit DTE", 0, 30, 14)
-
-if st.button("Run Simulation", type="primary"):
-    df, src = load_data_pipeline(ticker, drive_service)
+# --- SIMULATION ENGINE ---
+@st.cache_data(ttl=3600)
+def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger):
+    # 1. Get Stock Data (2 Years)
+    stock = yf.Ticker(ticker)
+    df = stock.history(period="2y")
     
-    if df is not None:
-        st.success(f"Loaded {len(df):,} rows from {src}")
+    if df.empty: return pd.DataFrame()
+    
+    # Calculate Volatility (30-day Rolling HV)
+    df['Returns'] = df['Close'].pct_change()
+    df['HV'] = df['Returns'].rolling(window=30).std() * np.sqrt(252)
+    df = df.dropna()
+
+    trades = []
+    
+    # Identify Entry Dates (Every Monday)
+    df['DayOfWeek'] = df.index.dayofweek
+    entry_dates = df[df['DayOfWeek'] == 0].index
+    
+    # Progress UI
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, entry_date in enumerate(entry_dates):
+        if i % 5 == 0:
+            progress_bar.progress((i + 1) / len(entry_dates))
+            status_text.caption(f"Simulating Trade {i+1}/{len(entry_dates)}...")
+
+        # --- SETUP TRADE ---
+        entry_row = df.loc[entry_date]
+        S_entry = entry_row['Close']
+        sigma_entry = entry_row['HV']
         
-        # --- SIMPLE BACKTEST LOOP (Optimized for Streamlit) ---
-        trades = []
-        dates = sorted(df['quote_date'].unique())
-        # Mondays only
-        mondays = [d for d in dates if d.dayofweek == 0]
+        # Target Expiry ~45 DTE
+        target_expiry = entry_date + timedelta(days=45)
         
-        bar = st.progress(0)
+        # Find closest trading day to expiry
+        future_dates = df.index[df.index >= target_expiry]
+        if future_dates.empty: continue # Not enough data left
+        expiry_date = future_dates[0]
         
-        for i, date in enumerate(mondays):
-            if i % 10 == 0: bar.progress(i / len(mondays))
+        T_entry = (expiry_date - entry_date).days / 365.0
+        r = 0.045 # Assume 4.5% Risk Free Rate
+        
+        # FIND STRIKE based on Delta
+        # Iterative Search for precise strike
+        best_strike = S_entry
+        min_diff = 1.0
+        
+        # Search range: 20% below to ATM
+        for k in np.linspace(S_entry * 0.8, S_entry, 50):
+            _, delta = black_scholes_put(S_entry, k, T_entry, r, sigma_entry)
+            diff = abs(abs(delta) - abs(entry_delta))
+            if diff < min_diff:
+                min_diff = diff
+                best_strike = k
+
+        # Round strike
+        strike_step = 5 if S_entry > 200 else 1
+        short_strike = round(best_strike / strike_step) * strike_step
+        long_strike = short_strike - 5.0 # Fixed width
+        
+        # Calculate Credit Received
+        p_short, d_short = black_scholes_put(S_entry, short_strike, T_entry, r, sigma_entry)
+        p_long, d_long = black_scholes_put(S_entry, long_strike, T_entry, r, sigma_entry)
+        
+        entry_credit = p_short - p_long
+        
+        if entry_credit < 0.10: continue # Skip invalid trades
+        
+        # --- MANAGE TRADE (Walk Forward) ---
+        trade_res = {
+            'entry_date': entry_date,
+            'short_strike': short_strike,
+            'credit': entry_credit,
+            'exit_reason': 'Held to Expiry',
+            'pnl': entry_credit,
+            'exit_date': expiry_date
+        }
+        
+        # Look at every day between Entry and Expiry
+        trade_path = df.loc[entry_date:expiry_date]
+        
+        for curr_date, row in trade_path.iloc[1:].iterrows():
+            S_curr = row['Close']
+            T_curr = (expiry_date - curr_date).days / 365.0
+            days_left = (expiry_date - curr_date).days
             
-            # 1. Filter: 45 DTE
-            day = df[(df['quote_date'] == date) & (df['dte'].between(35, 50))]
-            if day.empty: continue
+            # Use current HV for pricing (simplification of sticky delta)
+            sigma_curr = row['HV']
             
-            # 2. Entry: 20 Delta Put
-            day = day.copy()
-            day['d_diff'] = abs(abs(day['delta']) - 0.20)
-            short = day.loc[day['d_diff'].idxmin()]
+            # Calc Current Value
+            curr_p_short, curr_d_short = black_scholes_put(S_curr, short_strike, T_curr, r, sigma_curr)
+            curr_p_long, _ = black_scholes_put(S_curr, long_strike, T_curr, r, sigma_curr)
             
-            # 3. Long: $5 wide
-            longs = day[abs(day['strike'] - (short['strike'] - 5)) < 0.5]
-            if longs.empty: continue
-            long = longs.iloc[0]
+            spread_val = curr_p_short - curr_p_long
+            spread_pct = (spread_val / entry_credit) * 100
             
-            credit = short['mid'] - long['mid']
-            if credit < 0.50: continue
+            # EXIT CHECKS
             
-            # 4. Outcome
-            res = {'date': date, 'pnl': credit, 'reason': 'Held'}
-            
-            # Look forward
-            future = df[(df['expire_date'] == short['expire_date']) & (df['quote_date'] > date)]
-            
-            for f_date, grp in future.groupby('quote_date'):
-                s_cur = grp[grp['strike'] == short['strike']]
-                l_cur = grp[grp['strike'] == long['strike']]
+            # 1. DTE
+            if days_left < exit_dte_trigger:
+                trade_res['exit_reason'] = f"DTE < {exit_dte_trigger}"
+                trade_res['pnl'] = entry_credit - spread_val
+                trade_res['exit_date'] = curr_date
+                break
                 
-                if s_cur.empty: continue
-                val = s_cur.iloc[0]['mid'] - (l_cur.iloc[0]['mid'] if not l_cur.empty else 0)
+            # 2. Delta
+            if abs(curr_d_short) > exit_delta_trigger:
+                trade_res['exit_reason'] = f"Delta > {exit_delta_trigger}"
+                trade_res['pnl'] = entry_credit - spread_val
+                trade_res['exit_date'] = curr_date
+                break
                 
-                # Exit logic
-                if (val/credit) * 100 > e_stop:
-                    res.update({'pnl': credit-val, 'reason': 'Stop'}); break
-                if (short['expire_date'] - f_date).days < e_dte:
-                    res.update({'pnl': credit-val, 'reason': 'DTE'}); break
-                if abs(s_cur.iloc[0]['delta']) > e_delta:
-                    res.update({'pnl': credit-val, 'reason': 'Delta'}); break
-            
-            trades.append(res)
-            
-        bar.empty()
+            # 3. Spread Value (Stop Loss)
+            if spread_pct > exit_spread_pct:
+                trade_res['exit_reason'] = f"Max Loss ({exit_spread_pct}%)"
+                trade_res['pnl'] = entry_credit - spread_val
+                trade_res['exit_date'] = curr_date
+                break
+                
+            # 4. Take Profit (50%)
+            if spread_pct < 50:
+                trade_res['exit_reason'] = "Profit Target (50%)"
+                trade_res['pnl'] = entry_credit - spread_val
+                trade_res['exit_date'] = curr_date
+                break
+                
+        trades.append(trade_res)
         
-        if trades:
-            res_df = pd.DataFrame(trades)
-            res_df['cum'] = res_df['pnl'].cumsum() * 100
-            st.metric("Total P&L", f"${res_df['cum'].iloc[-1]:,.2f}")
-            st.line_chart(res_df.set_index('date')['cum'])
-            st.dataframe(res_df)
-        else:
-            st.warning("No trades found.")
+    progress_bar.empty()
+    status_text.empty()
+    return pd.DataFrame(trades)
+
+# --- HEADER UI ---
+header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
+with header_col1:
+    try:
+        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
+    except:
+        st.write("**DR CAPITAL**")
+
+with header_col2:
+    st.markdown("""
+    <div style='text-align: left; padding-top: 10px;'>
+        <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Options Lab</h1>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Backtesting & Optimization Engine (Simulation Mode)</p>
+    </div>
+    """, unsafe_allow_html=True)
+with header_col3:
+    st.write("") 
+
+st.markdown("<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: -5px; margin-bottom: 10px;'>", unsafe_allow_html=True)
+
+# --- CONTROLS ---
+with st.container(border=True):
+    c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1])
+    
+    with c1:
+        # UPDATED TICKER LIST
+        ticker = st.selectbox("Select Ticker", ["SPY", "QQQ", "IWM", "GLD", "NVDA", "AAPL", "AMD", "TSLA", "MSFT", "AMZN"], index=0)
+        st.caption("Data: Real Price History + Black-Scholes Sim")
+        
+    with c2:
+        # Default Entry Delta is 0.20
+        exit_delta = st.number_input("Exit Short Delta >", min_value=0.10, max_value=1.00, value=0.40, step=0.05, help="Close trade if short leg delta breaches this level.")
+    
+    with c3:
+        exit_spread_pct = st.number_input("Exit Spread Value % >", min_value=100, max_value=500, value=200, step=10, help="Close if spread value hits this % of credit received. (200% = 1x Loss)")
+        
+    with c4:
+        exit_dte = st.number_input("Exit DTE <", min_value=0, max_value=30, value=14, step=1, help="Close trade if fewer than X days remain.")
+        
+    run_btn = st.button("🔬 Run Simulation", use_container_width=True)
+
+# --- EXECUTION ---
+if run_btn:
+    with st.spinner(f"Simulating options chain history for {ticker}..."):
+        # Fixed Entry Delta 0.20 (Standard for this strategy)
+        results = run_simulation(ticker, 0.20, exit_delta, exit_spread_pct, exit_dte)
+    
+    if results.empty:
+        st.error("Simulation failed. Ticker data might be unavailable.")
+    else:
+        # --- METRICS ---
+        total_trades = len(results)
+        wins = results[results['pnl'] > 0]
+        losses = results[results['pnl'] <= 0]
+        
+        win_rate = len(wins) / total_trades * 100
+        total_pnl = results['pnl'].sum() * 100 # Multiplier
+        avg_win = wins['pnl'].mean() * 100 if not wins.empty else 0
+        avg_loss = losses['pnl'].mean() * 100 if not losses.empty else 0
+        
+        # Display Metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total P&L (1 Lot)", f"${total_pnl:,.2f}", delta_color="normal")
+        m2.metric("Win Rate", f"{win_rate:.1f}%", f"{len(wins)}W - {len(losses)}L")
+        m3.metric("Avg Win", f"${avg_win:.2f}")
+        m4.metric("Avg Loss", f"${avg_loss:.2f}")
+        
+        st.markdown("---")
+        
+        # --- CHARTS ---
+        col_chart, col_dist = st.columns([2, 1])
+        
+        with col_chart:
+            st.subheader("Equity Curve")
+            results = results.sort_values("entry_date")
+            results['cum_pnl'] = results['pnl'].cumsum() * 100
+            
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.plot(results['entry_date'], results['cum_pnl'], color=SUCCESS_COLOR, linewidth=2)
+            ax.fill_between(results['entry_date'], results['cum_pnl'], color=SUCCESS_COLOR, alpha=0.1)
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+            ax.set_ylabel("Profit ($)")
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            st.pyplot(fig, use_container_width=True)
+            
+        with col_dist:
+            st.subheader("Exit Reasons")
+            exit_counts = results['exit_reason'].value_counts()
+            
+            fig2, ax2 = plt.subplots(figsize=(4, 4))
+            # Dynamic colors
+            colors = [SUCCESS_COLOR if 'Profit' in idx or 'Held' in idx else WARNING_COLOR for idx in exit_counts.index]
+            
+            ax2.pie(exit_counts, labels=exit_counts.index, autopct='%1.1f%%', colors=colors, startangle=90, textprops={'color': TEXT_COLOR})
+            centre_circle = plt.Circle((0,0),0.70,fc=BG_COLOR)
+            fig2.gca().add_artist(centre_circle)
+            st.pyplot(fig2, use_container_width=True)
+        
+        # --- TRADE LIST ---
+        st.subheader("Trade Log")
+        st.dataframe(
+            results[['entry_date', 'exit_date', 'short_strike', 'credit', 'exit_reason', 'pnl']],
+            use_container_width=True,
+            height=300
+        )
+
+# --- FOOTER NOTES ---
+st.markdown("---")
+st.caption("**Simulation Logic:** 45 DTE Entry, Sell 20-Delta Put. Options prices reconstructed using Black-Scholes model on realized volatility. This ensures 'lab' functionality without requiring external historical option databases.")
