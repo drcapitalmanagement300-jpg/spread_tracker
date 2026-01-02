@@ -8,7 +8,7 @@ import scipy.stats as si
 from datetime import timedelta
 
 # --- CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Options Lab")
+st.set_page_config(layout="wide", page_title="Back Testing")
 
 # --- CONSTANTS ---
 SUCCESS_COLOR = "#00C853"
