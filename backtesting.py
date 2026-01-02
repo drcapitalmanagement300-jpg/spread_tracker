@@ -8,7 +8,7 @@ import scipy.stats as si
 from datetime import timedelta
 
 # --- CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Back Testing")
+st.set_page_config(layout="wide", page_title="backtesting")
 
 # --- CONSTANTS ---
 SUCCESS_COLOR = "#00C853"
@@ -37,8 +37,14 @@ def black_scholes_put(S, K, T, r, sigma):
     Calculates theoretical Put Price and Delta.
     """
     try:
+        # Ensure inputs are floats to prevent array errors
+        S = float(S)
+        K = float(K)
+        T = float(T)
+        sigma = float(sigma)
+
         if T <= 0 or sigma <= 0: 
-            return max(K - S, 0), -1.0 if K > S else 0.0
+            return max(K - S, 0.0), -1.0 if K > S else 0.0
         
         d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
@@ -54,20 +60,26 @@ def black_scholes_put(S, K, T, r, sigma):
 @st.cache_data(ttl=3600)
 def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger):
     # 1. Get Maximum Stock Data (10 Years+)
-    stock = yf.Ticker(ticker)
-    df = stock.history(period="10y") 
-    
-    if df.empty: return pd.DataFrame()
-    
-    # Calculate Volatility (30-day Rolling HV)
-    df['Returns'] = df['Close'].pct_change()
-    df['HV'] = df['Returns'].rolling(window=30).std() * np.sqrt(252)
-    df = df.dropna()
+    try:
+        stock = yf.Ticker(ticker)
+        df = stock.history(period="10y") 
+        
+        if df.empty: return pd.DataFrame()
+        
+        # Calculate Volatility (30-day Rolling HV)
+        df['Returns'] = df['Close'].pct_change()
+        df['HV'] = df['Returns'].rolling(window=30).std() * np.sqrt(252)
+        df = df.dropna()
+        
+        # Drop duplicate indices if any (prevents array errors)
+        df = df[~df.index.duplicated(keep='first')]
+
+    except Exception as e:
+        return pd.DataFrame()
 
     trades = []
     
     # 2. EVERY DAY ENTRY (Laddering Strategy)
-    # We iterate through every single trading day to maximize sample size
     entry_dates = df.index
     
     # Progress UI
@@ -75,111 +87,108 @@ def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exi
     status_text = st.empty()
     total_days = len(entry_dates)
     
-    # Optimization: Pre-calculate constants
     r = 0.045 # Risk Free Rate
     
     for i, entry_date in enumerate(entry_dates):
-        # Update progress less frequently to save UI lag
+        # Update progress less frequently
         if i % 50 == 0:
             progress_bar.progress((i + 1) / total_days)
             status_text.caption(f"Simulating Trade {i+1}/{total_days}...")
 
         # --- SETUP TRADE ---
-        entry_row = df.loc[entry_date]
-        S_entry = entry_row['Close']
-        sigma_entry = entry_row['HV']
-        
-        # Target Expiry: 45 Days out
-        target_expiry = entry_date + timedelta(days=45)
-        
-        # Find closest valid trading day to expiry
-        future_data = df.loc[entry_date:]
-        valid_expiries = future_data.index[future_data.index >= target_expiry]
-        
-        if valid_expiries.empty: break # End of data
-        expiry_date = valid_expiries[0]
-        
-        T_entry = (expiry_date - entry_date).days / 365.0
-        
-        # --- FIND STRIKE (Binary Search Approximation for Speed) ---
-        # Instead of iterating 50 times, we estimate K directly
-        # K approx = S * exp(N^-1(Delta + 1) * sigma * sqrt(T))
-        # This is faster than iterative Black Scholes
         try:
-            norm_inv = si.norm.ppf(entry_delta + 1) # Put delta is negative, so we add 1 for PDF
+            entry_row = df.loc[entry_date]
+            S_entry = float(entry_row['Close'])
+            sigma_entry = float(entry_row['HV'])
+            
+            # Target Expiry: 45 Days out
+            target_expiry = entry_date + timedelta(days=45)
+            
+            # Find closest valid trading day to expiry
+            future_data = df.loc[entry_date:]
+            valid_expiries = future_data.index[future_data.index >= target_expiry]
+            
+            if valid_expiries.empty: break
+            expiry_date = valid_expiries[0]
+            
+            T_entry = (expiry_date - entry_date).days / 365.0
+            
+            # --- FIND STRIKE ---
+            # Using approximation for speed
+            norm_inv = si.norm.ppf(entry_delta + 1)
             approx_strike = S_entry * np.exp(norm_inv * sigma_entry * np.sqrt(T_entry))
-        except:
-            approx_strike = S_entry * 0.90 # Fallback
 
-        # Round strike
-        strike_step = 5 if S_entry > 200 else 1
-        short_strike = round(approx_strike / strike_step) * strike_step
-        long_strike = short_strike - 5.0
-        
-        # Calculate Entry Credit
-        p_short, d_short = black_scholes_put(S_entry, short_strike, T_entry, r, sigma_entry)
-        p_long, _ = black_scholes_put(S_entry, long_strike, T_entry, r, sigma_entry)
-        entry_credit = p_short - p_long
-        
-        if entry_credit < 0.10: continue 
-        
-        # --- MANAGE TRADE (Walk Forward) ---
-        trade_res = {
-            'entry_date': entry_date,
-            'short_strike': short_strike,
-            'credit': entry_credit,
-            'exit_reason': 'Held to Expiry',
-            'pnl': entry_credit,
-            'exit_date': expiry_date
-        }
-        
-        # Slice only the days we are in the trade
-        trade_path = df.loc[entry_date:expiry_date].iloc[1:] # Skip entry day
-        
-        for curr_date, row in trade_path.iterrows():
-            S_curr = row['Close']
-            T_curr = (expiry_date - curr_date).days / 365.0
-            days_left = (expiry_date - curr_date).days
-            sigma_curr = row['HV']
+            # Round strike (FIXED: Using np.round to handle potential array types safely)
+            strike_step = 5 if S_entry > 200 else 1
+            short_strike = np.round(approx_strike / strike_step) * strike_step
+            long_strike = short_strike - 5.0
             
-            # Calc Current Value
-            curr_p_short, curr_d_short = black_scholes_put(S_curr, short_strike, T_curr, r, sigma_curr)
-            curr_p_long, _ = black_scholes_put(S_curr, long_strike, T_curr, r, sigma_curr)
+            # Calculate Entry Credit
+            p_short, d_short = black_scholes_put(S_entry, short_strike, T_entry, r, sigma_entry)
+            p_long, _ = black_scholes_put(S_entry, long_strike, T_entry, r, sigma_entry)
+            entry_credit = p_short - p_long
             
-            spread_val = curr_p_short - curr_p_long
-            spread_pct = (spread_val / entry_credit) * 100
+            if entry_credit < 0.10: continue 
             
-            # EXIT CHECKS
+            # --- MANAGE TRADE (Walk Forward) ---
+            trade_res = {
+                'entry_date': entry_date,
+                'short_strike': short_strike,
+                'credit': entry_credit,
+                'exit_reason': 'Held to Expiry',
+                'pnl': entry_credit,
+                'exit_date': expiry_date
+            }
             
-            # 1. DTE
-            if days_left < exit_dte_trigger:
-                trade_res['exit_reason'] = f"DTE < {exit_dte_trigger}"
-                trade_res['pnl'] = entry_credit - spread_val
-                trade_res['exit_date'] = curr_date
-                break
+            # Slice only the days we are in the trade
+            trade_path = df.loc[entry_date:expiry_date].iloc[1:] # Skip entry day
+            
+            for curr_date, row in trade_path.iterrows():
+                S_curr = float(row['Close'])
+                T_curr = (expiry_date - curr_date).days / 365.0
+                days_left = (expiry_date - curr_date).days
+                sigma_curr = float(row['HV'])
                 
-            # 2. Delta
-            if abs(curr_d_short) > exit_delta_trigger:
-                trade_res['exit_reason'] = f"Delta > {exit_delta_trigger}"
-                trade_res['pnl'] = entry_credit - spread_val
-                trade_res['exit_date'] = curr_date
-                break
+                # Calc Current Value
+                curr_p_short, curr_d_short = black_scholes_put(S_curr, short_strike, T_curr, r, sigma_curr)
+                curr_p_long, _ = black_scholes_put(S_curr, long_strike, T_curr, r, sigma_curr)
                 
-            # 3. Stop Loss
-            if spread_pct > exit_spread_pct:
-                trade_res['exit_reason'] = f"Max Loss ({exit_spread_pct}%)"
-                trade_res['pnl'] = entry_credit - spread_val
-                trade_res['exit_date'] = curr_date
-                break
+                spread_val = curr_p_short - curr_p_long
+                spread_pct = (spread_val / entry_credit) * 100
                 
-            # 4. Take Profit
-            if spread_pct < 50:
-                trade_res['exit_reason'] = "Profit Target (50%)"
-                trade_res['pnl'] = entry_credit - spread_val
-                trade_res['exit_date'] = curr_date
-                break
+                # EXIT CHECKS
                 
-        trades.append(trade_res)
+                # 1. DTE
+                if days_left < exit_dte_trigger:
+                    trade_res['exit_reason'] = f"DTE < {exit_dte_trigger}"
+                    trade_res['pnl'] = entry_credit - spread_val
+                    trade_res['exit_date'] = curr_date
+                    break
+                    
+                # 2. Delta
+                if abs(curr_d_short) > exit_delta_trigger:
+                    trade_res['exit_reason'] = f"Delta > {exit_delta_trigger}"
+                    trade_res['pnl'] = entry_credit - spread_val
+                    trade_res['exit_date'] = curr_date
+                    break
+                    
+                # 3. Stop Loss
+                if spread_pct > exit_spread_pct:
+                    trade_res['exit_reason'] = f"Max Loss ({exit_spread_pct}%)"
+                    trade_res['pnl'] = entry_credit - spread_val
+                    trade_res['exit_date'] = curr_date
+                    break
+                    
+                # 4. Take Profit
+                if spread_pct < 50:
+                    trade_res['exit_reason'] = "Profit Target (50%)"
+                    trade_res['pnl'] = entry_credit - spread_val
+                    trade_res['exit_date'] = curr_date
+                    break
+                    
+            trades.append(trade_res)
+        except Exception:
+            continue
         
     progress_bar.empty()
     status_text.empty()
