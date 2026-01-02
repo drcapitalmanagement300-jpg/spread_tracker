@@ -35,15 +35,9 @@ plt.rcParams.update({
 def black_scholes_put(S, K, T, r, sigma):
     """
     Calculates theoretical Put Price and Delta.
-    S: Spot Price
-    K: Strike Price
-    T: Time to Expiry (years)
-    r: Risk Free Rate
-    sigma: Volatility (annualized)
     """
     try:
         if T <= 0 or sigma <= 0: 
-            # Intrinsic value at expiry
             return max(K - S, 0), -1.0 if K > S else 0.0
         
         d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -56,12 +50,12 @@ def black_scholes_put(S, K, T, r, sigma):
     except:
         return 0.0, 0.0
 
-# --- SIMULATION ENGINE ---
+# --- SIMULATION ENGINE (MASSIVE SCALE) ---
 @st.cache_data(ttl=3600)
 def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger):
-    # 1. Get Stock Data (2 Years)
+    # 1. Get Maximum Stock Data (10 Years+)
     stock = yf.Ticker(ticker)
-    df = stock.history(period="2y")
+    df = stock.history(period="10y") 
     
     if df.empty: return pd.DataFrame()
     
@@ -72,60 +66,62 @@ def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exi
 
     trades = []
     
-    # Identify Entry Dates (Every Monday)
-    df['DayOfWeek'] = df.index.dayofweek
-    entry_dates = df[df['DayOfWeek'] == 0].index
+    # 2. EVERY DAY ENTRY (Laddering Strategy)
+    # We iterate through every single trading day to maximize sample size
+    entry_dates = df.index
     
     # Progress UI
     progress_bar = st.progress(0)
     status_text = st.empty()
+    total_days = len(entry_dates)
+    
+    # Optimization: Pre-calculate constants
+    r = 0.045 # Risk Free Rate
     
     for i, entry_date in enumerate(entry_dates):
-        if i % 5 == 0:
-            progress_bar.progress((i + 1) / len(entry_dates))
-            status_text.caption(f"Simulating Trade {i+1}/{len(entry_dates)}...")
+        # Update progress less frequently to save UI lag
+        if i % 50 == 0:
+            progress_bar.progress((i + 1) / total_days)
+            status_text.caption(f"Simulating Trade {i+1}/{total_days}...")
 
         # --- SETUP TRADE ---
         entry_row = df.loc[entry_date]
         S_entry = entry_row['Close']
         sigma_entry = entry_row['HV']
         
-        # Target Expiry ~45 DTE
+        # Target Expiry: 45 Days out
         target_expiry = entry_date + timedelta(days=45)
         
-        # Find closest trading day to expiry
-        future_dates = df.index[df.index >= target_expiry]
-        if future_dates.empty: continue # Not enough data left
-        expiry_date = future_dates[0]
+        # Find closest valid trading day to expiry
+        future_data = df.loc[entry_date:]
+        valid_expiries = future_data.index[future_data.index >= target_expiry]
+        
+        if valid_expiries.empty: break # End of data
+        expiry_date = valid_expiries[0]
         
         T_entry = (expiry_date - entry_date).days / 365.0
-        r = 0.045 # Assume 4.5% Risk Free Rate
         
-        # FIND STRIKE based on Delta
-        # Iterative Search for precise strike
-        best_strike = S_entry
-        min_diff = 1.0
-        
-        # Search range: 20% below to ATM
-        for k in np.linspace(S_entry * 0.8, S_entry, 50):
-            _, delta = black_scholes_put(S_entry, k, T_entry, r, sigma_entry)
-            diff = abs(abs(delta) - abs(entry_delta))
-            if diff < min_diff:
-                min_diff = diff
-                best_strike = k
+        # --- FIND STRIKE (Binary Search Approximation for Speed) ---
+        # Instead of iterating 50 times, we estimate K directly
+        # K approx = S * exp(N^-1(Delta + 1) * sigma * sqrt(T))
+        # This is faster than iterative Black Scholes
+        try:
+            norm_inv = si.norm.ppf(entry_delta + 1) # Put delta is negative, so we add 1 for PDF
+            approx_strike = S_entry * np.exp(norm_inv * sigma_entry * np.sqrt(T_entry))
+        except:
+            approx_strike = S_entry * 0.90 # Fallback
 
         # Round strike
         strike_step = 5 if S_entry > 200 else 1
-        short_strike = round(best_strike / strike_step) * strike_step
-        long_strike = short_strike - 5.0 # Fixed width
+        short_strike = round(approx_strike / strike_step) * strike_step
+        long_strike = short_strike - 5.0
         
-        # Calculate Credit Received
+        # Calculate Entry Credit
         p_short, d_short = black_scholes_put(S_entry, short_strike, T_entry, r, sigma_entry)
-        p_long, d_long = black_scholes_put(S_entry, long_strike, T_entry, r, sigma_entry)
-        
+        p_long, _ = black_scholes_put(S_entry, long_strike, T_entry, r, sigma_entry)
         entry_credit = p_short - p_long
         
-        if entry_credit < 0.10: continue # Skip invalid trades
+        if entry_credit < 0.10: continue 
         
         # --- MANAGE TRADE (Walk Forward) ---
         trade_res = {
@@ -137,15 +133,13 @@ def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exi
             'exit_date': expiry_date
         }
         
-        # Look at every day between Entry and Expiry
-        trade_path = df.loc[entry_date:expiry_date]
+        # Slice only the days we are in the trade
+        trade_path = df.loc[entry_date:expiry_date].iloc[1:] # Skip entry day
         
-        for curr_date, row in trade_path.iloc[1:].iterrows():
+        for curr_date, row in trade_path.iterrows():
             S_curr = row['Close']
             T_curr = (expiry_date - curr_date).days / 365.0
             days_left = (expiry_date - curr_date).days
-            
-            # Use current HV for pricing (simplification of sticky delta)
             sigma_curr = row['HV']
             
             # Calc Current Value
@@ -171,14 +165,14 @@ def run_simulation(ticker, entry_delta, exit_delta_trigger, exit_spread_pct, exi
                 trade_res['exit_date'] = curr_date
                 break
                 
-            # 3. Spread Value (Stop Loss)
+            # 3. Stop Loss
             if spread_pct > exit_spread_pct:
                 trade_res['exit_reason'] = f"Max Loss ({exit_spread_pct}%)"
                 trade_res['pnl'] = entry_credit - spread_val
                 trade_res['exit_date'] = curr_date
                 break
                 
-            # 4. Take Profit (50%)
+            # 4. Take Profit
             if spread_pct < 50:
                 trade_res['exit_reason'] = "Profit Target (50%)"
                 trade_res['pnl'] = entry_credit - spread_val
@@ -203,7 +197,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Options Lab</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Backtesting & Optimization Engine (Simulation Mode)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Large Scale Backtesting (10yr Simulation)</p>
     </div>
     """, unsafe_allow_html=True)
 with header_col3:
@@ -216,30 +210,28 @@ with st.container(border=True):
     c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1])
     
     with c1:
-        # UPDATED TICKER LIST
         ticker = st.selectbox("Select Ticker", ["SPY", "QQQ", "IWM", "GLD", "NVDA", "AAPL", "AMD", "TSLA", "MSFT", "AMZN"], index=0)
-        st.caption("Data: Real Price History + Black-Scholes Sim")
+        st.caption("Data: 10-Year Daily Ladder Simulation")
         
     with c2:
-        # Default Entry Delta is 0.20
-        exit_delta = st.number_input("Exit Short Delta >", min_value=0.10, max_value=1.00, value=0.40, step=0.05, help="Close trade if short leg delta breaches this level.")
+        exit_delta = st.number_input("Exit Short Delta >", min_value=0.10, max_value=1.00, value=0.60, step=0.05, help="Close trade if short leg delta breaches this level.")
     
     with c3:
-        exit_spread_pct = st.number_input("Exit Spread Value % >", min_value=100, max_value=500, value=200, step=10, help="Close if spread value hits this % of credit received. (200% = 1x Loss)")
+        exit_spread_pct = st.number_input("Exit Spread Value % >", min_value=100, max_value=1000, value=300, step=50, help="Close if spread value hits this % of credit received.")
         
     with c4:
-        exit_dte = st.number_input("Exit DTE <", min_value=0, max_value=30, value=14, step=1, help="Close trade if fewer than X days remain.")
+        exit_dte = st.number_input("Exit DTE <", min_value=0, max_value=30, value=7, step=1, help="Close trade if fewer than X days remain.")
         
-    run_btn = st.button("🔬 Run Simulation", use_container_width=True)
+    run_btn = st.button("🔬 Run 10-Year Simulation", use_container_width=True)
 
 # --- EXECUTION ---
 if run_btn:
-    with st.spinner(f"Simulating options chain history for {ticker}..."):
-        # Fixed Entry Delta 0.20 (Standard for this strategy)
+    with st.spinner(f"Simulating 10 years of daily trades for {ticker}... (This calculates ~500,000 options prices)"):
+        # Entry Delta fixed at 0.20
         results = run_simulation(ticker, 0.20, exit_delta, exit_spread_pct, exit_dte)
     
     if results.empty:
-        st.error("Simulation failed. Ticker data might be unavailable.")
+        st.error("Simulation failed or no data.")
     else:
         # --- METRICS ---
         total_trades = len(results)
@@ -264,15 +256,16 @@ if run_btn:
         col_chart, col_dist = st.columns([2, 1])
         
         with col_chart:
-            st.subheader("Equity Curve")
+            st.subheader(f"Equity Curve ({total_trades} Trades)")
             results = results.sort_values("entry_date")
             results['cum_pnl'] = results['pnl'].cumsum() * 100
             
             fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(results['entry_date'], results['cum_pnl'], color=SUCCESS_COLOR, linewidth=2)
+            ax.plot(results['entry_date'], results['cum_pnl'], color=SUCCESS_COLOR, linewidth=1.5)
             ax.fill_between(results['entry_date'], results['cum_pnl'], color=SUCCESS_COLOR, alpha=0.1)
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
             ax.set_ylabel("Profit ($)")
+            ax.grid(True, alpha=0.1)
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
             st.pyplot(fig, use_container_width=True)
@@ -282,7 +275,6 @@ if run_btn:
             exit_counts = results['exit_reason'].value_counts()
             
             fig2, ax2 = plt.subplots(figsize=(4, 4))
-            # Dynamic colors
             colors = [SUCCESS_COLOR if 'Profit' in idx or 'Held' in idx else WARNING_COLOR for idx in exit_counts.index]
             
             ax2.pie(exit_counts, labels=exit_counts.index, autopct='%1.1f%%', colors=colors, startangle=90, textprops={'color': TEXT_COLOR})
@@ -291,13 +283,13 @@ if run_btn:
             st.pyplot(fig2, use_container_width=True)
         
         # --- TRADE LIST ---
-        st.subheader("Trade Log")
+        st.subheader("Detailed Log")
         st.dataframe(
             results[['entry_date', 'exit_date', 'short_strike', 'credit', 'exit_reason', 'pnl']],
             use_container_width=True,
             height=300
         )
 
-# --- FOOTER NOTES ---
+# --- FOOTER ---
 st.markdown("---")
-st.caption("**Simulation Logic:** 45 DTE Entry, Sell 20-Delta Put. Options prices reconstructed using Black-Scholes model on realized volatility. This ensures 'lab' functionality without requiring external historical option databases.")
+st.caption("**Scale:** 10-Year History | **Frequency:** Daily Entry | **Model:** Black-Scholes Recreation")
