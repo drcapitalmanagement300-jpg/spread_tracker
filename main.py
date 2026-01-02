@@ -5,7 +5,7 @@ import streamlit as st
 dashboard = st.Page("streamlit_app.py", title="Dashboard", default=True) 
 spreadfinder = st.Page("spread_finder.py", title="Spread Finder")
 logreview = st.Page("log_review.py", title="Log Review")
-backtesting = st.Page("backtesting.py", title="Back Testing")
+backtesting = st.Page("backtesting.py", title="Options Lab")
 
 # 2. Define Navigation
 # Order here determines the sidebar order
