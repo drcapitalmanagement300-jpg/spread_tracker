@@ -48,75 +48,51 @@ def black_scholes_put(S, K, T, r, sigma):
     except:
         return 0.0, 0.0
 
-# --- DATA LOADER (SEPARATED & CACHED) ---
-@st.cache_data(ttl=3600*24) # Cache for 24 hours
+# --- DATA LOADER ---
+@st.cache_data(ttl=3600*24)
 def get_market_data(ticker):
-    """
-    Downloads data ONCE. Does not re-run when sliders change.
-    """
     attempts = 0
     max_retries = 3
-    
     while attempts < max_retries:
         try:
             stock = yf.Ticker(ticker)
             df = stock.history(period="10y") 
+            if df.empty: raise ValueError("Empty Data")
             
-            if df.empty:
-                raise ValueError("Empty Data")
-            
-            # 1. Clean Timezones
-            if df.index.tz is not None:
-                df.index = df.index.tz_localize(None)
-                
-            # 2. Calc Volatility
+            if df.index.tz is not None: df.index = df.index.tz_localize(None)
             df['Returns'] = df['Close'].pct_change()
             df['HV'] = df['Returns'].rolling(window=30).std() * np.sqrt(252)
-            
-            # 3. Clean
             df = df.dropna()
             df = df[~df.index.duplicated(keep='first')]
-            
             return df
-            
         except Exception as e:
             attempts += 1
-            time.sleep(1) # Wait 1 sec before retry
+            time.sleep(1)
             if attempts == max_retries:
-                st.error(f"Failed to download {ticker} after {max_retries} attempts. Error: {e}")
+                st.error(f"Failed to download {ticker}. Error: {e}")
                 return pd.DataFrame()
     return pd.DataFrame()
 
-# --- SIMULATION ENGINE (PURE MATH) ---
-# This is NOT cached so it updates instantly when you move sliders
-def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger):
+# --- SIMULATION ENGINE ---
+def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger, slippage, fees, capital):
     if df.empty: return pd.DataFrame()
 
-    trades = []
+    all_potential_trades = []
     entry_dates = df.index
     total_days = len(entry_dates)
-    
-    # Progress UI
     progress_bar = st.progress(0)
+    r = 0.045
     
-    r = 0.045 # Risk Free Rate
-    
-    # We use a stride to speed up the loop for UI responsiveness if dataset is huge
-    # checking every day for 10 years = 2500 steps. fast enough.
-    
+    # 1. GENERATE ALL VALID SIGNALS (Unlimited Capital)
     for i, entry_date in enumerate(entry_dates):
-        if i % 100 == 0:
-            progress_bar.progress((i + 1) / total_days)
+        if i % 100 == 0: progress_bar.progress((i + 1) / total_days)
 
         try:
             entry_row = df.loc[entry_date]
             S_entry = float(entry_row['Close'])
             sigma_entry = float(entry_row['HV'])
             
-            # Target Expiry (45 Days)
             target_expiry = entry_date + timedelta(days=45)
-            
-            # Slice future data efficiently
             future_data = df.loc[entry_date:]
             valid_expiries = future_data.index[future_data.index >= target_expiry]
             
@@ -124,36 +100,31 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
             expiry_date = valid_expiries[0]
             T_entry = (expiry_date - entry_date).days / 365.0
             
-            # --- STRIKE FINDER ---
+            # Strike Selection
             best_strike = S_entry * 0.8
             min_delta_diff = 1.0
             scan_strikes = np.linspace(S_entry * 0.70, S_entry, 30)
-            
-            for k_candidate in scan_strikes:
-                _, d_test = black_scholes_put(S_entry, k_candidate, T_entry, r, sigma_entry)
-                diff = abs(abs(d_test) - abs(entry_delta))
-                if diff < min_delta_diff:
-                    min_delta_diff = diff
-                    best_strike = k_candidate
+            for k in scan_strikes:
+                _, d = black_scholes_put(S_entry, k, T_entry, r, sigma_entry)
+                diff = abs(abs(d) - abs(entry_delta))
+                if diff < min_delta_diff: min_delta_diff = diff; best_strike = k
 
             strike_step = 5.0 if S_entry > 200 else 1.0
             short_strike = round(best_strike / strike_step) * strike_step
             long_strike = short_strike - 5.0
             
-            # Entry Credit
-            p_short, d_short = black_scholes_put(S_entry, short_strike, T_entry, r, sigma_entry)
-            p_long, _ = black_scholes_put(S_entry, long_strike, T_entry, r, sigma_entry)
-            entry_credit = p_short - p_long
+            p_s, d_s = black_scholes_put(S_entry, short_strike, T_entry, r, sigma_entry)
+            p_l, _ = black_scholes_put(S_entry, long_strike, T_entry, r, sigma_entry)
             
-            if entry_credit < 0.10: continue 
+            gross_credit = p_s - p_l
+            if gross_credit < 0.10: continue 
             
-            # Trade Object
             trade_res = {
                 'entry_date': entry_date,
                 'short_strike': short_strike,
-                'credit': entry_credit,
+                'gross_credit': gross_credit,
                 'exit_reason': 'Held to Expiry',
-                'pnl': entry_credit,
+                'pnl': gross_credit,
                 'exit_date': expiry_date
             }
             
@@ -166,35 +137,67 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
                 days_left = (expiry_date - curr_date).days
                 sigma_curr = float(row['HV'])
                 
-                curr_p_short, curr_d_short = black_scholes_put(S_curr, short_strike, T_curr, r, sigma_curr)
-                curr_p_long, _ = black_scholes_put(S_curr, long_strike, T_curr, r, sigma_curr)
-                spread_val = curr_p_short - curr_p_long
-                spread_pct = (spread_val / entry_credit) * 100
+                curr_p_s, curr_d_s = black_scholes_put(S_curr, short_strike, T_curr, r, sigma_curr)
+                curr_p_l, _ = black_scholes_put(S_curr, long_strike, T_curr, r, sigma_curr)
+                spread_val = curr_p_s - curr_p_l
+                spread_pct = (spread_val / gross_credit) * 100
                 
-                if days_left < exit_dte_trigger:
-                    trade_res.update({'exit_reason': f"DTE < {exit_dte_trigger}", 'pnl': entry_credit - spread_val, 'exit_date': curr_date})
+                hit_exit = False
+                reason = ""
+                
+                if days_left < exit_dte_trigger: hit_exit = True; reason = f"DTE < {exit_dte_trigger}"
+                elif abs(curr_d_s) > exit_delta_trigger: hit_exit = True; reason = f"Delta > {exit_delta_trigger}"
+                elif spread_pct > exit_spread_pct: hit_exit = True; reason = f"Max Loss ({exit_spread_pct}%)"
+                elif spread_pct < 50: hit_exit = True; reason = "Profit Target (50%)"
+                
+                if hit_exit:
+                    trade_res['exit_reason'] = reason
+                    trade_res['pnl'] = gross_credit - spread_val
+                    trade_res['exit_date'] = curr_date
                     break
-                if abs(curr_d_short) > exit_delta_trigger:
-                    trade_res.update({'exit_reason': f"Delta > {exit_delta_trigger}", 'pnl': entry_credit - spread_val, 'exit_date': curr_date})
-                    break
-                if spread_pct > exit_spread_pct:
-                    trade_res.update({'exit_reason': f"Max Loss ({exit_spread_pct}%)", 'pnl': entry_credit - spread_val, 'exit_date': curr_date})
-                    break
-                if spread_pct < 50:
-                    trade_res.update({'exit_reason': "Profit Target (50%)", 'pnl': entry_credit - spread_val, 'exit_date': curr_date})
-                    break
-                    
-            trades.append(trade_res)
+            
+            all_potential_trades.append(trade_res)
         except: continue
         
     progress_bar.empty()
     
-    results = pd.DataFrame(trades)
+    # 2. APPLY CAPITAL CONSTRAINTS (Filter Trades)
+    if not all_potential_trades: return pd.DataFrame()
+    
+    # Costs
+    # Slippage: Applied to 4 legs (Opening Short/Long + Closing Short/Long)
+    # Fees: Flat rate per trade
+    friction = (slippage * 4) + fees # Total dollar cost
+    
+    executed_trades = []
+    active_end_dates = [] # Tracks when capital becomes free
+    max_positions = int(capital // 500) # Assuming $500 margin per spread
+    
+    skipped_count = 0
+    
+    for trade in all_potential_trades:
+        entry = trade['entry_date']
+        
+        # Free up capital: Remove trades that have closed before this entry date
+        active_end_dates = [d for d in active_end_dates if d > entry]
+        
+        # Check Buying Power
+        if len(active_end_dates) < max_positions:
+            # Execute Trade
+            # Apply friction to PnL (convert friction $ to option price terms by dividing by 100)
+            trade['pnl'] = trade['pnl'] - (friction / 100.0)
+            executed_trades.append(trade)
+            active_end_dates.append(trade['exit_date'])
+        else:
+            skipped_count += 1
+            
+    results = pd.DataFrame(executed_trades)
+    
     if not results.empty:
         results['display_entry'] = pd.to_datetime(results['entry_date']).dt.strftime('%Y-%m-%d')
         results['display_exit'] = pd.to_datetime(results['exit_date']).dt.strftime('%Y-%m-%d')
         
-    return results
+    return results, skipped_count
 
 # --- HEADER ---
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
@@ -202,7 +205,7 @@ with header_col1:
     try: st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
     except: st.write("**DR CAPITAL**")
 with header_col2:
-    st.markdown("""<div style='text-align: left; padding-top: 10px;'><h1 style='margin-bottom: 0px;'>Options Lab</h1><p style='color: gray;'>Large Scale Backtesting (10yr Simulation)</p></div>""", unsafe_allow_html=True)
+    st.markdown("""<div style='text-align: left; padding-top: 10px;'><h1 style='margin-bottom: 0px;'>Options Lab</h1><p style='color: gray;'>10-Year Portfolio Simulation</p></div>""", unsafe_allow_html=True)
 with header_col3: st.write("") 
 st.markdown("<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: -5px; margin-bottom: 10px;'>", unsafe_allow_html=True)
 
@@ -211,7 +214,6 @@ with st.container(border=True):
     c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1])
     with c1: 
         ticker = st.selectbox("Ticker", ["SPY", "QQQ", "IWM", "GLD", "NVDA", "AAPL", "AMD", "TSLA", "MSFT", "AMZN"], index=0)
-        # TRIGGER DOWNLOAD HERE (Separate from Run button)
         if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
             with st.spinner(f"Fetching 10y Data for {ticker}..."):
                 st.session_state.df_market = get_market_data(ticker)
@@ -221,16 +223,30 @@ with st.container(border=True):
     with c3: exit_spread_pct = st.number_input("Exit Spread Value % >", 100, 1000, 300, 50)
     with c4: exit_dte = st.number_input("Exit DTE <", 0, 30, 7)
     
+    # CAPITAL & COSTS
+    st.markdown("##### 💼 Account Settings")
+    r1, r2, r3 = st.columns(3)
+    with r1: 
+        start_cap = st.number_input("Starting Capital ($)", 1000, 1000000, 10000, 1000)
+    with r2: 
+        slippage = st.number_input("Slippage ($ per leg)", 0.00, 0.10, 0.01, 0.01, help="Bid/Ask spread cost.")
+    with r3: 
+        fees = st.number_input("Commissions ($ per trade)", 0.00, 5.00, 0.00, 0.10, help="Wealthsimple = $0. IBKR/ToS = ~$1.30")
+    
     run_btn = st.button("🔬 Run Simulation", use_container_width=True)
 
 # --- EXECUTION ---
 if run_btn:
     if 'df_market' in st.session_state and not st.session_state.df_market.empty:
-        with st.spinner("Crunching numbers..."):
-            results = run_simulation(st.session_state.df_market, 0.20, exit_delta, exit_spread_pct, exit_dte)
+        with st.spinner(f"Simulating portfolio with ${start_cap:,} capital..."):
+            results, skipped = run_simulation(
+                st.session_state.df_market, 
+                0.20, exit_delta, exit_spread_pct, exit_dte, 
+                slippage, fees, start_cap
+            )
         
         if results.empty:
-            st.warning("No trades generated. This is likely due to strict filters or low volatility periods.")
+            st.warning("No trades generated.")
         else:
             # --- METRICS ---
             total_trades = len(results)
@@ -238,46 +254,43 @@ if run_btn:
             losses = results[results['pnl'] <= 0]
             win_rate = len(wins) / total_trades * 100
             total_pnl = results['pnl'].sum() * 100
+            
+            # ROI
+            final_equity = start_cap + total_pnl
+            total_return_pct = (total_pnl / start_cap) * 100
+            
             avg_win = wins['pnl'].mean() * 100 if not wins.empty else 0
             avg_loss = losses['pnl'].mean() * 100 if not losses.empty else 0
             
-            # --- ROI (Capital Efficiency) ---
-            dates_entry = pd.to_datetime(results['entry_date'])
-            dates_exit = pd.to_datetime(results['exit_date'])
-            min_date, max_date = dates_entry.min(), dates_exit.max()
-            date_range = pd.date_range(min_date, max_date, freq='7D') # Sample weekly for speed
-            
-            overlaps = []
-            for d in date_range:
-                count = ((dates_entry <= d) & (dates_exit >= d)).sum()
-                overlaps.append(count)
-            
-            max_conc = max(overlaps) if overlaps else 1
-            max_margin = max(1, max_conc) * 500
-            roi_pct = (total_pnl / max_margin) * 100
-            
             # --- DISPLAY ---
             m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Total P&L", f"${total_pnl:,.0f}")
-            m2.metric("Return %", f"{roi_pct:,.1f}%", help=f"Return on Max Margin (${max_margin:,.0f})")
+            m1.metric("Net Profit", f"${total_pnl:,.0f}", delta=f"{total_return_pct:.1f}%")
+            m2.metric("Ending Balance", f"${final_equity:,.0f}")
             m3.metric("Win Rate", f"{win_rate:.1f}%", f"{len(wins)}W | {len(losses)}L")
-            m4.metric("Avg Win", f"${avg_win:.0f}")
-            m5.metric("Avg Loss", f"${avg_loss:.0f}")
+            m4.metric("Avg Win", f"${avg_win:.2f}")
+            m5.metric("Avg Loss", f"${avg_loss:.2f}")
+            
+            if skipped > 0:
+                st.info(f"ℹ️ **Capital Constraint Active:** Skipped {skipped} valid trade setups because the account was fully invested.")
             
             st.markdown("---")
             
             col_chart, col_dist = st.columns([2, 1])
             with col_chart:
-                st.subheader(f"Equity Curve ({total_trades} Trades)")
+                st.subheader("Account Growth")
                 results['plot_date'] = pd.to_datetime(results['entry_date'])
                 results = results.sort_values("plot_date")
+                
+                # Equity Curve Calculation
+                # We need to reconstruct the daily equity. A simple cumsum is a good approximation for visualization.
                 results['cum_pnl'] = results['pnl'].cumsum() * 100
+                results['equity'] = start_cap + results['cum_pnl']
                 
                 fig, ax = plt.subplots(figsize=(8, 4))
-                ax.plot(results['plot_date'], results['cum_pnl'], color=SUCCESS_COLOR, linewidth=1.5)
-                ax.fill_between(results['plot_date'], results['cum_pnl'], color=SUCCESS_COLOR, alpha=0.1)
+                ax.plot(results['plot_date'], results['equity'], color=SUCCESS_COLOR, linewidth=1.5)
+                ax.fill_between(results['plot_date'], results['equity'], start_cap, color=SUCCESS_COLOR, alpha=0.1)
                 ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
-                ax.set_ylabel("Profit ($)")
+                ax.set_ylabel("Account Value ($)")
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
                 st.pyplot(fig, use_container_width=True)
@@ -292,22 +305,22 @@ if run_btn:
                 fig2.gca().add_artist(centre_circle)
                 st.pyplot(fig2, use_container_width=True)
             
-            st.subheader("Detailed Log")
+            st.subheader("Trade Log")
             st.dataframe(
-                results[['display_entry', 'display_exit', 'short_strike', 'credit', 'exit_reason', 'pnl']],
+                results[['display_entry', 'display_exit', 'short_strike', 'gross_credit', 'exit_reason', 'pnl']],
                 use_container_width=True,
                 height=300,
                 column_config={
                     "display_entry": "Entry",
                     "display_exit": "Exit",
                     "short_strike": "Strike",
-                    "credit": "Credit",
+                    "gross_credit": "Gross Credit",
                     "exit_reason": "Reason",
-                    "pnl": "P&L"
+                    "pnl": "Net P&L (x100)"
                 }
             )
     else:
-        st.error("Data not loaded. Please select a ticker to fetch data first.")
+        st.error("Data not loaded. Please select a ticker.")
 
 st.markdown("---")
-st.caption("**Scale:** 10-Year History | **Frequency:** Daily Entry | **Model:** Black-Scholes Recreation")
+st.caption("**Model:** Black-Scholes | **Constraints:** Capital Limited + Slippage")
