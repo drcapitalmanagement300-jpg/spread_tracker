@@ -8,26 +8,23 @@ from typing import Any, Dict, List, Optional
 # --- GOOGLE AUTH IMPORTS ---
 from google.oauth2.credentials import Credentials as OAuthCredentials
 from google.auth.transport.requests import Request
-import google.auth.exceptions # IMPORT ADDED FOR ERROR HANDLING
+import google.auth.exceptions
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google_auth_oauthlib.flow import Flow
 
 # --- CONFIG ---
 DRIVE_FILE_NAME = "credit_spreads.json"
 SPREADSHEET_NAME = "SpreadSniper_Data"
-DATASET_FOLDER_NAME = "SpreadSniper_Datasets"
-
-# Scopes
+SHEET_TITLE = "TradeLog"
 SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets"
 ]
-
 LOCAL_TOKEN_FILE = "google_oauth_token.json"
 
-# ----------------------------- AUTHENTICATION (ST.SECRETS) -----------------------------
+# ----------------------------- AUTHENTICATION -----------------------------
 def _get_oauth_config():
     if "google_oauth" not in st.secrets:
         st.error("Missing 'google_oauth' in Streamlit Secrets.")
@@ -69,81 +66,56 @@ def _load_local_token():
     except: return None
 
 def get_creds_from_session():
-    """
-    Gets valid credentials. Handles REFRESH errors by forcing logout.
-    """
     # 1. Try Session
     creds_dict = st.session_state.get("credentials")
     
-    # 2. Try Local Cache (if session empty)
+    # 2. Try Local Cache
     if not creds_dict:
         creds_dict = _load_local_token()
         
-    if not creds_dict:
-        return None
+    if not creds_dict: return None
     
     try:
         creds = OAuthCredentials(**creds_dict)
-        
-        # 3. Check Expiry & Refresh
         if creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-                # Save new token
                 new_dict = _credentials_to_dict(creds)
                 st.session_state["credentials"] = new_dict
                 _save_local_token(new_dict)
             except google.auth.exceptions.RefreshError:
-                # CRITICAL FIX: If refresh fails (401), kill the session immediately
                 st.warning("Session expired. Please sign in again.")
                 st.session_state.pop("credentials", None)
                 if os.path.exists(LOCAL_TOKEN_FILE):
                     os.remove(LOCAL_TOKEN_FILE)
                 return None
-                
         return creds
-    except Exception as e:
-        # If anything else breaks in auth, return None to force re-login
-        print(f"Auth Error: {e}")
-        return None
+    except: return None
 
 def ensure_logged_in():
-    """
-    Blocking call. If not logged in, shows Sign-In button and stops script.
-    """
-    # 1. Check for valid session creds
-    if get_creds_from_session():
-        return
+    if get_creds_from_session(): return
 
-    # 2. Check for OAuth Callback (Code in URL)
     if "code" in st.query_params:
         try:
             cfg = _get_oauth_config()
-            client_config = _get_web_client_config(cfg)
             flow = Flow.from_client_config(
-                client_config,
+                _get_web_client_config(cfg),
                 scopes=SCOPES,
                 redirect_uri=cfg["redirect_uri"]
             )
             flow.fetch_token(code=st.query_params["code"])
             creds_dict = _credentials_to_dict(flow.credentials)
-            
-            # Store
             st.session_state["credentials"] = creds_dict
             _save_local_token(creds_dict)
-            
-            # Clear URL and Rerun
             st.query_params.clear()
             st.rerun()
         except Exception as e:
             st.error(f"Login failed: {e}")
             st.stop()
 
-    # 3. Show Login Button
     cfg = _get_oauth_config()
-    client_config = _get_web_client_config(cfg)
     flow = Flow.from_client_config(
-        client_config,
+        _get_web_client_config(cfg),
         scopes=SCOPES,
         redirect_uri=cfg["redirect_uri"]
     )
@@ -160,7 +132,7 @@ def logout():
         os.remove(LOCAL_TOKEN_FILE)
     st.rerun()
 
-# ----------------------------- SERVICE BUILDERS -----------------------------
+# ----------------------------- SERVICES -----------------------------
 def build_drive_service_from_session():
     creds = get_creds_from_session()
     if creds: return build('drive', 'v3', credentials=creds)
@@ -180,22 +152,11 @@ def _find_file_id(service, filename):
         return files[0]['id'] if files else None
     except: return None
 
-def _get_or_create_folder(service, folder_name):
-    try:
-        q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        files = service.files().list(q=q, spaces='drive', fields='files(id)').execute().get('files', [])
-        if files: return files[0]['id']
-        
-        metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
-        return service.files().create(body=metadata, fields='id').execute().get('id')
-    except: return None
-
-# ----------------------------- ACTIVE TRADES (JSON) -----------------------------
+# ----------------------------- JSON STORAGE -----------------------------
 def load_from_drive(service):
     if not service: return []
     file_id = _find_file_id(service, DRIVE_FILE_NAME)
     if not file_id: return []
-    
     try:
         data = service.files().get_media(fileId=file_id).execute()
         return json.loads(data.decode('utf-8'))
@@ -203,18 +164,17 @@ def load_from_drive(service):
 
 def save_to_drive(service, trades):
     if not service: return False
-    
     clean_trades = []
     for t in trades:
         ct = t.copy()
         for k, v in ct.items():
             if isinstance(v, (date, datetime)): ct[k] = v.isoformat()
         clean_trades.append(ct)
-        
+    
     content = json.dumps(clean_trades, indent=2)
     media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='application/json')
-    
     file_id = _find_file_id(service, DRIVE_FILE_NAME)
+    
     try:
         if file_id:
             service.files().update(fileId=file_id, media_body=media).execute()
@@ -223,29 +183,46 @@ def save_to_drive(service, trades):
         return True
     except: return False
 
-# ----------------------------- LOGGING (SHEETS) -----------------------------
+# ----------------------------- SHEETS LOGGING (RESTORED) -----------------------------
+def _get_spreadsheet_id(service, sheets_service):
+    # 1. Find existing
+    q = f"name = '{SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet'"
+    files = service.files().list(q=q).execute().get('files', [])
+    if files: return files[0]['id']
+    
+    # 2. Create new
+    ss = sheets_service.spreadsheets().create(body={'properties': {'title': SPREADSHEET_NAME}}).execute()
+    return ss['spreadsheetId']
+
+def _ensure_sheet_exists(sheets_service, spreadsheet_id):
+    meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    sheet_id = None
+    for s in meta['sheets']:
+        if s['properties']['title'] == SHEET_TITLE:
+            sheet_id = s['properties']['sheetId']
+            break
+            
+    if sheet_id is None:
+        # Create sheet
+        req = {"addSheet": {"properties": {"title": SHEET_TITLE}}}
+        res = sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": [req]}).execute()
+        sheet_id = res['replies'][0]['addSheet']['properties']['sheetId']
+        
+        # Add Headers
+        headers = [["Ticker", "Entry", "Exit", "Strike_Short", "Strike_Long", "Credit", "Debit", "Contracts", "PnL", "Notes"]]
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A1",
+            valueInputOption="RAW", body={"values": headers}
+        ).execute()
+        
+    return sheet_id
+
 def log_completed_trade(service, trade_data):
     if not service: return False
     try:
         sheets_service = build_sheets_service_from_session()
-        q = f"name = '{SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet'"
-        files = service.files().list(q=q).execute().get('files', [])
-        if files:
-            spreadsheet_id = files[0]['id']
-        else:
-            ss = sheets_service.spreadsheets().create(body={'properties': {'title': SPREADSHEET_NAME}}).execute()
-            spreadsheet_id = ss['spreadsheetId']
-
-        ss_meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-        if not any(s['properties']['title'] == "TradeLog" for s in ss_meta['sheets']):
-            sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={
-                "requests": [{"addSheet": {"properties": {"title": "TradeLog"}}}]
-            }).execute()
-            headers = [["Ticker", "Entry", "Exit", "Strike_Short", "Strike_Long", "Credit", "Debit", "Contracts", "PnL", "Notes"]]
-            sheets_service.spreadsheets().values().update(
-                spreadsheetId=spreadsheet_id, range="TradeLog!A1",
-                valueInputOption="RAW", body={"values": headers}
-            ).execute()
+        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
+        _ensure_sheet_exists(sheets_service, spreadsheet_id)
 
         credit = float(trade_data.get('credit', 0))
         debit = float(trade_data.get('debit_paid', 0))
@@ -263,7 +240,7 @@ def log_completed_trade(service, trade_data):
         ]]
         
         sheets_service.spreadsheets().values().append(
-            spreadsheetId=spreadsheet_id, range="TradeLog!A1",
+            spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A1",
             valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={"values": row}
         ).execute()
         return True
@@ -273,12 +250,10 @@ def get_trade_log(service):
     if not service: return []
     try:
         sheets_service = build_sheets_service_from_session()
-        q = f"name = '{SPREADSHEET_NAME}'"
-        files = service.files().list(q=q).execute().get('files', [])
-        if not files: return []
+        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
         
         res = sheets_service.spreadsheets().values().get(
-            spreadsheetId=files[0]['id'], range="TradeLog!A:Z"
+            spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A:Z"
         ).execute()
         
         rows = res.get('values', [])
@@ -286,8 +261,69 @@ def get_trade_log(service):
         
         headers = rows[0]
         data = []
-        for r in rows[1:]:
-            item = {headers[i]: (r[i] if i < len(r) else "") for i in range(len(headers))}
+        for i, r in enumerate(rows[1:]):
+            # Row index in sheet is i + 2 (1-based, +1 for header)
+            item = {headers[j]: (r[j] if j < len(r) else "") for j in range(len(headers))}
+            item['_row_index'] = i + 1 # API uses 0-based index for delete, usually data starts at index 1
             data.append(item)
         return data
     except: return []
+
+def delete_log_entry(service, row_index):
+    """
+    Deletes a specific row from the Google Sheet.
+    row_index: The 0-based index of the data row to delete (relative to data start).
+    """
+    if not service: return False
+    try:
+        sheets_service = build_sheets_service_from_session()
+        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
+        sheet_id = _ensure_sheet_exists(sheets_service, spreadsheet_id)
+        
+        # Calculate actual grid index (Header is index 0, Data starts at 1)
+        grid_index = row_index + 1 
+        
+        req = {
+            "deleteDimension": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": grid_index,
+                    "endIndex": grid_index + 1
+                }
+            }
+        }
+        
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": [req]}
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"Delete Error: {e}")
+        return False
+
+def update_log_entry(service, row_index, updated_data):
+    """
+    Updates a specific row in the Google Sheet.
+    """
+    if not service: return False
+    try:
+        sheets_service = build_sheets_service_from_session()
+        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
+        
+        # Convert dict back to list based on headers
+        # Note: This implies we know the header order. Ideally we fetch headers first.
+        # For simplicity, we assume standard order or just map values if passed as list.
+        if isinstance(updated_data, list):
+            values = updated_data
+        else:
+            return False # Wrapper expects list for update currently
+            
+        range_name = f"{SHEET_TITLE}!A{row_index + 2}" # +2 for 1-based + header
+        
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=range_name,
+            valueInputOption="USER_ENTERED", body={"values": [values]}
+        ).execute()
+        return True
+    except: return False
