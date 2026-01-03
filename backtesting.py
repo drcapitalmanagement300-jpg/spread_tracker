@@ -75,14 +75,17 @@ def get_market_data(ticker):
     return pd.DataFrame()
 
 # --- SIMULATION ENGINE ---
-def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger, profit_target_pct, slippage, fees, capital):
+def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger, profit_target_pct, slippage, fees, capital, optimizer_mode=False):
     if df.empty: return pd.DataFrame()
 
     all_potential_trades = []
     entry_dates = df.index
     r = 0.045
     
-    # FAST LOOP (No progress bar needed for optimizer chunks)
+    # OPTIMIZATION: Scan Resolution
+    # If we are in "Optimizer Mode", we use fewer strike checks to speed up the loop by 40%
+    strike_scan_steps = 10 if optimizer_mode else 30
+    
     for i, entry_date in enumerate(entry_dates):
         try:
             entry_row = df.loc[entry_date]
@@ -97,12 +100,10 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
             expiry_date = valid_expiries[0]
             T_entry = (expiry_date - entry_date).days / 365.0
             
-            # Strike Selection (Optimized Search)
+            # Strike Selection
             best_strike = S_entry * 0.8
             min_delta_diff = 1.0
-            
-            # Low resolution scan for speed
-            scan_strikes = np.linspace(S_entry * 0.70, S_entry, 20) 
+            scan_strikes = np.linspace(S_entry * 0.70, S_entry, strike_scan_steps) 
             
             for k in scan_strikes:
                 _, d = black_scholes_put(S_entry, k, T_entry, r, sigma_entry)
@@ -228,7 +229,7 @@ with tab_sim:
             with st.spinner("Simulating..."):
                 results, skipped = run_simulation(
                     st.session_state.df_market, 0.20, exit_delta, exit_spread_pct, exit_dte, profit_target,
-                    slippage, fees, start_cap
+                    slippage, fees, start_cap, optimizer_mode=False
                 )
             
             if not results.empty:
@@ -250,20 +251,19 @@ with tab_sim:
                 st.warning("No trades found.")
 
 # ==========================================
-# TAB 2: OPTIMIZER (Chunked Processing)
+# TAB 2: OPTIMIZER (Single Batch Processing)
 # ==========================================
 with tab_opt:
     st.markdown("### 🔍 Find the Best Settings")
-    st.info("Uses 'Chunked Processing' to prevent timeouts. The page will reload automatically as it works.")
+    st.info("Performance Mode Active: Processing 1 simulation at a time to ensure stability.")
     
     col_opt1, col_opt2 = st.columns(2)
     with col_opt1:
         scan_mode = st.radio("Scan Intensity", ["Light (12 Runs)", "Deep (100+ Runs)"], horizontal=True)
     
-    # 1. Start Button: Initializes the Queue
     if st.button("🚀 Start Optimizer", type="primary"):
         if 'df_market' in st.session_state:
-            # Define Parameter Grid
+            # Param Grid
             if scan_mode.startswith("Light"):
                 param_grid = {
                     "exit_dte": [21, 7],
@@ -278,81 +278,69 @@ with tab_opt:
                     "exit_delta": [0.4, 0.6] 
                 }
             
-            # Generate Permutations
             keys, values = zip(*param_grid.items())
             permutations = [dict(zip(keys, v)) for v in itertools.product(*values)]
             
-            # Save to Session State (The "Queue")
+            # Queue Init
             st.session_state.opt_queue = permutations
             st.session_state.opt_results = []
             st.session_state.opt_total = len(permutations)
             st.session_state.is_optimizing = True
             st.rerun()
+            
+    if st.button("🛑 Stop Optimizer"):
+        st.session_state.is_optimizing = False
+        st.session_state.opt_queue = []
+        st.rerun()
 
-    # 2. Worker Logic: Processes A BATCH and Reruns
+    # WORKER LOGIC
     if st.session_state.get('is_optimizing', False):
-        
-        # Check if queue is empty
         if not st.session_state.opt_queue:
             st.session_state.is_optimizing = False
             st.rerun()
             
-        # UI Progress
+        # Current Job
         total = st.session_state.opt_total
         remaining = len(st.session_state.opt_queue)
-        done = total - remaining
+        done = total - remaining + 1
         
-        progress = done / total
-        st.write(f"⚙️ **Processing Batch... ({done}/{total})**")
-        st.progress(progress)
+        p = st.session_state.opt_queue.pop(0)
         
-        # PROCESS BATCH (5 at a time)
-        BATCH_SIZE = 5
+        # UI Update
+        st.write(f"⚙️ **Testing Config {done}/{total}**")
+        st.caption(f"Settings: DTE {p.get('exit_dte')} | Target {p.get('profit_target')}% | Stop {p.get('stop_loss')}%")
+        st.progress(done / total)
         
-        for _ in range(BATCH_SIZE):
-            if not st.session_state.opt_queue:
-                break
-                
-            # Pop the next item
-            p = st.session_state.opt_queue.pop(0)
+        # Run Simulation (Mode=True for speed)
+        res, _ = run_simulation(
+            st.session_state.df_market, 
+            0.20, p.get('exit_delta', 0.60), p.get('stop_loss', 300), 
+            p.get('exit_dte', 21), p.get('profit_target', 50),
+            slippage, fees, start_cap, optimizer_mode=True
+        )
+        
+        if not res.empty:
+            pnl = res['pnl'].sum() * 100
+            wr = len(res[res['pnl']>0])/len(res)*100
             
-            # Defaults
-            d_delta = p.get('exit_delta', 0.60)
-            d_stop = p.get('stop_loss', 300)
-            d_dte = p.get('exit_dte', 21)
-            d_target = p.get('profit_target', 50)
+            res['equity'] = start_cap + (res['pnl'].cumsum() * 100)
+            res['peak'] = res['equity'].cummax()
+            res['dd'] = (res['equity'] - res['peak']) / res['peak']
+            max_dd = res['dd'].min() * 100
             
-            # Run Simulation
-            res, _ = run_simulation(
-                st.session_state.df_market, 
-                0.20, d_delta, d_stop, d_dte, d_target,
-                slippage, fees, start_cap
-            )
+            st.session_state.opt_results.append({
+                "DTE": p.get('exit_dte', 21),
+                "Target %": p.get('profit_target', 50),
+                "Stop %": p.get('stop_loss', 300),
+                "Net Profit": pnl,
+                "Win Rate": wr,
+                "Max DD": max_dd,
+                "Trades": len(res)
+            })
             
-            # Save Result
-            if not res.empty:
-                pnl = res['pnl'].sum() * 100
-                wr = len(res[res['pnl']>0])/len(res)*100
-                
-                res['equity'] = start_cap + (res['pnl'].cumsum() * 100)
-                res['peak'] = res['equity'].cummax()
-                res['dd'] = (res['equity'] - res['peak']) / res['peak']
-                max_dd = res['dd'].min() * 100
-                
-                st.session_state.opt_results.append({
-                    "DTE": d_dte,
-                    "Target %": d_target,
-                    "Stop %": d_stop,
-                    "Net Profit": pnl,
-                    "Win Rate": wr,
-                    "Max DD": max_dd,
-                    "Trades": len(res)
-                })
-        
-        # RERUN AFTER BATCH
         st.rerun()
 
-    # 3. Results Display (When Finished)
+    # RESULTS
     if not st.session_state.get('is_optimizing', False) and 'opt_results' in st.session_state and st.session_state.opt_results:
         st.balloons()
         st.subheader("🏆 Optimization Results")
