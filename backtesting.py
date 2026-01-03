@@ -8,11 +8,15 @@ import scipy.stats as si
 import time
 import itertools
 from datetime import timedelta
+import concurrent.futures
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Options Lab")
 
 # --- CONSTANTS ---
+# Top 5 Highest Liquidity/IV Stocks (Non-Index)
+BASKET_TICKERS = ["TSLA", "NVDA", "AAPL", "AMD", "AMZN"]
+
 SUCCESS_COLOR = "#00C853"
 WARNING_COLOR = "#d32f2f"
 BG_COLOR = '#0E1117'
@@ -33,7 +37,7 @@ plt.rcParams.update({
     "grid.alpha": 0.3
 })
 
-# --- BLACK-SCHOLES SOLVER ---
+# --- MATH HELPERS ---
 def black_scholes_put(S, K, T, r, sigma):
     try:
         S, K, T, sigma = float(S), float(K), float(T), float(sigma)
@@ -49,321 +53,372 @@ def black_scholes_put(S, K, T, r, sigma):
     except:
         return 0.0, 0.0
 
-# --- DATA LOADER ---
+# --- DATA LOADING (CACHED) ---
 @st.cache_data(ttl=3600*24)
-def get_market_data(ticker):
-    attempts = 0
-    max_retries = 3
-    while attempts < max_retries:
+def get_basket_data(tickers):
+    """Fetches data for ALL basket tickers at once."""
+    data_map = {}
+    for t in tickers:
         try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(period="10y") 
-            if df.empty: raise ValueError("Empty Data")
+            stock = yf.Ticker(t)
+            df = stock.history(period="10y")
+            if df.empty: continue
             
             if df.index.tz is not None: df.index = df.index.tz_localize(None)
             df['Returns'] = df['Close'].pct_change()
             df['HV'] = df['Returns'].rolling(window=30).std() * np.sqrt(252)
             df = df.dropna()
             df = df[~df.index.duplicated(keep='first')]
-            return df
-        except Exception as e:
-            attempts += 1
-            time.sleep(1)
-            if attempts == max_retries:
-                st.error(f"Failed to download {ticker}. Error: {e}")
-                return pd.DataFrame()
-    return pd.DataFrame()
+            data_map[t] = df
+        except: continue
+    return data_map
 
-# --- SIMULATION ENGINE ---
-def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger, profit_target_pct, slippage, fees, capital, optimizer_mode=False):
-    if df.empty: return pd.DataFrame()
-
-    all_potential_trades = []
+# --- CORE SIGNAL GENERATOR (Single Ticker) ---
+def generate_signals_for_ticker(ticker, df, entry_delta, exit_dte, stop_loss_pct, profit_target_pct, scan_resolution_low=False):
+    """
+    Calculates potential trades assuming INFINITE capital. 
+    The Portfolio Manager will later filter these based on actual cash.
+    """
+    signals = []
     entry_dates = df.index
     r = 0.045
     
-    # OPTIMIZATION: Scan Resolution
-    # If we are in "Optimizer Mode", we use fewer strike checks to speed up the loop by 40%
-    strike_scan_steps = 10 if optimizer_mode else 30
+    # Speed Optimization: Reduce strike scan steps for optimizer
+    strike_steps = 10 if scan_resolution_low else 30
     
-    for i, entry_date in enumerate(entry_dates):
+    for entry_date in entry_dates:
         try:
-            entry_row = df.loc[entry_date]
-            S_entry = float(entry_row['Close'])
-            sigma_entry = float(entry_row['HV'])
+            # 1. Entry Logic
+            row = df.loc[entry_date]
+            S = float(row['Close'])
+            sigma = float(row['HV'])
             
             target_expiry = entry_date + timedelta(days=45)
-            future_data = df.loc[entry_date:]
-            valid_expiries = future_data.index[future_data.index >= target_expiry]
+            future = df.loc[entry_date:]
+            valid_exps = future.index[future.index >= target_expiry]
+            if valid_exps.empty: continue
             
-            if valid_expiries.empty: continue
-            expiry_date = valid_expiries[0]
-            T_entry = (expiry_date - entry_date).days / 365.0
+            expiry = valid_exps[0]
+            T = (expiry - entry_date).days / 365.0
             
-            # Strike Selection
-            best_strike = S_entry * 0.8
-            min_delta_diff = 1.0
-            scan_strikes = np.linspace(S_entry * 0.70, S_entry, strike_scan_steps) 
+            # Find Strike
+            best_strike = S * 0.8
+            min_diff = 1.0
+            candidates = np.linspace(S * 0.70, S, strike_steps)
             
-            for k in scan_strikes:
-                _, d = black_scholes_put(S_entry, k, T_entry, r, sigma_entry)
-                diff = abs(abs(d) - abs(entry_delta))
-                if diff < min_delta_diff: min_delta_diff = diff; best_strike = k
-
-            strike_step = 5.0 if S_entry > 200 else 1.0
-            short_strike = round(best_strike / strike_step) * strike_step
-            long_strike = short_strike - 5.0
+            for k in candidates:
+                _, d = black_scholes_put(S, k, T, r, sigma)
+                if abs(abs(d) - abs(entry_delta)) < min_diff:
+                    min_diff = abs(abs(d) - abs(entry_delta))
+                    best_strike = k
             
-            p_s, d_s = black_scholes_put(S_entry, short_strike, T_entry, r, sigma_entry)
-            p_l, _ = black_scholes_put(S_entry, long_strike, T_entry, r, sigma_entry)
+            # Grid Snap
+            step = 5.0 if S > 200 else 1.0
+            short_k = round(best_strike / step) * step
+            long_k = short_k - 5.0
             
-            gross_credit = p_s - p_l
-            if gross_credit < 0.10: continue 
+            # Pricing
+            p_s, d_s = black_scholes_put(S, short_k, T, r, sigma)
+            p_l, _ = black_scholes_put(S, long_k, T, r, sigma)
+            credit = p_s - p_l
             
-            trade_res = {
-                'entry_date': entry_date,
-                'short_strike': short_strike,
-                'gross_credit': gross_credit,
-                'exit_reason': 'Held to Expiry',
-                'pnl': gross_credit,
-                'exit_date': expiry_date
-            }
+            if credit < 0.10: continue # Filter junk
             
-            # Walk Forward
-            trade_path = df.loc[entry_date:expiry_date].iloc[1:]
+            # 2. Walk Forward (Path Dependency)
+            trade_path = df.loc[entry_date:expiry].iloc[1:]
             
-            for curr_date, row in trade_path.iterrows():
-                S_curr = float(row['Close'])
-                T_curr = (expiry_date - curr_date).days / 365.0
-                days_left = (expiry_date - curr_date).days
-                sigma_curr = float(row['HV'])
+            exit_date = expiry
+            exit_reason = "Expired"
+            final_pnl = credit # Default: Full profit
+            
+            for curr_date, path_row in trade_path.iterrows():
+                S_curr = float(path_row['Close'])
+                days_left = (expiry - curr_date).days
+                T_curr = days_left / 365.0
+                sigma_curr = float(path_row['HV'])
                 
-                curr_p_s, curr_d_s = black_scholes_put(S_curr, short_strike, T_curr, r, sigma_curr)
-                curr_p_l, _ = black_scholes_put(S_curr, long_strike, T_curr, r, sigma_curr)
-                spread_val = curr_p_s - curr_p_l
+                # Current Spread Value
+                cp_s, _ = black_scholes_put(S_curr, short_k, T_curr, r, sigma_curr)
+                cp_l, _ = black_scholes_put(S_curr, long_k, T_curr, r, sigma_curr)
+                spread_val = cp_s - cp_l
                 
-                profit_captured_pct = ((gross_credit - spread_val) / gross_credit) * 100
-                loss_pct = (spread_val / gross_credit) * 100
+                profit_pct = ((credit - spread_val) / credit) * 100
+                loss_pct = (spread_val / credit) * 100
                 
-                hit_exit = False
-                reason = ""
+                # Check Exits
+                hit = False
+                if days_left <= exit_dte:
+                    hit = True; exit_reason = f"DTE {exit_dte}"
+                elif profit_pct >= profit_target_pct:
+                    hit = True; exit_reason = "Profit Target"
+                elif loss_pct >= stop_loss_pct:
+                    hit = True; exit_reason = "Stop Loss"
                 
-                if days_left < exit_dte_trigger: hit_exit = True; reason = f"DTE < {exit_dte_trigger}"
-                elif abs(curr_d_s) > exit_delta_trigger: hit_exit = True; reason = f"Delta > {exit_delta_trigger}"
-                elif loss_pct > exit_spread_pct: hit_exit = True; reason = f"Max Loss"
-                elif profit_captured_pct >= profit_target_pct: hit_exit = True; reason = f"Profit Target"
-                
-                if hit_exit:
-                    trade_res['exit_reason'] = reason
-                    trade_res['pnl'] = gross_credit - spread_val
-                    trade_res['exit_date'] = curr_date
+                if hit:
+                    exit_date = curr_date
+                    final_pnl = credit - spread_val
                     break
             
-            all_potential_trades.append(trade_res)
-        except: continue
-    
-    # CAPITAL CONSTRAINTS
-    if not all_potential_trades: return pd.DataFrame(), 0
-    
-    friction = (slippage * 4) + fees 
-    executed_trades = []
-    active_end_dates = [] 
-    max_positions = int(capital // 500) 
-    skipped_count = 0
-    
-    for trade in all_potential_trades:
-        entry = trade['entry_date']
-        active_end_dates = [d for d in active_end_dates if d > entry]
-        
-        if len(active_end_dates) < max_positions:
-            trade['pnl'] = trade['pnl'] - (friction / 100.0)
-            executed_trades.append(trade)
-            active_end_dates.append(trade['exit_date'])
-        else:
-            skipped_count += 1
+            signals.append({
+                'ticker': ticker,
+                'entry_date': entry_date,
+                'exit_date': exit_date,
+                'gross_pnl': final_pnl,
+                'exit_reason': exit_reason,
+                'margin': 500.0, # Standard $5 wide spread
+                'entry_delta': entry_delta
+            })
             
-    results = pd.DataFrame(executed_trades)
-    return results, skipped_count
+        except: continue
+    return signals
+
+# --- PORTFOLIO MANAGER (The "Accountant") ---
+def run_portfolio_simulation(data_map, entry_delta, exit_dte, stop_loss, profit_target, 
+                           start_cap, monthly_add, slippage, fees, 
+                           progress_bar_slot=None):
+    
+    # 1. GENERATE SIGNALS (Parallel)
+    all_signals = []
+    
+    # Use ThreadPool to run 5 tickers at once
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = []
+        for ticker, df in data_map.items():
+            # Pass low_res=True for speed during optimization
+            futures.append(executor.submit(generate_signals_for_ticker, ticker, df, entry_delta, exit_dte, stop_loss, profit_target, True))
+        
+        for f in concurrent.futures.as_completed(futures):
+            all_signals.extend(f.result())
+            
+    # Sort all signals by entry date to simulate timeline
+    all_signals.sort(key=lambda x: x['entry_date'])
+    
+    # 2. RUN TIMELINE
+    current_cash = start_cap
+    active_trades = [] # List of {'exit_date', 'pnl', 'margin_locked'}
+    completed_trades = []
+    
+    # Create timeline (Daily steps)
+    if not all_signals: return pd.DataFrame(), 0.0
+    
+    start_date = all_signals[0]['entry_date']
+    end_date = all_signals[-1]['exit_date']
+    timeline = pd.date_range(start=start_date, end=end_date, freq='D')
+    
+    # Convert signals to a Queue for efficient popping
+    signal_queue = all_signals
+    signal_idx = 0
+    total_signals = len(signal_queue)
+    
+    days_since_contrib = 0
+    
+    for i, today in enumerate(timeline):
+        if progress_bar_slot and i % 50 == 0:
+            progress_bar_slot.progress((i+1) / len(timeline))
+            
+        # A. Monthly Contribution
+        days_since_contrib += 1
+        if days_since_contrib >= 30:
+            current_cash += monthly_add
+            days_since_contrib = 0
+            
+        # B. Process Exits (Unlock Capital)
+        # Filter active trades: Keep only those that haven't exited yet
+        # We must identify trades that exit TODAY
+        still_active = []
+        for t in active_trades:
+            if t['exit_date'] <= today:
+                # Trade Closes
+                # Apply Friction
+                friction = (slippage * 4) + fees
+                net_pnl = t['gross_pnl'] - (friction / 100.0) # Convert to share price
+                realized_dollar_pnl = net_pnl * 100 # 1 contract = 100 shares
+                
+                # Return Margin + Profit to pool
+                current_cash += (t['margin'] + realized_dollar_pnl)
+                
+                # Log
+                completed_trades.append({
+                    'entry_date': t['entry_date'],
+                    'exit_date': t['exit_date'],
+                    'ticker': t['ticker'],
+                    'pnl_dollars': realized_dollar_pnl,
+                    'reason': t['exit_reason'],
+                    'balance': current_cash
+                })
+            else:
+                still_active.append(t)
+        active_trades = still_active
+        
+        # C. Process Entries (Lock Capital)
+        # Check signals that happen TODAY
+        while signal_idx < total_signals:
+            sig = signal_queue[signal_idx]
+            if sig['entry_date'] > today:
+                break # Future trade, stop checking
+            
+            if sig['entry_date'] == today:
+                # Try to take trade
+                margin_req = sig['margin']
+                if current_cash >= margin_req:
+                    current_cash -= margin_req
+                    active_trades.append(sig)
+            
+            signal_idx += 1
+            
+    return pd.DataFrame(completed_trades), current_cash
 
 # --- UI HEADER ---
-header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
-with header_col1:
-    try: st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
-    except: st.write("**DR CAPITAL**")
-with header_col2:
-    st.markdown("""<div style='text-align: left; padding-top: 10px;'><h1 style='margin-bottom: 0px;'>Options Lab</h1><p style='color: gray;'>Portfolio Simulation & Optimizer</p></div>""", unsafe_allow_html=True)
-with header_col3: st.write("") 
-st.markdown("<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: -5px; margin-bottom: 10px;'>", unsafe_allow_html=True)
+st.markdown("## Options Lab: Portfolio Optimizer")
+st.markdown(f"**Universe:** {', '.join(BASKET_TICKERS)} | **Strategy:** Credit Spreads")
+st.markdown("---")
 
-# --- GLOBAL SETTINGS ---
+# --- SIDEBAR CONFIG ---
 with st.sidebar:
-    st.header("Global Settings")
-    ticker = st.selectbox("Ticker", ["SPY", "QQQ", "IWM", "GLD", "NVDA", "AAPL", "AMD", "TSLA", "MSFT", "AMZN"], index=0)
+    st.header("Simulation Settings")
+    start_cap = st.number_input("Starting Capital ($)", 1000, 1000000, 10000, 1000)
+    monthly_add = st.number_input("Monthly Contribution ($)", 0, 10000, 500, 50)
     
-    if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
-        with st.spinner(f"Fetching 10y Data for {ticker}..."):
-            st.session_state.df_market = get_market_data(ticker)
-            st.session_state.last_ticker = ticker
-            
-    st.markdown("---")
-    st.caption("Account Parameters")
-    start_cap = st.number_input("Capital ($)", 1000, 1000000, 10000, 1000)
-    slippage = st.number_input("Slippage ($/leg)", 0.00, 0.10, 0.01, 0.01)
-    fees = st.number_input("Fees ($/trade)", 0.00, 5.00, 0.00, 0.10)
+    st.divider()
+    st.caption("Friction Costs")
+    slippage = st.number_input("Slippage ($/leg)", 0.00, 1.00, 0.01, 0.01)
+    fees = st.number_input("Fees ($/trade)", 0.00, 10.00, 0.00, 0.10)
+    
+    st.divider()
+    if st.button("Clear Cache"):
+        st.cache_data.clear()
 
 # --- TABS ---
-tab_sim, tab_opt = st.tabs(["🧪 Manual Lab", "🤖 Auto-Optimizer"])
+tab_manual, tab_auto = st.tabs(["Manual Backtest", "Auto-Optimizer"])
 
-# ==========================================
-# TAB 1: MANUAL LAB
-# ==========================================
-with tab_sim:
+# DATA FETCH (Global)
+if 'data_map' not in st.session_state:
+    with st.spinner("Initializing Market Data (Top 5 Tickers)..."):
+        st.session_state.data_map = get_basket_data(BASKET_TICKERS)
+
+# --- MANUAL LAB ---
+with tab_manual:
     c1, c2, c3, c4 = st.columns(4)
-    with c1: exit_delta = st.number_input("Exit Short Delta >", 0.1, 1.0, 0.60, 0.05)
-    with c2: exit_spread_pct = st.number_input("Exit Spread Value % >", 100, 1000, 300, 50)
-    with c3: exit_dte = st.number_input("Exit DTE <", 0, 30, 21)
-    with c4: profit_target = st.number_input("Take Profit %", 10, 90, 50, 5)
-
-    if st.button("Run Manual Simulation", type="primary", use_container_width=True):
-        if 'df_market' in st.session_state:
-            with st.spinner("Simulating..."):
-                results, skipped = run_simulation(
-                    st.session_state.df_market, 0.20, exit_delta, exit_spread_pct, exit_dte, profit_target,
-                    slippage, fees, start_cap, optimizer_mode=False
-                )
-            
-            if not results.empty:
-                total_pnl = results['pnl'].sum() * 100
-                win_rate = len(results[results['pnl']>0]) / len(results) * 100
-                st.success(f"**Net Profit:** ${total_pnl:,.0f} | **Win Rate:** {win_rate:.1f}%")
-                
-                # Charts
-                results['cum_pnl'] = results['pnl'].cumsum() * 100
-                results['equity'] = start_cap + results['cum_pnl']
-                results['date'] = pd.to_datetime(results['entry_date'])
-                results = results.sort_values('date')
-                
-                st.line_chart(results, x='date', y='equity', color=SUCCESS_COLOR)
-                
-                with st.expander("View Trade Log"):
-                    st.dataframe(results[['display_entry', 'display_exit', 'gross_credit', 'exit_reason', 'pnl']], use_container_width=True)
-            else:
-                st.warning("No trades found.")
-
-# ==========================================
-# TAB 2: OPTIMIZER (Single Batch Processing)
-# ==========================================
-with tab_opt:
-    st.markdown("### 🔍 Find the Best Settings")
-    st.info("Performance Mode Active: Processing 1 simulation at a time to ensure stability.")
+    with c1: e_delta = st.number_input("Entry Delta", 0.1, 0.5, 0.20, 0.05)
+    with c2: stop_loss = st.number_input("Stop Loss %", 100, 500, 300, 50)
+    with c3: profit_target = st.number_input("Profit Target %", 10, 90, 50, 10)
+    with c4: exit_dte = st.number_input("Exit DTE", 0, 30, 21)
     
-    col_opt1, col_opt2 = st.columns(2)
-    with col_opt1:
-        scan_mode = st.radio("Scan Intensity", ["Light (12 Runs)", "Deep (100+ Runs)"], horizontal=True)
+    if st.button("Run Portfolio Simulation", type="primary"):
+        prog_bar = st.progress(0, text="Simulating timeline...")
+        
+        df_res, final_bal = run_portfolio_simulation(
+            st.session_state.data_map, e_delta, exit_dte, stop_loss, profit_target,
+            start_cap, monthly_add, slippage, fees, prog_bar
+        )
+        prog_bar.empty()
+        
+        if not df_res.empty:
+            tot_profit = df_res['pnl_dollars'].sum()
+            win_rate = len(df_res[df_res['pnl_dollars']>0]) / len(df_res) * 100
+            
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Final Balance", f"${final_bal:,.0f}", delta=f"${(final_bal - start_cap):,.0f}")
+            m2.metric("Total Trades", len(df_res))
+            m3.metric("Win Rate", f"{win_rate:.1f}%")
+            
+            st.line_chart(df_res, x='exit_date', y='balance', color=SUCCESS_COLOR)
+            st.dataframe(df_res.sort_values('exit_date', ascending=False), use_container_width=True)
+        else:
+            st.warning("No trades generated.")
+
+# --- OPTIMIZER ---
+with tab_auto:
+    st.info("This will find the best Entry/Exit combination for the entire 5-stock portfolio.")
     
-    if st.button("🚀 Start Optimizer", type="primary"):
-        if 'df_market' in st.session_state:
-            # Param Grid
-            if scan_mode.startswith("Light"):
-                param_grid = {
-                    "exit_dte": [21, 7],
-                    "profit_target": [50, 25],
-                    "stop_loss": [200, 300, 400]
-                }
-            else:
-                param_grid = {
-                    "exit_dte": [21, 14, 7, 0],
-                    "profit_target": [75, 50, 25],
-                    "stop_loss": [200, 300, 400, 500],
-                    "exit_delta": [0.4, 0.6] 
-                }
-            
-            keys, values = zip(*param_grid.items())
-            permutations = [dict(zip(keys, v)) for v in itertools.product(*values)]
-            
-            # Queue Init
-            st.session_state.opt_queue = permutations
-            st.session_state.opt_results = []
-            st.session_state.opt_total = len(permutations)
-            st.session_state.is_optimizing = True
-            st.rerun()
-            
-    if st.button("🛑 Stop Optimizer"):
-        st.session_state.is_optimizing = False
+    # OPTIMIZER STATE
+    if 'opt_queue' not in st.session_state:
+        st.session_state.opt_queue = []
+    if 'opt_results' not in st.session_state:
+        st.session_state.opt_results = []
+    
+    if st.button("Start Optimization", type="primary"):
+        # Grid Setup
+        deltas = [0.15, 0.20, 0.30]
+        dtes = [21, 7, 0]
+        targets = [50, 25]
+        stops = [200, 300]
+        
+        grid = list(itertools.product(deltas, dtes, targets, stops))
+        st.session_state.opt_queue = grid
+        st.session_state.opt_results = []
+        st.session_state.is_running = True
+        st.rerun()
+
+    if st.button("Stop"):
+        st.session_state.is_running = False
         st.session_state.opt_queue = []
         st.rerun()
 
-    # WORKER LOGIC
-    if st.session_state.get('is_optimizing', False):
+    # WORKER
+    if st.session_state.get('is_running', False):
         if not st.session_state.opt_queue:
-            st.session_state.is_optimizing = False
+            st.session_state.is_running = False
             st.rerun()
             
-        # Current Job
-        total = st.session_state.opt_total
+        # Pop Config
+        cfg = st.session_state.opt_queue.pop(0)
+        d_delta, d_dte, d_target, d_stop = cfg
+        
+        # UI Status
         remaining = len(st.session_state.opt_queue)
-        done = total - remaining + 1
+        total_runs = len(st.session_state.opt_results) + remaining + 1
+        curr_run = len(st.session_state.opt_results) + 1
         
-        p = st.session_state.opt_queue.pop(0)
+        st.write(f"**Processing Config {curr_run}/{total_runs}**")
+        st.text(f"Delta: {d_delta} | DTE: {d_dte} | Target: {d_target}% | Stop: {d_stop}%")
         
-        # UI Update
-        st.write(f"⚙️ **Testing Config {done}/{total}**")
-        st.caption(f"Settings: DTE {p.get('exit_dte')} | Target {p.get('profit_target')}% | Stop {p.get('stop_loss')}%")
-        st.progress(done / total)
+        main_bar = st.progress(curr_run / total_runs)
+        inner_bar = st.progress(0, text="Simulating Days...")
         
-        # Run Simulation (Mode=True for speed)
-        res, _ = run_simulation(
-            st.session_state.df_market, 
-            0.20, p.get('exit_delta', 0.60), p.get('stop_loss', 300), 
-            p.get('exit_dte', 21), p.get('profit_target', 50),
-            slippage, fees, start_cap, optimizer_mode=True
+        # Run
+        df_r, bal = run_portfolio_simulation(
+            st.session_state.data_map, d_delta, d_dte, d_stop, d_target,
+            start_cap, monthly_add, slippage, fees, inner_bar
         )
         
-        if not res.empty:
-            pnl = res['pnl'].sum() * 100
-            wr = len(res[res['pnl']>0])/len(res)*100
-            
-            res['equity'] = start_cap + (res['pnl'].cumsum() * 100)
-            res['peak'] = res['equity'].cummax()
-            res['dd'] = (res['equity'] - res['peak']) / res['peak']
-            max_dd = res['dd'].min() * 100
+        # Save
+        if not df_r.empty:
+            roi = ((bal - start_cap) / start_cap) * 100
+            wr = len(df_r[df_r['pnl_dollars']>0]) / len(df_r) * 100
+            dd_series = (df_r['balance'] - df_r['balance'].cummax()) / df_r['balance'].cummax()
+            max_dd = dd_series.min() * 100
             
             st.session_state.opt_results.append({
-                "DTE": p.get('exit_dte', 21),
-                "Target %": p.get('profit_target', 50),
-                "Stop %": p.get('stop_loss', 300),
-                "Net Profit": pnl,
+                "Delta": d_delta,
+                "DTE": d_dte,
+                "Target": d_target,
+                "Stop": d_stop,
+                "Final Balance": bal,
+                "ROI %": roi,
                 "Win Rate": wr,
-                "Max DD": max_dd,
-                "Trades": len(res)
+                "Max DD %": max_dd
             })
             
         st.rerun()
 
-    # RESULTS
-    if not st.session_state.get('is_optimizing', False) and 'opt_results' in st.session_state and st.session_state.opt_results:
-        st.balloons()
-        st.subheader("🏆 Optimization Results")
+    # RESULTS DISPLAY
+    if st.session_state.opt_results and not st.session_state.get('is_running', False):
+        res_df = pd.DataFrame(st.session_state.opt_results)
+        res_df = res_df.sort_values("Final Balance", ascending=False)
         
-        df_opt = pd.DataFrame(st.session_state.opt_results)
-        if not df_opt.empty:
-            df_opt = df_opt.sort_values("Net Profit", ascending=False)
-            
-            best = df_opt.iloc[0]
-            b1, b2, b3 = st.columns(3)
-            b1.metric("Best Profit", f"${best['Net Profit']:,.0f}")
-            b2.metric("Best Config", f"Ex: {int(best['DTE'])} DTE | TP: {int(best['Target %'])}%")
-            b3.metric("Win Rate", f"{best['Win Rate']:.1f}%")
-            
-            st.dataframe(
-                df_opt.style.format({
-                    "Net Profit": "${:,.0f}", 
-                    "Win Rate": "{:.1f}%", 
-                    "Max DD": "{:.1f}%"
-                }).background_gradient(subset=["Net Profit"], cmap="Greens"),
-                use_container_width=True
-            )
-            
-            if st.button("Clear Results"):
-                del st.session_state.opt_results
-                st.rerun()
+        st.subheader("Top Performing Configurations")
+        
+        # Winner
+        best = res_df.iloc[0]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Best Balance", f"${best['Final Balance']:,.0f}")
+        c2.metric("Configuration", f"Delta {best['Delta']} | {int(best['DTE'])} DTE")
+        c3.metric("Win Rate", f"{best['Win Rate']:.1f}%")
+        
+        st.dataframe(res_df.style.format({
+            "Final Balance": "${:,.0f}",
+            "ROI %": "{:.1f}%",
+            "Win Rate": "{:.1f}%",
+            "Max DD %": "{:.1f}%"
+        }).background_gradient(subset="Final Balance", cmap="Greens"), use_container_width=True)
