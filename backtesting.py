@@ -75,20 +75,15 @@ def get_market_data(ticker):
     return pd.DataFrame()
 
 # --- SIMULATION ENGINE ---
-def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger, profit_target_pct, slippage, fees, capital, progress_callback=None):
-    if df.empty: return pd.DataFrame(), 0
+def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger, profit_target_pct, slippage, fees, capital):
+    if df.empty: return pd.DataFrame()
 
     all_potential_trades = []
     entry_dates = df.index
-    total_days = len(entry_dates)
     r = 0.045
     
-    # 1. GENERATE SIGNALS
+    # FAST LOOP (No progress bar needed for single chunk runs)
     for i, entry_date in enumerate(entry_dates):
-        # Only update progress if callback provided (for single runs)
-        if progress_callback and i % 100 == 0: 
-            progress_callback( (i + 1) / total_days )
-
         try:
             entry_row = df.loc[entry_date]
             S_entry = float(entry_row['Close'])
@@ -102,10 +97,13 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
             expiry_date = valid_expiries[0]
             T_entry = (expiry_date - entry_date).days / 365.0
             
-            # Strike Selection
+            # Strike Selection (Optimized Search)
             best_strike = S_entry * 0.8
             min_delta_diff = 1.0
-            scan_strikes = np.linspace(S_entry * 0.70, S_entry, 30)
+            
+            # Reduce scan resolution for optimizer speed
+            scan_strikes = np.linspace(S_entry * 0.70, S_entry, 20) 
+            
             for k in scan_strikes:
                 _, d = black_scholes_put(S_entry, k, T_entry, r, sigma_entry)
                 diff = abs(abs(d) - abs(entry_delta))
@@ -162,8 +160,8 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
             
             all_potential_trades.append(trade_res)
         except: continue
-        
-    # 2. CAPITAL CONSTRAINTS
+    
+    # CAPITAL CONSTRAINTS
     if not all_potential_trades: return pd.DataFrame(), 0
     
     friction = (slippage * 4) + fees 
@@ -184,10 +182,6 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
             skipped_count += 1
             
     results = pd.DataFrame(executed_trades)
-    if not results.empty:
-        results['display_entry'] = pd.to_datetime(results['entry_date']).dt.strftime('%Y-%m-%d')
-        results['display_exit'] = pd.to_datetime(results['exit_date']).dt.strftime('%Y-%m-%d')
-        
     return results, skipped_count
 
 # --- UI HEADER ---
@@ -231,15 +225,11 @@ with tab_sim:
 
     if st.button("Run Manual Simulation", type="primary", use_container_width=True):
         if 'df_market' in st.session_state:
-            prog_bar = st.progress(0)
-            def update_prog(x): prog_bar.progress(x)
-            
             with st.spinner("Simulating..."):
                 results, skipped = run_simulation(
                     st.session_state.df_market, 0.20, exit_delta, exit_spread_pct, exit_dte, profit_target,
-                    slippage, fees, start_cap, update_prog
+                    slippage, fees, start_cap
                 )
-            prog_bar.empty()
             
             if not results.empty:
                 total_pnl = results['pnl'].sum() * 100
@@ -260,104 +250,123 @@ with tab_sim:
                 st.warning("No trades found.")
 
 # ==========================================
-# TAB 2: OPTIMIZER
+# TAB 2: OPTIMIZER (Chunked Processing)
 # ==========================================
 with tab_opt:
     st.markdown("### 🔍 Find the Best Settings")
-    st.info("This will run multiple 10-year simulations back-to-back to find the highest performing combination.")
+    st.info("Uses 'Chunked Processing' to prevent timeouts. The page will reload automatically as it works.")
     
     col_opt1, col_opt2 = st.columns(2)
     with col_opt1:
         scan_mode = st.radio("Scan Intensity", ["Light (12 Runs)", "Deep (100+ Runs)"], horizontal=True)
     
-    # Define Parameter Grid
-    if scan_mode.startswith("Light"):
-        # Narrow Search
-        param_grid = {
-            "exit_dte": [21, 7],
-            "profit_target": [50, 25],
-            "stop_loss": [200, 300, 400]
-        } # 2*2*3 = 12 combinations
-    else:
-        # Wide Search
-        param_grid = {
-            "exit_dte": [21, 14, 7, 0],
-            "profit_target": [75, 50, 25],
-            "stop_loss": [200, 300, 400, 500],
-            "exit_delta": [0.4, 0.6] 
-        } # 4*3*4*2 = 96 combinations
-        
-    st.write(f"**Total Combinations to Test:** {np.prod([len(v) for v in param_grid.values()])}")
-    
+    # 1. Start Button: Initializes the Queue
     if st.button("🚀 Start Optimizer", type="primary"):
         if 'df_market' in st.session_state:
+            # Define Parameter Grid
+            if scan_mode.startswith("Light"):
+                param_grid = {
+                    "exit_dte": [21, 7],
+                    "profit_target": [50, 25],
+                    "stop_loss": [200, 300, 400]
+                }
+            else:
+                param_grid = {
+                    "exit_dte": [21, 14, 7, 0],
+                    "profit_target": [75, 50, 25],
+                    "stop_loss": [200, 300, 400, 500],
+                    "exit_delta": [0.4, 0.6] 
+                }
+            
+            # Generate Permutations
             keys, values = zip(*param_grid.items())
             permutations = [dict(zip(keys, v)) for v in itertools.product(*values)]
             
-            opt_results = []
-            opt_prog = st.progress(0)
-            status = st.empty()
+            # Save to Session State (The "Queue")
+            st.session_state.opt_queue = permutations
+            st.session_state.opt_results = []
+            st.session_state.opt_total = len(permutations)
+            st.session_state.is_optimizing = True
+            st.rerun()
+
+    # 2. Worker Logic: Processes One Chunk and Reruns
+    if st.session_state.get('is_optimizing', False):
+        
+        # Check if queue is empty
+        if not st.session_state.opt_queue:
+            st.session_state.is_optimizing = False
+            st.rerun()
             
-            for i, p in enumerate(permutations):
-                status.write(f"Testing Config {i+1}/{len(permutations)}: {p}")
-                opt_prog.progress((i+1)/len(permutations))
-                
-                # Defaults if not in grid
-                d_delta = p.get('exit_delta', 0.60)
-                d_stop = p.get('stop_loss', 300)
-                d_dte = p.get('exit_dte', 21)
-                d_target = p.get('profit_target', 50)
-                
-                res, _ = run_simulation(
-                    st.session_state.df_market, 
-                    0.20, # Entry Delta Fixed
-                    d_delta, d_stop, d_dte, d_target,
-                    slippage, fees, start_cap
-                )
-                
-                if not res.empty:
-                    pnl = res['pnl'].sum() * 100
-                    wr = len(res[res['pnl']>0])/len(res)*100
-                    # Drawdown Calc
-                    res['equity'] = start_cap + (res['pnl'].cumsum() * 100)
-                    res['peak'] = res['equity'].cummax()
-                    res['dd'] = (res['equity'] - res['peak']) / res['peak']
-                    max_dd = res['dd'].min() * 100
-                    
-                    opt_results.append({
-                        "DTE": d_dte,
-                        "Target %": d_target,
-                        "Stop %": d_stop,
-                        "Net Profit": pnl,
-                        "Win Rate": wr,
-                        "Max DD": max_dd,
-                        "Trades": len(res)
-                    })
+        # UI Progress
+        current_idx = st.session_state.opt_total - len(st.session_state.opt_queue) + 1
+        progress = current_idx / st.session_state.opt_total
+        
+        st.write(f"⚙️ **Processing Config {current_idx}/{st.session_state.opt_total}**")
+        st.progress(progress)
+        
+        # Pop the next item
+        p = st.session_state.opt_queue.pop(0)
+        
+        # Defaults
+        d_delta = p.get('exit_delta', 0.60)
+        d_stop = p.get('stop_loss', 300)
+        d_dte = p.get('exit_dte', 21)
+        d_target = p.get('profit_target', 50)
+        
+        # Run ONE Simulation
+        res, _ = run_simulation(
+            st.session_state.df_market, 
+            0.20, d_delta, d_stop, d_dte, d_target,
+            slippage, fees, start_cap
+        )
+        
+        # Save Result
+        if not res.empty:
+            pnl = res['pnl'].sum() * 100
+            wr = len(res[res['pnl']>0])/len(res)*100
             
-            opt_prog.empty()
-            status.empty()
+            res['equity'] = start_cap + (res['pnl'].cumsum() * 100)
+            res['peak'] = res['equity'].cummax()
+            res['dd'] = (res['equity'] - res['peak']) / res['peak']
+            max_dd = res['dd'].min() * 100
             
-            if opt_results:
-                df_opt = pd.DataFrame(opt_results)
-                df_opt = df_opt.sort_values("Net Profit", ascending=False)
-                
-                st.balloons()
-                st.subheader("🏆 Optimization Results")
-                
-                # Winner
-                best = df_opt.iloc[0]
-                b1, b2, b3 = st.columns(3)
-                b1.metric("Best Profit", f"${best['Net Profit']:,.0f}")
-                b2.metric("Best Config", f"Ex: {int(best['DTE'])} DTE | TP: {int(best['Target %'])}%")
-                b3.metric("Win Rate", f"{best['Win Rate']:.1f}%")
-                
-                st.dataframe(
-                    df_opt.style.format({
-                        "Net Profit": "${:,.0f}", 
-                        "Win Rate": "{:.1f}%", 
-                        "Max DD": "{:.1f}%"
-                    }).background_gradient(subset=["Net Profit"], cmap="Greens"),
-                    use_container_width=True
-                )
-            else:
-                st.error("Optimizer failed to generate trades.")
+            st.session_state.opt_results.append({
+                "DTE": d_dte,
+                "Target %": d_target,
+                "Stop %": d_stop,
+                "Net Profit": pnl,
+                "Win Rate": wr,
+                "Max DD": max_dd,
+                "Trades": len(res)
+            })
+            
+        # RERUN IMMEDIATELY
+        st.rerun()
+
+    # 3. Results Display (When Finished)
+    if not st.session_state.get('is_optimizing', False) and 'opt_results' in st.session_state and st.session_state.opt_results:
+        st.balloons()
+        st.subheader("🏆 Optimization Results")
+        
+        df_opt = pd.DataFrame(st.session_state.opt_results)
+        if not df_opt.empty:
+            df_opt = df_opt.sort_values("Net Profit", ascending=False)
+            
+            best = df_opt.iloc[0]
+            b1, b2, b3 = st.columns(3)
+            b1.metric("Best Profit", f"${best['Net Profit']:,.0f}")
+            b2.metric("Best Config", f"Ex: {int(best['DTE'])} DTE | TP: {int(best['Target %'])}%")
+            b3.metric("Win Rate", f"{best['Win Rate']:.1f}%")
+            
+            st.dataframe(
+                df_opt.style.format({
+                    "Net Profit": "${:,.0f}", 
+                    "Win Rate": "{:.1f}%", 
+                    "Max DD": "{:.1f}%"
+                }).background_gradient(subset=["Net Profit"], cmap="Greens"),
+                use_container_width=True
+            )
+            
+            if st.button("Clear Results"):
+                del st.session_state.opt_results
+                st.rerun()
