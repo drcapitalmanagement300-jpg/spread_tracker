@@ -6,6 +6,7 @@ import matplotlib.dates as mdates
 import yfinance as yf
 import scipy.stats as si
 import time
+import itertools
 from datetime import timedelta
 
 # --- CONFIGURATION ---
@@ -74,18 +75,19 @@ def get_market_data(ticker):
     return pd.DataFrame()
 
 # --- SIMULATION ENGINE ---
-def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger, profit_target_pct, slippage, fees, capital):
-    if df.empty: return pd.DataFrame()
+def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger, profit_target_pct, slippage, fees, capital, progress_callback=None):
+    if df.empty: return pd.DataFrame(), 0
 
     all_potential_trades = []
     entry_dates = df.index
     total_days = len(entry_dates)
-    progress_bar = st.progress(0)
     r = 0.045
     
     # 1. GENERATE SIGNALS
     for i, entry_date in enumerate(entry_dates):
-        if i % 100 == 0: progress_bar.progress((i + 1) / total_days)
+        # Only update progress if callback provided (for single runs)
+        if progress_callback and i % 100 == 0: 
+            progress_callback( (i + 1) / total_days )
 
         try:
             entry_row = df.loc[entry_date]
@@ -141,8 +143,6 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
                 curr_p_l, _ = black_scholes_put(S_curr, long_strike, T_curr, r, sigma_curr)
                 spread_val = curr_p_s - curr_p_l
                 
-                # Percentage of Max Profit Remaining
-                # If Credit $1.00, Current Spread $0.50 -> You captured 50%
                 profit_captured_pct = ((gross_credit - spread_val) / gross_credit) * 100
                 loss_pct = (spread_val / gross_credit) * 100
                 
@@ -151,9 +151,8 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
                 
                 if days_left < exit_dte_trigger: hit_exit = True; reason = f"DTE < {exit_dte_trigger}"
                 elif abs(curr_d_s) > exit_delta_trigger: hit_exit = True; reason = f"Delta > {exit_delta_trigger}"
-                elif loss_pct > exit_spread_pct: hit_exit = True; reason = f"Max Loss ({exit_spread_pct}%)"
-                # PROFIT TAKER LOGIC
-                elif profit_captured_pct >= profit_target_pct: hit_exit = True; reason = f"Profit Target ({profit_target_pct}%)"
+                elif loss_pct > exit_spread_pct: hit_exit = True; reason = f"Max Loss"
+                elif profit_captured_pct >= profit_target_pct: hit_exit = True; reason = f"Profit Target"
                 
                 if hit_exit:
                     trade_res['exit_reason'] = reason
@@ -164,10 +163,8 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
             all_potential_trades.append(trade_res)
         except: continue
         
-    progress_bar.empty()
-    
     # 2. CAPITAL CONSTRAINTS
-    if not all_potential_trades: return pd.DataFrame()
+    if not all_potential_trades: return pd.DataFrame(), 0
     
     friction = (slippage * 4) + fees 
     executed_trades = []
@@ -193,119 +190,174 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
         
     return results, skipped_count
 
-# --- HEADER ---
+# --- UI HEADER ---
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
     try: st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
     except: st.write("**DR CAPITAL**")
 with header_col2:
-    st.markdown("""<div style='text-align: left; padding-top: 10px;'><h1 style='margin-bottom: 0px;'>Options Lab</h1><p style='color: gray;'>Portfolio Simulation (Tastytrade Logic)</p></div>""", unsafe_allow_html=True)
+    st.markdown("""<div style='text-align: left; padding-top: 10px;'><h1 style='margin-bottom: 0px;'>Options Lab</h1><p style='color: gray;'>Portfolio Simulation & Optimizer</p></div>""", unsafe_allow_html=True)
 with header_col3: st.write("") 
 st.markdown("<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: -5px; margin-bottom: 10px;'>", unsafe_allow_html=True)
 
-# --- CONTROLS ---
-with st.container(border=True):
-    c1, c2, c3, c4 = st.columns([1.5, 1, 1, 1])
-    with c1: 
-        ticker = st.selectbox("Ticker", ["SPY", "QQQ", "IWM", "GLD", "NVDA", "AAPL", "AMD", "TSLA", "MSFT", "AMZN"], index=0)
-        if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
-            with st.spinner(f"Fetching 10y Data for {ticker}..."):
-                st.session_state.df_market = get_market_data(ticker)
-                st.session_state.last_ticker = ticker
+# --- GLOBAL SETTINGS ---
+with st.sidebar:
+    st.header("Global Settings")
+    ticker = st.selectbox("Ticker", ["SPY", "QQQ", "IWM", "GLD", "NVDA", "AAPL", "AMD", "TSLA", "MSFT", "AMZN"], index=0)
+    
+    if 'last_ticker' not in st.session_state or st.session_state.last_ticker != ticker:
+        with st.spinner(f"Fetching 10y Data for {ticker}..."):
+            st.session_state.df_market = get_market_data(ticker)
+            st.session_state.last_ticker = ticker
             
-    with c2: exit_delta = st.number_input("Exit Short Delta >", 0.1, 1.0, 0.60, 0.05)
-    with c3: exit_spread_pct = st.number_input("Exit Spread Value % >", 100, 1000, 300, 50)
-    with c4: exit_dte = st.number_input("Exit DTE <", 0, 30, 21, help="Tastytrade Standard: 21 DTE")
-    
-    st.markdown("##### ⚙️ Advanced Settings")
-    r1, r2, r3, r4 = st.columns(4)
-    with r1: start_cap = st.number_input("Capital ($)", 1000, 1000000, 10000, 1000)
-    with r2: profit_target = st.number_input("Take Profit %", 10, 90, 50, 5, help="Close early if X% of max profit is reached.")
-    with r3: slippage = st.number_input("Slippage ($)", 0.00, 0.10, 0.01, 0.01)
-    with r4: fees = st.number_input("Commissions ($)", 0.00, 5.00, 0.00, 0.10)
-    
-    run_btn = st.button("🔬 Run Simulation", use_container_width=True)
+    st.markdown("---")
+    st.caption("Account Parameters")
+    start_cap = st.number_input("Capital ($)", 1000, 1000000, 10000, 1000)
+    slippage = st.number_input("Slippage ($/leg)", 0.00, 0.10, 0.01, 0.01)
+    fees = st.number_input("Fees ($/trade)", 0.00, 5.00, 0.00, 0.10)
 
-# --- EXECUTION ---
-if run_btn:
-    if 'df_market' in st.session_state and not st.session_state.df_market.empty:
-        with st.spinner(f"Simulating..."):
-            results, skipped = run_simulation(
-                st.session_state.df_market, 
-                0.20, exit_delta, exit_spread_pct, exit_dte, profit_target,
-                slippage, fees, start_cap
-            )
-        
-        if results.empty:
-            st.warning("No trades generated.")
-        else:
-            total_trades = len(results)
-            wins = results[results['pnl'] > 0]
-            losses = results[results['pnl'] <= 0]
-            win_rate = len(wins) / total_trades * 100
-            total_pnl = results['pnl'].sum() * 100
+# --- TABS ---
+tab_sim, tab_opt = st.tabs(["🧪 Manual Lab", "🤖 Auto-Optimizer"])
+
+# ==========================================
+# TAB 1: MANUAL LAB
+# ==========================================
+with tab_sim:
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: exit_delta = st.number_input("Exit Short Delta >", 0.1, 1.0, 0.60, 0.05)
+    with c2: exit_spread_pct = st.number_input("Exit Spread Value % >", 100, 1000, 300, 50)
+    with c3: exit_dte = st.number_input("Exit DTE <", 0, 30, 21)
+    with c4: profit_target = st.number_input("Take Profit %", 10, 90, 50, 5)
+
+    if st.button("Run Manual Simulation", type="primary", use_container_width=True):
+        if 'df_market' in st.session_state:
+            prog_bar = st.progress(0)
+            def update_prog(x): prog_bar.progress(x)
             
-            final_equity = start_cap + total_pnl
-            total_return_pct = (total_pnl / start_cap) * 100
-            avg_win = wins['pnl'].mean() * 100 if not wins.empty else 0
-            avg_loss = losses['pnl'].mean() * 100 if not losses.empty else 0
+            with st.spinner("Simulating..."):
+                results, skipped = run_simulation(
+                    st.session_state.df_market, 0.20, exit_delta, exit_spread_pct, exit_dte, profit_target,
+                    slippage, fees, start_cap, update_prog
+                )
+            prog_bar.empty()
             
-            # --- DISPLAY ---
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Net Profit", f"${total_pnl:,.0f}", delta=f"{total_return_pct:.1f}%")
-            m2.metric("Ending Balance", f"${final_equity:,.0f}")
-            m3.metric("Win Rate", f"{win_rate:.1f}%", f"{len(wins)}W | {len(losses)}L")
-            m4.metric("Avg Win", f"${avg_win:.2f}")
-            m5.metric("Avg Loss", f"${avg_loss:.2f}")
-            
-            if skipped > 0:
-                st.info(f"ℹ️ **Capital Constraint:** Skipped {skipped} trades due to full account.")
-            
-            st.markdown("---")
-            
-            col_chart, col_dist = st.columns([2, 1])
-            with col_chart:
-                st.subheader("Account Growth")
-                results['plot_date'] = pd.to_datetime(results['entry_date'])
-                results = results.sort_values("plot_date")
+            if not results.empty:
+                total_pnl = results['pnl'].sum() * 100
+                win_rate = len(results[results['pnl']>0]) / len(results) * 100
+                st.success(f"**Net Profit:** ${total_pnl:,.0f} | **Win Rate:** {win_rate:.1f}%")
+                
+                # Charts
                 results['cum_pnl'] = results['pnl'].cumsum() * 100
                 results['equity'] = start_cap + results['cum_pnl']
+                results['date'] = pd.to_datetime(results['entry_date'])
+                results = results.sort_values('date')
                 
-                fig, ax = plt.subplots(figsize=(8, 4))
-                ax.plot(results['plot_date'], results['equity'], color=SUCCESS_COLOR, linewidth=1.5)
-                ax.fill_between(results['plot_date'], results['equity'], start_cap, color=SUCCESS_COLOR, alpha=0.1)
-                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
-                ax.set_ylabel("Account Value ($)")
-                ax.spines['top'].set_visible(False)
-                ax.spines['right'].set_visible(False)
-                st.pyplot(fig, use_container_width=True)
+                st.line_chart(results, x='date', y='equity', color=SUCCESS_COLOR)
                 
-            with col_dist:
-                st.subheader("Exit Reasons")
-                exit_counts = results['exit_reason'].value_counts()
-                fig2, ax2 = plt.subplots(figsize=(4, 4))
-                colors = [SUCCESS_COLOR if 'Profit' in idx or 'Held' in idx else WARNING_COLOR for idx in exit_counts.index]
-                ax2.pie(exit_counts, labels=exit_counts.index, autopct='%1.1f%%', colors=colors, startangle=90, textprops={'color': TEXT_COLOR})
-                centre_circle = plt.Circle((0,0),0.70,fc=BG_COLOR)
-                fig2.gca().add_artist(centre_circle)
-                st.pyplot(fig2, use_container_width=True)
-            
-            st.subheader("Trade Log")
-            st.dataframe(
-                results[['display_entry', 'display_exit', 'short_strike', 'gross_credit', 'exit_reason', 'pnl']],
-                use_container_width=True,
-                height=300,
-                column_config={
-                    "display_entry": "Entry",
-                    "display_exit": "Exit",
-                    "short_strike": "Strike",
-                    "gross_credit": "Gross Credit",
-                    "exit_reason": "Reason",
-                    "pnl": "Net P&L"
-                }
-            )
-    else:
-        st.error("Data not loaded. Please select a ticker.")
+                with st.expander("View Trade Log"):
+                    st.dataframe(results[['display_entry', 'display_exit', 'gross_credit', 'exit_reason', 'pnl']], use_container_width=True)
+            else:
+                st.warning("No trades found.")
 
-st.markdown("---")
-st.caption("**Model:** Black-Scholes | **Constraints:** Capital Limited + Slippage")
+# ==========================================
+# TAB 2: OPTIMIZER
+# ==========================================
+with tab_opt:
+    st.markdown("### 🔍 Find the Best Settings")
+    st.info("This will run multiple 10-year simulations back-to-back to find the highest performing combination.")
+    
+    col_opt1, col_opt2 = st.columns(2)
+    with col_opt1:
+        scan_mode = st.radio("Scan Intensity", ["Light (12 Runs)", "Deep (100+ Runs)"], horizontal=True)
+    
+    # Define Parameter Grid
+    if scan_mode.startswith("Light"):
+        # Narrow Search
+        param_grid = {
+            "exit_dte": [21, 7],
+            "profit_target": [50, 25],
+            "stop_loss": [200, 300, 400]
+        } # 2*2*3 = 12 combinations
+    else:
+        # Wide Search
+        param_grid = {
+            "exit_dte": [21, 14, 7, 0],
+            "profit_target": [75, 50, 25],
+            "stop_loss": [200, 300, 400, 500],
+            "exit_delta": [0.4, 0.6] 
+        } # 4*3*4*2 = 96 combinations
+        
+    st.write(f"**Total Combinations to Test:** {np.prod([len(v) for v in param_grid.values()])}")
+    
+    if st.button("🚀 Start Optimizer", type="primary"):
+        if 'df_market' in st.session_state:
+            keys, values = zip(*param_grid.items())
+            permutations = [dict(zip(keys, v)) for v in itertools.product(*values)]
+            
+            opt_results = []
+            opt_prog = st.progress(0)
+            status = st.empty()
+            
+            for i, p in enumerate(permutations):
+                status.write(f"Testing Config {i+1}/{len(permutations)}: {p}")
+                opt_prog.progress((i+1)/len(permutations))
+                
+                # Defaults if not in grid
+                d_delta = p.get('exit_delta', 0.60)
+                d_stop = p.get('stop_loss', 300)
+                d_dte = p.get('exit_dte', 21)
+                d_target = p.get('profit_target', 50)
+                
+                res, _ = run_simulation(
+                    st.session_state.df_market, 
+                    0.20, # Entry Delta Fixed
+                    d_delta, d_stop, d_dte, d_target,
+                    slippage, fees, start_cap
+                )
+                
+                if not res.empty:
+                    pnl = res['pnl'].sum() * 100
+                    wr = len(res[res['pnl']>0])/len(res)*100
+                    # Drawdown Calc
+                    res['equity'] = start_cap + (res['pnl'].cumsum() * 100)
+                    res['peak'] = res['equity'].cummax()
+                    res['dd'] = (res['equity'] - res['peak']) / res['peak']
+                    max_dd = res['dd'].min() * 100
+                    
+                    opt_results.append({
+                        "DTE": d_dte,
+                        "Target %": d_target,
+                        "Stop %": d_stop,
+                        "Net Profit": pnl,
+                        "Win Rate": wr,
+                        "Max DD": max_dd,
+                        "Trades": len(res)
+                    })
+            
+            opt_prog.empty()
+            status.empty()
+            
+            if opt_results:
+                df_opt = pd.DataFrame(opt_results)
+                df_opt = df_opt.sort_values("Net Profit", ascending=False)
+                
+                st.balloons()
+                st.subheader("🏆 Optimization Results")
+                
+                # Winner
+                best = df_opt.iloc[0]
+                b1, b2, b3 = st.columns(3)
+                b1.metric("Best Profit", f"${best['Net Profit']:,.0f}")
+                b2.metric("Best Config", f"Ex: {int(best['DTE'])} DTE | TP: {int(best['Target %'])}%")
+                b3.metric("Win Rate", f"{best['Win Rate']:.1f}%")
+                
+                st.dataframe(
+                    df_opt.style.format({
+                        "Net Profit": "${:,.0f}", 
+                        "Win Rate": "{:.1f}%", 
+                        "Max DD": "{:.1f}%"
+                    }).background_gradient(subset=["Net Profit"], cmap="Greens"),
+                    use_container_width=True
+                )
+            else:
+                st.error("Optimizer failed to generate trades.")
