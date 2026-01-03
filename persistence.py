@@ -151,7 +151,7 @@ def ensure_logged_in():
     
     st.markdown("### 🔒 Security Check")
     st.warning("Please sign in to access your Cloud Dashboard.")
-    st.markdown(f"[**👉 Sign in with Google**]({auth_url})", unsafe_allow_html=True)
+    st.markdown(f"[**Sign in with Google**]({auth_url})", unsafe_allow_html=True)
     st.stop()
 
 def logout():
