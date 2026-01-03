@@ -74,7 +74,7 @@ def get_market_data(ticker):
     return pd.DataFrame()
 
 # --- SIMULATION ENGINE ---
-def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger, slippage, fees, capital):
+def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dte_trigger, profit_target_pct, slippage, fees, capital):
     if df.empty: return pd.DataFrame()
 
     all_potential_trades = []
@@ -83,7 +83,7 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
     progress_bar = st.progress(0)
     r = 0.045
     
-    # 1. GENERATE ALL VALID SIGNALS (Unlimited Capital)
+    # 1. GENERATE SIGNALS
     for i, entry_date in enumerate(entry_dates):
         if i % 100 == 0: progress_bar.progress((i + 1) / total_days)
 
@@ -140,15 +140,20 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
                 curr_p_s, curr_d_s = black_scholes_put(S_curr, short_strike, T_curr, r, sigma_curr)
                 curr_p_l, _ = black_scholes_put(S_curr, long_strike, T_curr, r, sigma_curr)
                 spread_val = curr_p_s - curr_p_l
-                spread_pct = (spread_val / gross_credit) * 100
+                
+                # Percentage of Max Profit Remaining
+                # If Credit $1.00, Current Spread $0.50 -> You captured 50%
+                profit_captured_pct = ((gross_credit - spread_val) / gross_credit) * 100
+                loss_pct = (spread_val / gross_credit) * 100
                 
                 hit_exit = False
                 reason = ""
                 
                 if days_left < exit_dte_trigger: hit_exit = True; reason = f"DTE < {exit_dte_trigger}"
                 elif abs(curr_d_s) > exit_delta_trigger: hit_exit = True; reason = f"Delta > {exit_delta_trigger}"
-                elif spread_pct > exit_spread_pct: hit_exit = True; reason = f"Max Loss ({exit_spread_pct}%)"
-                elif spread_pct < 50: hit_exit = True; reason = "Profit Target (50%)"
+                elif loss_pct > exit_spread_pct: hit_exit = True; reason = f"Max Loss ({exit_spread_pct}%)"
+                # PROFIT TAKER LOGIC
+                elif profit_captured_pct >= profit_target_pct: hit_exit = True; reason = f"Profit Target ({profit_target_pct}%)"
                 
                 if hit_exit:
                     trade_res['exit_reason'] = reason
@@ -161,30 +166,20 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
         
     progress_bar.empty()
     
-    # 2. APPLY CAPITAL CONSTRAINTS (Filter Trades)
+    # 2. CAPITAL CONSTRAINTS
     if not all_potential_trades: return pd.DataFrame()
     
-    # Costs
-    # Slippage: Applied to 4 legs (Opening Short/Long + Closing Short/Long)
-    # Fees: Flat rate per trade
-    friction = (slippage * 4) + fees # Total dollar cost
-    
+    friction = (slippage * 4) + fees 
     executed_trades = []
-    active_end_dates = [] # Tracks when capital becomes free
-    max_positions = int(capital // 500) # Assuming $500 margin per spread
-    
+    active_end_dates = [] 
+    max_positions = int(capital // 500) 
     skipped_count = 0
     
     for trade in all_potential_trades:
         entry = trade['entry_date']
-        
-        # Free up capital: Remove trades that have closed before this entry date
         active_end_dates = [d for d in active_end_dates if d > entry]
         
-        # Check Buying Power
         if len(active_end_dates) < max_positions:
-            # Execute Trade
-            # Apply friction to PnL (convert friction $ to option price terms by dividing by 100)
             trade['pnl'] = trade['pnl'] - (friction / 100.0)
             executed_trades.append(trade)
             active_end_dates.append(trade['exit_date'])
@@ -192,7 +187,6 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
             skipped_count += 1
             
     results = pd.DataFrame(executed_trades)
-    
     if not results.empty:
         results['display_entry'] = pd.to_datetime(results['entry_date']).dt.strftime('%Y-%m-%d')
         results['display_exit'] = pd.to_datetime(results['exit_date']).dt.strftime('%Y-%m-%d')
@@ -205,7 +199,7 @@ with header_col1:
     try: st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
     except: st.write("**DR CAPITAL**")
 with header_col2:
-    st.markdown("""<div style='text-align: left; padding-top: 10px;'><h1 style='margin-bottom: 0px;'>Options Lab</h1><p style='color: gray;'>10-Year Portfolio Simulation</p></div>""", unsafe_allow_html=True)
+    st.markdown("""<div style='text-align: left; padding-top: 10px;'><h1 style='margin-bottom: 0px;'>Options Lab</h1><p style='color: gray;'>Portfolio Simulation (Tastytrade Logic)</p></div>""", unsafe_allow_html=True)
 with header_col3: st.write("") 
 st.markdown("<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: -5px; margin-bottom: 10px;'>", unsafe_allow_html=True)
 
@@ -221,44 +215,38 @@ with st.container(border=True):
             
     with c2: exit_delta = st.number_input("Exit Short Delta >", 0.1, 1.0, 0.60, 0.05)
     with c3: exit_spread_pct = st.number_input("Exit Spread Value % >", 100, 1000, 300, 50)
-    with c4: exit_dte = st.number_input("Exit DTE <", 0, 30, 7)
+    with c4: exit_dte = st.number_input("Exit DTE <", 0, 30, 21, help="Tastytrade Standard: 21 DTE")
     
-    # CAPITAL & COSTS
-    st.markdown("##### 💼 Account Settings")
-    r1, r2, r3 = st.columns(3)
-    with r1: 
-        start_cap = st.number_input("Starting Capital ($)", 1000, 1000000, 10000, 1000)
-    with r2: 
-        slippage = st.number_input("Slippage ($ per leg)", 0.00, 0.10, 0.01, 0.01, help="Bid/Ask spread cost.")
-    with r3: 
-        fees = st.number_input("Commissions ($ per trade)", 0.00, 5.00, 0.00, 0.10, help="Wealthsimple = $0. IBKR/ToS = ~$1.30")
+    st.markdown("##### ⚙️ Advanced Settings")
+    r1, r2, r3, r4 = st.columns(4)
+    with r1: start_cap = st.number_input("Capital ($)", 1000, 1000000, 10000, 1000)
+    with r2: profit_target = st.number_input("Take Profit %", 10, 90, 50, 5, help="Close early if X% of max profit is reached.")
+    with r3: slippage = st.number_input("Slippage ($)", 0.00, 0.10, 0.01, 0.01)
+    with r4: fees = st.number_input("Commissions ($)", 0.00, 5.00, 0.00, 0.10)
     
     run_btn = st.button("🔬 Run Simulation", use_container_width=True)
 
 # --- EXECUTION ---
 if run_btn:
     if 'df_market' in st.session_state and not st.session_state.df_market.empty:
-        with st.spinner(f"Simulating portfolio with ${start_cap:,} capital..."):
+        with st.spinner(f"Simulating..."):
             results, skipped = run_simulation(
                 st.session_state.df_market, 
-                0.20, exit_delta, exit_spread_pct, exit_dte, 
+                0.20, exit_delta, exit_spread_pct, exit_dte, profit_target,
                 slippage, fees, start_cap
             )
         
         if results.empty:
             st.warning("No trades generated.")
         else:
-            # --- METRICS ---
             total_trades = len(results)
             wins = results[results['pnl'] > 0]
             losses = results[results['pnl'] <= 0]
             win_rate = len(wins) / total_trades * 100
             total_pnl = results['pnl'].sum() * 100
             
-            # ROI
             final_equity = start_cap + total_pnl
             total_return_pct = (total_pnl / start_cap) * 100
-            
             avg_win = wins['pnl'].mean() * 100 if not wins.empty else 0
             avg_loss = losses['pnl'].mean() * 100 if not losses.empty else 0
             
@@ -271,7 +259,7 @@ if run_btn:
             m5.metric("Avg Loss", f"${avg_loss:.2f}")
             
             if skipped > 0:
-                st.info(f"ℹ️ **Capital Constraint Active:** Skipped {skipped} valid trade setups because the account was fully invested.")
+                st.info(f"ℹ️ **Capital Constraint:** Skipped {skipped} trades due to full account.")
             
             st.markdown("---")
             
@@ -280,9 +268,6 @@ if run_btn:
                 st.subheader("Account Growth")
                 results['plot_date'] = pd.to_datetime(results['entry_date'])
                 results = results.sort_values("plot_date")
-                
-                # Equity Curve Calculation
-                # We need to reconstruct the daily equity. A simple cumsum is a good approximation for visualization.
                 results['cum_pnl'] = results['pnl'].cumsum() * 100
                 results['equity'] = start_cap + results['cum_pnl']
                 
@@ -316,7 +301,7 @@ if run_btn:
                     "short_strike": "Strike",
                     "gross_credit": "Gross Credit",
                     "exit_reason": "Reason",
-                    "pnl": "Net P&L (x100)"
+                    "pnl": "Net P&L"
                 }
             )
     else:
