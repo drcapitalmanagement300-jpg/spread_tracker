@@ -35,18 +35,42 @@ plt.rcParams.update({
     "grid.alpha": 0.3
 })
 
-# --- MATH HELPERS ---
-def black_scholes_put(S, K, T, r, sigma):
-    try:
-        S, K, T, sigma = float(S), float(K), float(T), float(sigma)
-        if T <= 0 or sigma <= 0: 
-            return max(K - S, 0.0), -1.0 if K > S else 0.0
+# --- MATH HELPERS (VECTORIZED) ---
+def vectorized_black_scholes(S, K, T, r, sigma, type='put'):
+    """
+    Performs Black-Scholes calculation on entire Arrays at once.
+    Massively faster than looping.
+    """
+    # Ensure inputs are numpy arrays for vector math
+    S = np.array(S, dtype=float)
+    K = np.array(K, dtype=float)
+    T = np.array(T, dtype=float)
+    sigma = np.array(sigma, dtype=float)
+    
+    # Avoid div by zero / log of zero errors
+    # We use a mask to handle invalid math safely without crashing
+    with np.errstate(divide='ignore', invalid='ignore'):
         d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
-        put_price = (K * np.exp(-r * T) * si.norm.cdf(-d2)) - (S * si.norm.cdf(-d1))
-        put_delta = si.norm.cdf(d1) - 1
-        return put_price, put_delta
-    except: return 0.0, 0.0
+    
+    # Cumulative Distribution Function
+    # scipy.stats.norm.cdf works on arrays automatically
+    nd1 = si.norm.cdf(-d1)
+    nd2 = si.norm.cdf(-d2)
+    
+    price = (K * np.exp(-r * T) * nd2) - (S * nd1)
+    delta = nd1 - 1
+    
+    # Clean up invalid results (expired options or zero vol)
+    # If T <= 0, Price is Intrinsic Value (Max(K-S, 0))
+    intrinsic_val = np.maximum(K - S, 0.0)
+    price = np.where(T <= 0, intrinsic_val, price)
+    
+    # Final NaN catch
+    price = np.nan_to_num(price)
+    delta = np.nan_to_num(delta)
+    
+    return price, delta
 
 # --- DATA LOADING ---
 @st.cache_data(ttl=3600*24)
@@ -66,83 +90,137 @@ def get_basket_data(tickers):
         except: continue
     return data_map
 
-# --- CORE SIGNAL GENERATOR ---
+# --- CORE SIGNAL GENERATOR (OPTIMIZED) ---
 def generate_signals_for_ticker(ticker, df, entry_delta, exit_dte, stop_loss_pct, profit_target_pct, scan_resolution_low=False):
+    """
+    Optimized Signal Generator using Vectorized Operations.
+    Removes inner loops for massive speed gains.
+    """
     signals = []
-    entry_dates = df.index
     r = 0.045
     strike_steps = 10 if scan_resolution_low else 30
     
-    for entry_date in entry_dates:
+    # Pre-calculate common columns to avoid .loc overhead in loop
+    close_prices = df['Close'].values
+    hvs = df['HV'].values
+    dates = df.index
+    
+    # Helper to map date to integer index for speed
+    date_map = {d: i for i, d in enumerate(dates)}
+    
+    for i, entry_date in enumerate(dates):
         try:
-            row = df.loc[entry_date]
-            S = float(row['Close'])
-            sigma = float(row['HV'])
+            # 1. SETUP
+            S = close_prices[i]
+            sigma = hvs[i]
             
-            target_expiry = entry_date + timedelta(days=45)
-            future = df.loc[entry_date:]
-            valid_exps = future.index[future.index >= target_expiry]
+            # Fast Forward to Expiry (Approx 45 days)
+            # Find index 45 days later (approx)
+            target_date = entry_date + timedelta(days=45)
+            
+            # Fast lookup of next valid date
+            # We can't do exact index math because of weekends/holidays, 
+            # so we search the index efficiently
+            future_slice = df.index[i:]
+            valid_exps = future_slice[future_slice >= target_date]
+            
             if valid_exps.empty: continue
-            
             expiry = valid_exps[0]
+            
+            # Get integer index of expiry for slicing
+            expiry_idx = date_map[expiry]
+            
             T = (expiry - entry_date).days / 365.0
             
-            best_strike = S * 0.8
-            min_diff = 1.0
+            # 2. STRIKE SELECTION (Vectorized)
+            # Create array of 30 candidates
             candidates = np.linspace(S * 0.70, S, strike_steps)
-            for k in candidates:
-                _, d = black_scholes_put(S, k, T, r, sigma)
-                if abs(abs(d) - abs(entry_delta)) < min_diff:
-                    min_diff = abs(abs(d) - abs(entry_delta))
-                    best_strike = k
             
+            # One BS call for all 30 strikes
+            _, d_arr = vectorized_black_scholes(
+                np.full(strike_steps, S), 
+                candidates, 
+                np.full(strike_steps, T), 
+                r, 
+                np.full(strike_steps, sigma)
+            )
+            
+            # Find closest delta
+            best_idx = np.argmin(np.abs(np.abs(d_arr) - abs(entry_delta)))
+            best_strike = candidates[best_idx]
+            
+            # Snap to grid
             step = 5.0 if S > 200 else 1.0
             short_k = round(best_strike / step) * step
             long_k = short_k - 5.0
             
-            p_s, d_s = black_scholes_put(S, short_k, T, r, sigma)
-            p_l, _ = black_scholes_put(S, long_k, T, r, sigma)
-            credit = p_s - p_l
-            if credit < 0.10: continue 
+            # 3. PRICING (Scalar is fine here, it's just one trade)
+            p_s, _ = vectorized_black_scholes(S, short_k, T, r, sigma)
+            p_l, _ = vectorized_black_scholes(S, long_k, T, r, sigma)
+            credit = float(p_s - p_l)
             
-            trade_path = df.loc[entry_date:expiry].iloc[1:]
+            if credit < 0.10: continue 
+
+            # 4. WALK FORWARD (Vectorized)
+            # Instead of looping day by day, we slice the arrays
+            # Path from Entry+1 to Expiry
+            path_S = close_prices[i+1 : expiry_idx+1]
+            path_sigma = hvs[i+1 : expiry_idx+1]
+            path_dates = dates[i+1 : expiry_idx+1]
+            
+            if len(path_S) == 0: continue
+            
+            # Calculate Time to Expiry for every day in the path at once
+            # (Expiry - CurrentDate).days
+            path_days_left = np.array([(expiry - d).days for d in path_dates])
+            path_T = path_days_left / 365.0
+            
+            # Calculate Option Prices for the WHOLE path at once
+            path_ps, _ = vectorized_black_scholes(path_S, short_k, path_T, r, path_sigma)
+            path_pl, _ = vectorized_black_scholes(path_S, long_k, path_T, r, path_sigma)
+            path_spreads = path_ps - path_pl
+            
+            # Calculate Metrics Arrays
+            profit_pcts = ((credit - path_spreads) / credit) * 100
+            loss_pcts = (path_spreads / credit) * 100
+            
+            # Logic Masks (Boolean Arrays)
+            mask_dte = path_days_left <= exit_dte
+            mask_profit = profit_pcts >= profit_target_pct
+            mask_stop = loss_pcts >= stop_loss_pct
+            
+            # Combine triggers
+            # We want the FIRST day where ANY condition is met
+            triggers = mask_dte | mask_profit | mask_stop
+            
             exit_date = expiry
             exit_reason = "Expired"
             final_pnl = credit
             
-            for curr_date, path_row in trade_path.iterrows():
-                S_curr = float(path_row['Close'])
-                days_left = (expiry - curr_date).days
-                T_curr = days_left / 365.0
-                sigma_curr = float(path_row['HV'])
+            if triggers.any():
+                # Get index of first True
+                first_hit_idx = np.argmax(triggers)
                 
-                cp_s, _ = black_scholes_put(S_curr, short_k, T_curr, r, sigma_curr)
-                cp_l, _ = black_scholes_put(S_curr, long_k, T_curr, r, sigma_curr)
-                spread_val = cp_s - cp_l
+                exit_date = path_dates[first_hit_idx]
+                final_pnl = credit - path_spreads[first_hit_idx]
                 
-                profit_pct = ((credit - spread_val) / credit) * 100
-                loss_pct = (spread_val / credit) * 100
-                
-                hit = False
-                if days_left <= exit_dte: hit = True; exit_reason = f"DTE {exit_dte}"
-                elif profit_pct >= profit_target_pct: hit = True; exit_reason = "Profit Target"
-                elif loss_pct >= stop_loss_pct: hit = True; exit_reason = "Stop Loss"
-                
-                if hit:
-                    exit_date = curr_date
-                    final_pnl = credit - spread_val
-                    break
-            
+                # Determine Reason
+                if mask_stop[first_hit_idx]: exit_reason = "Stop Loss"
+                elif mask_profit[first_hit_idx]: exit_reason = "Profit Target"
+                elif mask_dte[first_hit_idx]: exit_reason = f"DTE {exit_dte}"
+
             signals.append({
                 'ticker': ticker,
                 'entry_date': entry_date,
                 'exit_date': exit_date,
-                'gross_pnl': final_pnl,
+                'gross_pnl': float(final_pnl),
                 'exit_reason': exit_reason,
                 'margin': 500.0,
                 'entry_delta': entry_delta
             })
-        except: continue
+            
+        except Exception: continue
+        
     return signals
 
 # --- PORTFOLIO MANAGER ---
@@ -150,6 +228,7 @@ def run_portfolio_simulation(data_map, entry_delta, exit_dte, stop_loss, profit_
                            start_cap, monthly_add, slippage, fees, 
                            progress_bar_slot=None):
     
+    # 1. GENERATE SIGNALS (Parallel & Vectorized)
     all_signals = []
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
@@ -171,10 +250,13 @@ def run_portfolio_simulation(data_map, entry_delta, exit_dte, stop_loss, profit_
     signal_idx = 0
     total_signals = len(signal_queue)
     days_since_contrib = 0
-    
+    total_days = len(timeline)
+
+    # 2. RUN TIMELINE
     for i, today in enumerate(timeline):
-        if progress_bar_slot and i % 50 == 0:
-            progress_bar_slot.progress((i+1) / len(timeline))
+        
+        if progress_bar_slot and i % (max(1, int(total_days * 0.05))) == 0:
+            progress_bar_slot.progress((i + 1) / total_days, text=f"Simulating Day {i+1}/{total_days}")
             
         days_since_contrib += 1
         if days_since_contrib >= 30:
@@ -249,11 +331,14 @@ with tab_manual:
     with c4: exit_dte = st.number_input("Exit DTE", 0, 30, 21)
     
     if st.button("Run Portfolio Simulation", type="primary"):
-        prog_bar = st.progress(0, text="Simulating timeline...")
+        prog_bar = st.progress(0, text="Initializing...")
+        
         df_res, final_bal = run_portfolio_simulation(
             st.session_state.data_map, e_delta, exit_dte, stop_loss, profit_target,
             start_cap, monthly_add, slippage, fees, prog_bar
         )
+        prog_bar.progress(1.0, text="Done!")
+        time.sleep(0.5)
         prog_bar.empty()
         
         if not df_res.empty:
@@ -275,14 +360,19 @@ with tab_auto:
     if 'opt_queue' not in st.session_state: st.session_state.opt_queue = []
     if 'opt_results' not in st.session_state: st.session_state.opt_results = []
     
-    if st.button("Start Optimization", type="primary"):
+    col_btn1, col_btn2 = st.columns([1, 4])
+    with col_btn1:
+        start_opt = st.button("Start Optimization", type="primary")
+    with col_btn2:
+        stop_opt = st.button("Stop")
+
+    if start_opt:
         if scan_depth.startswith("Standard"):
             deltas = [0.15, 0.20, 0.30]
             dtes = [21, 7, 0]
             targets = [50, 25]
             stops = [200, 300]
         else:
-            # Deep Scan
             deltas = [0.10, 0.15, 0.20, 0.30]
             dtes = [30, 21, 14, 7, 0]
             targets = [75, 50, 25]
@@ -294,7 +384,7 @@ with tab_auto:
         st.session_state.is_running = True
         st.rerun()
 
-    if st.button("Stop"):
+    if stop_opt:
         st.session_state.is_running = False
         st.session_state.opt_queue = []
         st.rerun()
@@ -312,10 +402,10 @@ with tab_auto:
         curr_run = len(st.session_state.opt_results) + 1
         
         st.write(f"**Processing Config {curr_run}/{total_runs}**")
-        st.text(f"Delta: {d_delta} | DTE: {d_dte} | Target: {d_target}% | Stop: {d_stop}%")
+        st.caption(f"Entry: {d_delta} Delta | Exit: {d_dte} DTE | Target: {d_target}% | Stop: {d_stop}%")
         
         main_bar = st.progress(curr_run / total_runs)
-        inner_bar = st.progress(0, text="Simulating...")
+        inner_bar = st.progress(0, text="Simulating Timeline...")
         
         df_r, bal = run_portfolio_simulation(
             st.session_state.data_map, d_delta, d_dte, d_stop, d_target,
