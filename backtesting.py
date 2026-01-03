@@ -82,7 +82,7 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
     entry_dates = df.index
     r = 0.045
     
-    # FAST LOOP (No progress bar needed for single chunk runs)
+    # FAST LOOP (No progress bar needed for optimizer chunks)
     for i, entry_date in enumerate(entry_dates):
         try:
             entry_row = df.loc[entry_date]
@@ -101,7 +101,7 @@ def run_simulation(df, entry_delta, exit_delta_trigger, exit_spread_pct, exit_dt
             best_strike = S_entry * 0.8
             min_delta_diff = 1.0
             
-            # Reduce scan resolution for optimizer speed
+            # Low resolution scan for speed
             scan_strikes = np.linspace(S_entry * 0.70, S_entry, 20) 
             
             for k in scan_strikes:
@@ -289,7 +289,7 @@ with tab_opt:
             st.session_state.is_optimizing = True
             st.rerun()
 
-    # 2. Worker Logic: Processes One Chunk and Reruns
+    # 2. Worker Logic: Processes A BATCH and Reruns
     if st.session_state.get('is_optimizing', False):
         
         # Check if queue is empty
@@ -298,49 +298,58 @@ with tab_opt:
             st.rerun()
             
         # UI Progress
-        current_idx = st.session_state.opt_total - len(st.session_state.opt_queue) + 1
-        progress = current_idx / st.session_state.opt_total
+        total = st.session_state.opt_total
+        remaining = len(st.session_state.opt_queue)
+        done = total - remaining
         
-        st.write(f"⚙️ **Processing Config {current_idx}/{st.session_state.opt_total}**")
+        progress = done / total
+        st.write(f"⚙️ **Processing Batch... ({done}/{total})**")
         st.progress(progress)
         
-        # Pop the next item
-        p = st.session_state.opt_queue.pop(0)
+        # PROCESS BATCH (5 at a time)
+        BATCH_SIZE = 5
         
-        # Defaults
-        d_delta = p.get('exit_delta', 0.60)
-        d_stop = p.get('stop_loss', 300)
-        d_dte = p.get('exit_dte', 21)
-        d_target = p.get('profit_target', 50)
+        for _ in range(BATCH_SIZE):
+            if not st.session_state.opt_queue:
+                break
+                
+            # Pop the next item
+            p = st.session_state.opt_queue.pop(0)
+            
+            # Defaults
+            d_delta = p.get('exit_delta', 0.60)
+            d_stop = p.get('stop_loss', 300)
+            d_dte = p.get('exit_dte', 21)
+            d_target = p.get('profit_target', 50)
+            
+            # Run Simulation
+            res, _ = run_simulation(
+                st.session_state.df_market, 
+                0.20, d_delta, d_stop, d_dte, d_target,
+                slippage, fees, start_cap
+            )
+            
+            # Save Result
+            if not res.empty:
+                pnl = res['pnl'].sum() * 100
+                wr = len(res[res['pnl']>0])/len(res)*100
+                
+                res['equity'] = start_cap + (res['pnl'].cumsum() * 100)
+                res['peak'] = res['equity'].cummax()
+                res['dd'] = (res['equity'] - res['peak']) / res['peak']
+                max_dd = res['dd'].min() * 100
+                
+                st.session_state.opt_results.append({
+                    "DTE": d_dte,
+                    "Target %": d_target,
+                    "Stop %": d_stop,
+                    "Net Profit": pnl,
+                    "Win Rate": wr,
+                    "Max DD": max_dd,
+                    "Trades": len(res)
+                })
         
-        # Run ONE Simulation
-        res, _ = run_simulation(
-            st.session_state.df_market, 
-            0.20, d_delta, d_stop, d_dte, d_target,
-            slippage, fees, start_cap
-        )
-        
-        # Save Result
-        if not res.empty:
-            pnl = res['pnl'].sum() * 100
-            wr = len(res[res['pnl']>0])/len(res)*100
-            
-            res['equity'] = start_cap + (res['pnl'].cumsum() * 100)
-            res['peak'] = res['equity'].cummax()
-            res['dd'] = (res['equity'] - res['peak']) / res['peak']
-            max_dd = res['dd'].min() * 100
-            
-            st.session_state.opt_results.append({
-                "DTE": d_dte,
-                "Target %": d_target,
-                "Stop %": d_stop,
-                "Net Profit": pnl,
-                "Win Rate": wr,
-                "Max DD": max_dd,
-                "Trades": len(res)
-            })
-            
-        # RERUN IMMEDIATELY
+        # RERUN AFTER BATCH
         st.rerun()
 
     # 3. Results Display (When Finished)
