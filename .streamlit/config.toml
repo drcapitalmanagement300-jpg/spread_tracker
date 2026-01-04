@@ -1,5 +1,6 @@
 [server]
 headless = true
+fileWatcherType = "none" # <--- THIS FIXES THE CRASH
 enableCORS = false
 enableXsrfProtection = false
 
