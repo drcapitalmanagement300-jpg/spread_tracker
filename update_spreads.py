@@ -36,19 +36,44 @@ class MarketDataManager:
     def __init__(self):
         self._price_cache = {}    
         self._chain_cache = {}    
-        self._ticker_objs = {}    
+        self._ticker_objs = {}
+        self._market_regime_cache = None    
 
     def _get_yf_ticker(self, ticker):
         if ticker not in self._ticker_objs:
             self._ticker_objs[ticker] = yf.Ticker(ticker)
         return self._ticker_objs[ticker]
 
+    def get_market_regime(self):
+        """
+        Checks if SPY is above (Safe) or below (Crash) the 200 SMA.
+        Returns: is_safe (bool), current_price, sma_200
+        """
+        if self._market_regime_cache:
+            return self._market_regime_cache
+
+        try:
+            spy = self._get_yf_ticker("SPY")
+            # Need 1y data for 200 SMA
+            hist = spy.history(period="1y")
+            
+            if hist.empty or len(hist) < 200:
+                # Default to safe if data fails, to prevent panic
+                return True, 0.0, 0.0
+            
+            current_price = hist['Close'].iloc[-1]
+            sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
+            
+            is_safe = current_price > sma_200
+            self._market_regime_cache = (is_safe, current_price, sma_200)
+            return is_safe, current_price, sma_200
+        except Exception as e:
+            logger.error(f"Failed to fetch Market Regime: {e}")
+            return True, 0.0, 0.0
+
     def get_price_data(self, ticker):
         """
-        Fetches:
-        1. Current Price
-        2. Daily Change %
-        3. 30-Day OHLC History
+        Fetches: Current Price, Daily Change %, 30-Day OHLC History
         """
         if ticker in self._price_cache:
             return self._price_cache[ticker]
@@ -60,25 +85,20 @@ class MarketDataManager:
         
         for attempt in range(3):
             try:
-                # Fetch 1 month of history
                 hist = ticker_obj.history(period="1mo")
                 
                 if not hist.empty:
-                    # 1. Current Price (Last Close)
                     price = hist['Close'].iloc[-1]
                     
-                    # 2. Change %
                     if len(hist) >= 2:
                         prev_close = hist['Close'].iloc[-2]
                         if prev_close > 0:
                             change_pct = ((price - prev_close) / prev_close) * 100
                     
-                    # 3. History List (OHLC)
                     hist_reset = hist.reset_index()
                     history_list = []
                     for _, row in hist_reset.iterrows():
                         d_str = row['Date'].strftime('%Y-%m-%d')
-                        # Capture full OHLC
                         history_list.append({
                             "date": d_str,
                             "open": round(row['Open'], 2),
@@ -86,7 +106,6 @@ class MarketDataManager:
                             "low": round(row['Low'], 2),
                             "close": round(row['Close'], 2)
                         })
-                    
                     break
             except Exception as e:
                 logger.warning(f"[Attempt {attempt+1}/3] Data fetch failed for {ticker}: {e}")
@@ -147,7 +166,7 @@ def send_discord_alert(ticker, description, color=15158332):
 
 def handle_heartbeat(updated_trades):
     now_utc = datetime.now(timezone.utc)
-    # Heartbeat between 9AM and 10AM ET (approx 13/14 UTC depending on DST)
+    # Heartbeat between 9AM and 10AM ET
     if now_utc.hour in [13, 14]:
         if not updated_trades: return
         last_hb = updated_trades[0].get("last_heartbeat_date")
@@ -248,13 +267,16 @@ def update_trade(trade, data_manager):
         short_strike = float(trade.get("short_strike", 0))
         long_strike = float(trade.get("long_strike", 0))
         credit_received = float(trade.get("credit", 0))
-        # Ensure 'contracts' exists in the trade object being updated
         contracts = int(trade.get("contracts", 1)) 
     except ValueError: return trade 
 
+    # 1. Fetch Basic Data
     current_price, day_change_pct, price_history = data_manager.get_price_data(ticker)
     short_price, long_price, short_iv, long_iv = get_option_data(data_manager, ticker, expiry_str, short_strike, long_strike)
     
+    # 2. Fetch Market Regime (Crash Guard)
+    is_market_safe, _, _ = data_manager.get_market_regime()
+
     dte = days_to_expiry(expiry_str)
     T_years = dte / 365.0
 
@@ -285,32 +307,44 @@ def update_trade(trade, data_manager):
     notif_color = 15158332
     short_abs_delta = abs(short_leg_greeks["delta"]) 
 
-    # --- NOTIFICATION LOGIC ---
-    if profit_pct is not None and profit_pct >= 50:
+    # --- UPDATED NOTIFICATION LOGIC ---
+    
+    # Priority 1: Market Crash (SPY < 200 SMA)
+    if not is_market_safe:
+        rule_violations["other_rules"] = True
+        notif_msg = "🚨 **CRASH ALERT**: SPY < 200 SMA. Close All Bullish Positions."
+        notif_color = 15158332 # Red
+
+    # Priority 2: Profit Target (50%)
+    elif profit_pct is not None and profit_pct >= 50:
         psych_profit = (profit_pct / 50.0) * 100.0
         notif_msg = f"✅ **Target Reached**: {psych_profit:.0f}% Profitable"
         notif_color = 3066993 # Green
-    elif short_abs_delta >= 0.40:
-        rule_violations["other_rules"] = True
-        notif_msg = f"⚠️ **Delta Breach**: {short_abs_delta:.2f} (Limit 0.40)"
-    elif spread_val_pct is not None and spread_val_pct >= 150:
-        rule_violations["other_rules"] = True
-        notif_msg = f"⚠️ **Spread Value High**: {spread_val_pct:.0f}% of credit."
-    elif dte <= 7:
-        rule_violations["other_rules"] = True
-        notif_msg = f"⚠️ **Low DTE**: Only {dte} days remaining."
 
+    # Priority 3: Stop Loss (300% of Credit)
+    elif spread_val_pct is not None and spread_val_pct >= 300:
+        rule_violations["other_rules"] = True
+        notif_msg = f"⚠️ **Stop Loss Hit**: Spread value at {spread_val_pct:.0f}% of credit."
+        notif_color = 15105570 # Orange
+
+    # Priority 4: DTE (14 Days)
+    elif dte <= 14:
+        rule_violations["other_rules"] = True
+        notif_msg = f"⚠️ **Exit Zone**: Only {dte} days remaining (<14)."
+        notif_color = 15105570 # Orange
+
+    # Send Notification if needed
     if notif_msg:
         last_sent_str = trade.get("last_alert_sent")
         should_send = True
         if last_sent_str:
             last_sent = datetime.fromisoformat(last_sent_str).replace(tzinfo=timezone.utc)
+            # Don't spam: Only alert once every 20 hours
             if datetime.now(timezone.utc) - last_sent < timedelta(hours=20): should_send = False
         if should_send:
             send_discord_alert(f"Position Alert: {ticker}", notif_msg, notif_color)
             trade["last_alert_sent"] = datetime.now(timezone.utc).isoformat()
 
-    # Preserve 'contracts' in the returned object (technically redundant as we are modifying 'trade' in place, but good practice)
     trade["contracts"] = contracts
     
     trade["cached"] = {
@@ -327,6 +361,7 @@ def update_trade(trade, data_manager):
         "current_profit_percent": profit_pct,
         "spread_value_percent": spread_val_pct,
         "rule_violations": rule_violations,
+        "spy_below_ma": not is_market_safe, # Store this so Dashboard can see it
         "last_updated": datetime.now(timezone.utc).isoformat()
     }
 
