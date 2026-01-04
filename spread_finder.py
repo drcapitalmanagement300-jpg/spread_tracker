@@ -427,12 +427,21 @@ if st.session_state.scan_results is not None:
                     
                     c1, c2 = st.columns(2)
                     with c1:
+                        # Added Max Risk side-by-side with Credit
                         st.markdown(f"""
                         <div class="metric-label">Strikes</div>
                         <div class="metric-value">${s['short']:.0f} / ${s['long']:.0f}</div>
                         <div style="height: 8px;"></div>
-                        <div class="metric-label">Credit</div>
-                        <div class="metric-value" style="color:{SUCCESS_COLOR}">${s['credit']:.2f}</div>
+                        <div style="display: flex; gap: 15px;">
+                            <div>
+                                <div class="metric-label">Credit</div>
+                                <div class="metric-value" style="color:{SUCCESS_COLOR}">${s['credit']:.2f}</div>
+                            </div>
+                            <div>
+                                <div class="metric-label">Max Risk</div>
+                                <div class="metric-value" style="color:#FF5252">${s['max_loss']:.2f}</div>
+                            </div>
+                        </div>
                         """, unsafe_allow_html=True)
                     with c2:
                         st.markdown(f"""
