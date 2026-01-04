@@ -12,7 +12,7 @@ import concurrent.futures
 st.set_page_config(layout="wide", page_title="Options Lab")
 
 # --- CONSTANTS ---
-BASKET_TICKERS = ["TSLA", "NVDA", "AAPL", "AMD", "AMZN"] # High liquid names
+BASKET_TICKERS = ["TSLA", "NVDA", "AAPL", "AMD", "AMZN"]
 SUCCESS_COLOR = "#00C853"
 WARNING_COLOR = "#d32f2f"
 BG_COLOR = '#0E1117'
@@ -35,7 +35,6 @@ plt.rcParams.update({
 
 # --- MATH HELPERS (VECTORIZED) ---
 def vectorized_black_scholes(S, K, T, r, sigma, type='put'):
-    # Safe handling for arrays
     S = np.array(S, dtype=float)
     K = np.array(K, dtype=float)
     T = np.array(T, dtype=float)
@@ -49,8 +48,6 @@ def vectorized_black_scholes(S, K, T, r, sigma, type='put'):
     nd2 = si.norm.cdf(-d2)
     
     price = (K * np.exp(-r * T) * nd2) - (S * nd1)
-    
-    # Intrinsic value fallback for expired/zero time
     intrinsic_val = np.maximum(K - S, 0.0)
     price = np.where(T <= 0, intrinsic_val, price)
     return np.nan_to_num(price)
@@ -59,47 +56,41 @@ def vectorized_black_scholes(S, K, T, r, sigma, type='put'):
 @st.cache_data(ttl=3600*24)
 def get_historical_data():
     data_map = {}
-    
-    # 1. Fetch SPY for Market Regime (The "Finder" Filter)
     try:
         spy = yf.Ticker("SPY")
         spy_df = spy.history(period="10y")
         if not spy_df.empty:
             if spy_df.index.tz is not None: spy_df.index = spy_df.index.tz_localize(None)
             spy_df.index = pd.to_datetime(spy_df.index)
-            # Calculate the 200 SMA "Crash Guard"
             spy_df['SMA200'] = spy_df['Close'].rolling(window=200).mean()
             data_map['SPY'] = spy_df
     except: pass
 
-    # 2. Fetch Tradable Tickers
     for t in BASKET_TICKERS:
         try:
             stock = yf.Ticker(t)
             df = stock.history(period="10y")
             if df.empty: continue
-            
             if df.index.tz is not None: df.index = df.index.tz_localize(None)
             df.index = pd.to_datetime(df.index)
-            
-            # Calculate Volatility for Pricing
             df['Returns'] = df['Close'].pct_change()
             df['HV'] = df['Returns'].rolling(window=30).std() * np.sqrt(252)
             df = df.dropna()
             df = df[~df.index.duplicated(keep='first')]
             data_map[t] = df
         except: continue
-        
     return data_map
 
-# --- PHASE 1: GENERATE VALID ENTRIES (MATCHING FINDER LOGIC) ---
-def generate_valid_entries(ticker, df, spy_df):
-    entries = []
-    r = 0.045 # Risk free rate approximation
+# --- PHASE 1: PRE-CALCULATE TRADE LIFECYCLES (THE SPEED HACK) ---
+# We calculate the daily option price path ONCE per trade.
+# This prevents re-running Black-Scholes inside the grid loop.
+def generate_trade_lifecycles(ticker, df, spy_df):
+    lifecycle_data = []
+    r = 0.045
     width = 5.0
-    min_credit = 0.70 # Finder Criteria
+    min_credit = 0.70
     
-    # Pre-calculate SPY Regime mask
+    # Pre-calculate Regime
     spy_aligned = spy_df.reindex(df.index, method='ffill')
     is_market_safe = (spy_aligned['Close'] > spy_aligned['SMA200']).fillna(False).values
     
@@ -107,129 +98,124 @@ def generate_valid_entries(ticker, df, spy_df):
     hvs = df['HV'].values
     dates = df.index
     
-    for i, entry_date in enumerate(dates):
-        # 1. FINDER RULE: Check Market Regime
+    # Iterate through potential entry days
+    for i in range(len(dates)):
+        # Finder Criteria 1: Market Regime
         if not is_market_safe[i]: continue
-
-        # 2. FINDER RULE: Target 25-50 DTE (Ideal ~45)
+        
+        # Finder Criteria 2: Date Selection (~45 DTE)
+        entry_date = dates[i]
         target_date = entry_date + timedelta(days=45)
-        future_slice = df.index[i:]
-        valid_exps = future_slice[future_slice >= target_date]
         
-        if valid_exps.empty: continue
-        expiry = valid_exps[0] # Closest to 45 days out
+        # Fast forward to find closest expiry
+        future_indices = np.where(dates >= target_date)[0]
+        if len(future_indices) == 0: continue
+        expiry_idx = future_indices[0]
+        expiry_date = dates[expiry_idx]
         
-        T = (expiry - entry_date).days / 365.0
-        S = close_prices[i]
-        sigma = hvs[i] # Using HV as proxy for IV
+        T_entry = (expiry_date - entry_date).days / 365.0
+        S_entry = close_prices[i]
+        sigma_entry = hvs[i]
         
-        # 3. FINDER RULE: Strike Selection (0.75x Expected Move)
-        expected_move = S * sigma * np.sqrt(T) * 0.75
-        target_short = S - expected_move
-        
-        # Round to nearest 1.0 or 5.0 depending on price (Simple logic)
-        step = 5.0 if S > 200 else 1.0
+        # Finder Criteria 3: Strikes (0.75x Expected Move)
+        exp_move = S_entry * sigma_entry * np.sqrt(T_entry) * 0.75
+        target_short = S_entry - exp_move
+        step = 5.0 if S_entry > 200 else 1.0
         short_k = round(target_short / step) * step
         long_k = short_k - width
         
-        # 4. PRICE THE SPREAD
-        p_short = vectorized_black_scholes(S, short_k, T, r, sigma)
-        p_long = vectorized_black_scholes(S, long_k, T, r, sigma)
-        credit = float(p_short - p_long)
+        # Price Check
+        p_s = vectorized_black_scholes(S_entry, short_k, T_entry, r, sigma_entry)
+        p_l = vectorized_black_scholes(S_entry, long_k, T_entry, r, sigma_entry)
+        credit = float(p_s - p_l)
         
-        # 5. FINDER RULE: Min Credit Check
         if credit < min_credit: continue
         
-        entries.append({
-            'entry_idx': i,
-            'entry_date': entry_date,
-            'expiry_date': expiry,
-            'short_k': short_k,
-            'long_k': long_k,
-            'credit': credit,
-            'margin': width * 100 # Margin is width of spread * 100
-        })
-        
-    return entries
-
-# --- PHASE 2: SIMULATE EXITS (THE GRID SEARCH) ---
-def simulate_strategy(entries, df, exit_settings):
-    # Unpack settings
-    stop_loss_mult = exit_settings['stop_mult'] # e.g. 3.0 for 300%
-    dte_threshold = exit_settings['dte_thresh'] # e.g. 14
-    profit_target = exit_settings['profit_target'] # e.g. 0.50 for 50%
-    
-    results = []
-    r = 0.045
-    
-    close_prices = df['Close'].values
-    hvs = df['HV'].values
-    dates = df.index
-    date_map = {d: i for i, d in enumerate(dates)}
-    
-    for e in entries:
-        start_idx = e['entry_idx']
-        expiry_idx = date_map.get(e['expiry_date'])
-        if not expiry_idx: continue
-        
-        # Get path data
-        path_S = close_prices[start_idx+1 : expiry_idx+1]
-        path_sigma = hvs[start_idx+1 : expiry_idx+1]
-        path_dates = dates[start_idx+1 : expiry_idx+1]
+        # --- PRE-CALCULATE LIFECYCLE ARRAYS ---
+        # We grab the price/vol/date path for the entire trade duration
+        path_slice = slice(i+1, expiry_idx+1)
+        path_S = close_prices[path_slice]
+        path_vol = hvs[path_slice]
+        path_dates = dates[path_slice]
         
         if len(path_S) == 0: continue
         
-        # Calculate Time Remaining for each day in path
-        expiry_ts = e['expiry_date']
-        path_days_left = np.array([(expiry_ts - d).days for d in path_dates])
-        path_T = path_days_left / 365.0
+        # Vectorized Time Remaining
+        path_dtes = np.array([(expiry_date - d).days for d in path_dates])
+        path_T = path_dtes / 365.0
         
-        # Re-price spread daily
-        curr_short = vectorized_black_scholes(path_S, e['short_k'], path_T, r, path_sigma)
-        curr_long = vectorized_black_scholes(path_S, e['long_k'], path_T, r, path_sigma)
-        spread_val = curr_short - curr_long
+        # Vectorized Pricing for the whole path
+        curr_short = vectorized_black_scholes(path_S, short_k, path_T, r, path_vol)
+        curr_long = vectorized_black_scholes(path_S, long_k, path_T, r, path_vol)
+        path_spread_values = curr_short - curr_long
         
-        # Check Triggers
-        # 1. Profit Target (Value drops below X% of credit)
-        # 2. Stop Loss (Value rises above X% of credit)
-        # 3. DTE Limit (Days left <= X)
+        lifecycle_data.append({
+            'credit': credit,
+            'margin': width * 100,
+            'dates': path_dates,       # Array of daily dates
+            'values': path_spread_values, # Array of daily spread prices
+            'dtes': path_dtes          # Array of daily DTEs
+        })
         
-        target_val = e['credit'] * (1 - profit_target)
-        stop_val = e['credit'] * stop_loss_mult
+    return lifecycle_data
+
+# --- PHASE 2: INSTANT GRID SIMULATION ---
+def simulate_grid_fast(all_trades, exit_config):
+    stop_mult = exit_config['stop_mult']
+    dte_thresh = exit_config['dte_thresh']
+    profit_target = exit_config['profit_target']
+    
+    results = []
+    
+    for t in all_trades:
+        credit = t['credit']
         
-        mask_win = spread_val <= target_val
-        mask_loss = spread_val >= stop_val
-        mask_time = path_days_left <= dte_threshold
+        # Thresholds
+        target_val = credit * (1 - profit_target)
+        stop_val = credit * stop_mult
         
-        # Find first trigger
-        triggers = mask_win | mask_loss | mask_time
+        # Boolean Masking (Super Fast)
+        # Find indices where conditions are met
+        # We assume arrays are synced: dates, values, dtes
+        
+        # 1. Profit Trigger
+        wins = t['values'] <= target_val
+        # 2. Stop Trigger
+        losses = t['values'] >= stop_val
+        # 3. Time Trigger
+        times = t['dtes'] <= dte_thresh
+        
+        # Combine triggers
+        triggers = wins | losses | times
         
         if triggers.any():
+            # Find first occurrence
             idx = np.argmax(triggers)
-            exit_date = path_dates[idx]
-            final_val = spread_val[idx]
-            pnl = (e['credit'] - final_val) * 100 # Multiplier
             
-            reason = "Expired"
-            if mask_loss[idx]: reason = "Stop Loss"
-            elif mask_win[idx]: reason = "Profit Target"
-            elif mask_time[idx]: reason = "Time Exit"
+            final_val = t['values'][idx]
+            exit_date = t['dates'][idx]
+            pnl = (credit - final_val) * 100
+            
+            # Determine reason (Order matters: Loss checks usually execute first in real life stops)
+            if losses[idx]: reason = "Stop"
+            elif wins[idx]: reason = "Profit"
+            else: reason = "Time"
             
             results.append({
-                'exit_date': exit_date,
+                'date': exit_date,
                 'pnl': pnl,
-                'margin': e['margin'],
+                'margin': t['margin'],
                 'reason': reason
             })
         else:
-            # Held to expiration
-            final_val = spread_val[-1] # Should be intrinsic
-            pnl = (e['credit'] - final_val) * 100
+            # Expired
+            final_val = t['values'][-1]
+            pnl = (credit - final_val) * 100
             results.append({
-                'exit_date': e['expiry_date'],
+                'date': t['dates'][-1],
                 'pnl': pnl,
-                'margin': e['margin'],
-                'reason': "Expiration"
+                'margin': t['margin'],
+                'reason': "Expired"
             })
             
     return results
@@ -240,175 +226,162 @@ with header_col1:
     try: st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=100)
     except: st.write("DR CAPITAL")
 with header_col2:
-    st.title("Options Lab: Strategy Optimizer")
-    st.caption("Historical simulation of the 'Spread Finder' logic with variable exit criteria.")
+    st.title("Options Lab: Hyper-Speed Optimizer")
+    st.caption("Pre-calculates Option Lifecycles to perform Grid Search instantly.")
 
 st.markdown("---")
 
-# Initialize Data
+# 1. INIT DATA
 if 'hist_data' not in st.session_state:
     with st.spinner("Loading 10 Years of Market Data..."):
         st.session_state.hist_data = get_historical_data()
 
-# --- SIDEBAR CONTROLS ---
+# 2. SIDEBAR
 with st.sidebar:
-    st.header("Simulation Config")
+    st.header("Account Settings")
     start_cap = st.number_input("Starting Capital", 1000, 1000000, 10000)
     monthly_add = st.number_input("Monthly Add", 0, 10000, 500)
     
     st.divider()
-    st.subheader("Finder Criteria (Fixed)")
-    st.markdown("""
-    * **Regime:** SPY > 200 SMA
-    * **Min Credit:** $0.70
-    * **Target:** 0.75x Exp. Move
-    * **Entry:** ~45 DTE
-    """)
+    st.info("Finder Rules Fixed: SPY > 200SMA, Credit > $0.70, 0.75x EM.")
     
-    if st.button("Start Grid Search", type="primary"):
-        st.session_state.running = True
+    if st.button("Run Optimizer", type="primary"):
+        st.session_state.run_opt = True
 
-# --- MAIN LOGIC ---
-if st.session_state.get('running', False):
+# 3. MAIN EXECUTION
+if st.session_state.get('run_opt', False):
     
-    # 1. Pre-calculate Entries (Once per ticker)
-    if 'entries_cache' not in st.session_state:
-        st.info("Phase 1: Generating Valid Entries based on Finder Logic...")
-        entries_cache = {}
-        spy_data = st.session_state.hist_data.get('SPY')
+    # A. PRE-CALCULATION (Math Phase)
+    if 'lifecycle_cache' not in st.session_state:
+        st.info("Phase 1: Pre-calculating Trade Lifecycles (This happens once)...")
+        cache = []
+        spy_df = st.session_state.hist_data.get('SPY')
         
-        for t, df in st.session_state.hist_data.items():
-            if t == 'SPY': continue
-            entries_cache[t] = generate_valid_entries(t, df, spy_data)
-        st.session_state.entries_cache = entries_cache
+        # Parallel Processing for Tickers
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = []
+            for t, df in st.session_state.hist_data.items():
+                if t == 'SPY': continue
+                futures.append(executor.submit(generate_trade_lifecycles, t, df, spy_df))
+            
+            for f in concurrent.futures.as_completed(futures):
+                cache.extend(f.result())
+        
+        st.session_state.lifecycle_cache = cache
+        st.success(f"Phase 1 Complete. Cached {len(cache)} unique trade paths.")
+
+    # B. GRID SEARCH (Logic Phase)
+    st.write("Phase 2: Running Grid Search...")
     
-    # 2. Define Grid
-    # Spread Value: 100% (Scratch), 200% (2x Loss), 300% (3x Loss), 400%
-    stop_mults = [1.0, 2.0, 3.0, 4.0] 
+    # Define Grid
+    stop_mults = [1.0, 2.0, 3.0, 4.0] # 100% to 400%
     dtes = [7, 14, 21]
     targets = [0.25, 0.50, 0.75]
     
     grid = list(itertools.product(stop_mults, dtes, targets))
     total_runs = len(grid)
-    
-    results_summary = []
-    
     prog_bar = st.progress(0)
-    status = st.empty()
     
-    # 3. Run Grid
+    summary_list = []
+    
     for i, (stop, dte, target) in enumerate(grid):
-        status.write(f"Testing: Stop {stop*100:.0f}% | Exit {dte} DTE | Profit {target*100:.0f}%")
         prog_bar.progress((i+1)/total_runs)
         
-        config_pnl = []
-        config_trades = 0
+        # Run Simulation
+        trade_results = simulate_grid_fast(st.session_state.lifecycle_cache, {
+            'stop_mult': stop,
+            'dte_thresh': dte,
+            'profit_target': target
+        })
         
-        # Run all tickers for this config
-        for t, entries in st.session_state.entries_cache.items():
-            trade_results = simulate_strategy(entries, st.session_state.hist_data[t], {
-                'stop_mult': stop,
-                'dte_thresh': dte,
-                'profit_target': target
-            })
-            for tr in trade_results:
-                config_pnl.append(tr)
-                
-        # Aggregate Results
-        if config_pnl:
-            df_res = pd.DataFrame(config_pnl)
-            total_pnl = df_res['pnl'].sum()
-            win_rate = len(df_res[df_res['pnl'] > 0]) / len(df_res) * 100
-            avg_win = df_res[df_res['pnl'] > 0]['pnl'].mean() if len(df_res[df_res['pnl'] > 0]) > 0 else 0
-            avg_loss = df_res[df_res['pnl'] <= 0]['pnl'].mean() if len(df_res[df_res['pnl'] <= 0]) > 0 else 0
-            
-            # Simple Drawdown Calc
-            df_res = df_res.sort_values('exit_date')
-            df_res['cum_pnl'] = df_res['pnl'].cumsum()
-            peak = df_res['cum_pnl'].cummax()
-            dd = (df_res['cum_pnl'] - peak).min()
-            
-            results_summary.append({
-                "Stop Loss": f"{stop*100:.0f}%",
-                "Exit DTE": dte,
-                "Profit Target": f"{target*100:.0f}%",
-                "Total P&L": total_pnl,
-                "Win Rate": win_rate,
-                "Avg Win": avg_win,
-                "Avg Loss": avg_loss,
-                "Max Drawdown": dd,
-                "_raw_df": df_res # Store for detailed view
-            })
-            
-    st.session_state.grid_results = pd.DataFrame(results_summary).sort_values("Total P&L", ascending=False)
-    st.session_state.running = False
+        if not trade_results: continue
+        
+        # Aggregation
+        df_res = pd.DataFrame(trade_results)
+        total_pnl = df_res['pnl'].sum()
+        win_rate = (len(df_res[df_res['pnl'] > 0]) / len(df_res)) * 100
+        avg_win = df_res[df_res['pnl'] > 0]['pnl'].mean() if not df_res[df_res['pnl'] > 0].empty else 0
+        avg_loss = df_res[df_res['pnl'] <= 0]['pnl'].mean() if not df_res[df_res['pnl'] <= 0].empty else 0
+        
+        # Drawdown Calc
+        df_res = df_res.sort_values('date')
+        df_res['cum_pnl'] = df_res['pnl'].cumsum()
+        peak = df_res['cum_pnl'].cummax()
+        dd = (df_res['cum_pnl'] - peak).min()
+        
+        summary_list.append({
+            "Stop Loss": f"{stop*100:.0f}%",
+            "Exit DTE": dte,
+            "Profit Target": f"{target*100:.0f}%",
+            "Total P&L": total_pnl,
+            "Win Rate": win_rate,
+            "Avg Win": avg_win,
+            "Avg Loss": avg_loss,
+            "Max DD": dd,
+            "_raw": df_res # For deep dive
+        })
+        
+    st.session_state.opt_results = pd.DataFrame(summary_list).sort_values("Total P&L", ascending=False)
+    st.session_state.run_opt = False # Reset trigger
     st.rerun()
 
-# --- RESULTS DISPLAY ---
-if 'grid_results' in st.session_state:
-    res_df = st.session_state.grid_results
+# 4. REPORTING
+if 'opt_results' in st.session_state:
+    res_df = st.session_state.opt_results
     
-    st.success("Optimization Complete!")
+    st.success("Analysis Complete.")
     
-    # 1. Leaderboard
-    st.subheader("🏆 Leaderboard: Optimal Exit Settings")
-    display_df = res_df.drop(columns=["_raw_df"])
-    st.dataframe(display_df.style.format({
+    # Leaderboard
+    st.subheader("🏆 Optimization Leaderboard")
+    display_cols = ["Stop Loss", "Exit DTE", "Profit Target", "Total P&L", "Win Rate", "Avg Win", "Avg Loss", "Max DD"]
+    st.dataframe(res_df[display_cols].head(10).style.format({
         "Total P&L": "${:,.0f}",
         "Win Rate": "{:.1f}%",
         "Avg Win": "${:,.0f}",
         "Avg Loss": "${:,.0f}",
-        "Max Drawdown": "${:,.0f}"
+        "Max DD": "${:,.0f}"
     }).background_gradient(subset="Total P&L", cmap="Greens"), use_container_width=True)
     
-    # 2. Detailed Analysis of Winner
+    # Best Strategy Deep Dive
     best = res_df.iloc[0]
-    raw = best['_raw_df']
-    
     st.divider()
-    st.markdown(f"### Deep Dive: The Best Strategy")
-    st.info(f"**Optimal Settings:** Stop Loss at **{best['Stop Loss']}** Credit Value | Exit at **{best['Exit DTE']} DTE** | Take Profit at **{best['Profit Target']}**")
+    st.header("Deep Dive: The Best Config")
     
-    # Equity Curve Construction
-    raw['exit_date'] = pd.to_datetime(raw['exit_date'])
-    daily_pnl = raw.set_index('exit_date')['pnl'].resample('D').sum().fillna(0)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Stop Loss", best['Stop Loss'])
+    c2.metric("Profit Target", best['Profit Target'])
+    c3.metric("Exit DTE", best['Exit DTE'])
     
-    # Reconstruct Account Balance
-    balance = [start_cap]
-    monthly_contrib_counter = 0
-    curr_bal = start_cap
+    # Reconstruct Equity Curve
+    raw = best['_raw']
+    raw['date'] = pd.to_datetime(raw['date'])
+    daily_pnl = raw.set_index('date')['pnl'].resample('D').sum().fillna(0)
     
+    equity = [start_cap]
+    curr = start_cap
     dates = daily_pnl.index
-    equity_curve = []
     
     for d in dates:
-        # Add monthly contrib logic roughly
-        if d.day == 1: curr_bal += monthly_add
-        
-        pnl = daily_pnl.loc[d]
-        curr_bal += pnl
-        equity_curve.append(curr_bal)
-        
-    eq_df = pd.DataFrame({'Date': dates, 'Equity': equity_curve}).set_index('Date')
+        if d.day == 1: curr += monthly_add # Monthly add logic
+        curr += daily_pnl.loc[d]
+        equity.append(curr)
     
-    # Charts
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        st.markdown("**Account Growth (Equity Curve)**")
-        st.line_chart(eq_df, color=SUCCESS_COLOR)
-        
-    with c2:
-        st.markdown("**Monthly Returns**")
-        monthly_ret = daily_pnl.resample('M').sum()
-        # Color bars red/green
-        st.bar_chart(monthly_ret)
-
-    # Metrics Row
-    m1, m2, m3, m4 = st.columns(4)
-    total_years = (dates[-1] - dates[0]).days / 365.25
-    cagr = ((curr_bal / start_cap) ** (1/total_years) - 1) * 100
+    # Fix length mismatch
+    eq_dates = [dates[0] - timedelta(days=1)] + list(dates)
+    eq_df = pd.DataFrame({'Equity': equity}, index=eq_dates)
     
-    m1.metric("Final Balance", f"${curr_bal:,.0f}")
-    m2.metric("CAGR (Annual Return)", f"{cagr:.1f}%")
-    m3.metric("Profit Factor", f"{abs(best['Avg Win']/best['Avg Loss']):.2f}")
-    m4.metric("Avg Monthly Income", f"${monthly_ret.mean():,.0f}")
+    st.subheader("Account Growth")
+    st.line_chart(eq_df, color=SUCCESS_COLOR)
+    
+    # Monthly Stats
+    m_ret = daily_pnl.resample('M').sum()
+    st.subheader("Monthly Returns")
+    st.bar_chart(m_ret)
+    
+    m1, m2, m3 = st.columns(3)
+    years = (dates[-1] - dates[0]).days / 365.25
+    cagr = ((curr / start_cap) ** (1/years) - 1) * 100
+    
+    m1.metric("CAGR", f"{cagr:.1f}%")
+    m2.metric("Avg Monthly P&L", f"${m_ret.mean():,.0f}")
+    m3.metric("Win Rate", f"{best['Win Rate']:.1f}%")
