@@ -70,12 +70,10 @@ def get_basket_data(tickers):
         spy = yf.Ticker("SPY")
         spy_df = spy.history(period="10y")
         if not spy_df.empty:
-            # Force Timezone Naive Datetime Index
             if spy_df.index.tz is not None: 
                 spy_df.index = spy_df.index.tz_localize(None)
-            spy_df.index = pd.to_datetime(spy_df.index) # Double check type
+            spy_df.index = pd.to_datetime(spy_df.index) 
             
-            # Pre-calculate All Moving Averages
             spy_df['MA100'] = spy_df['Close'].rolling(window=100).mean()
             spy_df['MA200'] = spy_df['Close'].rolling(window=200).mean()
             spy_df['MA300'] = spy_df['Close'].rolling(window=300).mean()
@@ -91,7 +89,6 @@ def get_basket_data(tickers):
             df = stock.history(period="10y")
             if df.empty: continue
             
-            # Force Timezone Naive Datetime Index
             if df.index.tz is not None: 
                 df.index = df.index.tz_localize(None)
             df.index = pd.to_datetime(df.index)
@@ -120,15 +117,11 @@ def generate_signals_for_ticker(ticker, df, spy_df,
     date_map = {d: i for i, d in enumerate(dates)}
     
     # --- CRASH GUARD LOGIC ---
-    # Pre-align SPY booleans to match stock dates
-    # We create a boolean mask for the entire timeframe at once
     market_safe = np.full(len(dates), True, dtype=bool) # Default safe
     
     if sma_filter_type != "None" and not spy_df.empty:
         try:
-            # Reindex SPY to match stock dates exactly
             aligned_spy = spy_df.reindex(dates, method='ffill')
-            
             if sma_filter_type == "MA100":
                 market_safe = (aligned_spy['Close'] > aligned_spy['MA100']).fillna(False).values
             elif sma_filter_type == "MA200":
@@ -137,9 +130,7 @@ def generate_signals_for_ticker(ticker, df, spy_df,
                 market_safe = (aligned_spy['Close'] > aligned_spy['MA300']).fillna(False).values
             elif sma_filter_type == "MA400":
                 market_safe = (aligned_spy['Close'] > aligned_spy['MA400']).fillna(False).values
-        except Exception:
-            # If alignment fails (e.g. IPO stock), default to safe or skip
-            pass
+        except Exception: pass
             
     for i, entry_date in enumerate(dates):
         try:
@@ -163,7 +154,7 @@ def generate_signals_for_ticker(ticker, df, spy_df,
             T = (expiry - entry_date).days / 365.0
             
             # 3. STRIKE SELECTION
-            candidates = np.linspace(S * 0.70, S, strike_steps)
+            candidates = np.linspace(S * 0.50, S, strike_steps) # Widened scan range for low deltas
             _, d_arr = vectorized_black_scholes(
                 np.full(strike_steps, S), 
                 candidates, 
@@ -237,11 +228,8 @@ def generate_signals_for_ticker(ticker, df, spy_df,
 
 # --- PORTFOLIO MANAGER ---
 def run_portfolio_simulation(data_map, 
-                           # FINDER PARAMS
                            entry_delta, sma_filter_type,
-                           # EXIT PARAMS
                            exit_dte, stop_loss, profit_target, 
-                           # ACCOUNT PARAMS
                            start_cap, monthly_add, slippage, fees, 
                            progress_bar_slot=None):
     
@@ -375,20 +363,27 @@ with tab_manual:
         prog_bar.empty()
         
         if not df_res.empty:
-            win_rate = len(df_res[df_res['pnl_dollars']>0]) / len(df_res) * 100
-            m1, m2, m3 = st.columns(3)
+            wins = df_res[df_res['pnl_dollars'] > 0]['pnl_dollars']
+            losses = df_res[df_res['pnl_dollars'] <= 0]['pnl_dollars']
+            avg_win = wins.mean() if not wins.empty else 0
+            avg_loss = losses.mean() if not losses.empty else 0
+            win_rate = len(wins) / len(df_res) * 100
+            
+            m1, m2, m3, m4 = st.columns(4)
             m1.metric("Final Balance", f"${final_bal:,.0f}", delta=f"${(final_bal - start_cap):,.0f}")
             m2.metric("Total Trades", len(df_res))
             m3.metric("Win Rate", f"{win_rate:.1f}%")
+            m4.metric("Avg Win / Loss", f"${avg_win:.0f} / ${avg_loss:.0f}")
+            
             st.line_chart(df_res, x='exit_date', y='balance', color=SUCCESS_COLOR)
             st.dataframe(df_res.sort_values('exit_date', ascending=False), use_container_width=True)
         else: st.warning("No trades generated.")
 
 # --- OPTIMIZER ---
 with tab_auto:
-    st.info("Finds optimal Market Filter and Exit Parameters.")
+    st.info("Uses ~600 permutations to find the exact 'Sweet Spot' for finding and exiting trades.")
     
-    scan_depth = st.radio("Scan Mode", ["Standard (Core)", "Deep (Wide)"], horizontal=True)
+    scan_depth = st.radio("Scan Mode", ["Standard (Fast)", "Deep (Full Analysis)"], horizontal=True)
     
     if 'opt_queue' not in st.session_state: st.session_state.opt_queue = []
     if 'opt_results' not in st.session_state: st.session_state.opt_results = []
@@ -400,19 +395,19 @@ with tab_auto:
         stop_opt = st.button("Stop")
 
     if start_opt:
+        # FULL REQUESTED GRID
+        smas = ["MA100", "MA200", "MA300", "MA400", "None"]
+        deltas = [0.15, 0.20, 0.30, 0.40, 0.50]
+        dtes = [21, 14]
+        targets = [75, 50, 25]
+        stops = [200, 300, 400, 500]
+        
         if scan_depth.startswith("Standard"):
-            # TEST GUARDRAILS
-            smas = ["MA200", "None"] # Compare standard guard vs naked
-            deltas = [0.20, 0.30] 
-            dtes = [21, 14]             
-            targets = [50]              
-            stops = [200, 300]          
-        else:
-            # DEEP SCAN
-            smas = ["MA100", "MA200", "MA300", "MA400", "None"]
-            deltas = [0.15, 0.20, 0.30]
-            dtes = [21, 14]      
-            targets = [75, 50]
+            # A lighter version if the user just wants a quick check
+            smas = ["MA200", "None"]
+            deltas = [0.20, 0.30]
+            dtes = [21, 14]
+            targets = [50]
             stops = [200, 300]
         
         grid = list(itertools.product(smas, deltas, dtes, targets, stops))
@@ -439,21 +434,26 @@ with tab_auto:
         curr_run = len(st.session_state.opt_results) + 1
         
         st.write(f"**Processing Config {curr_run}/{total_runs}**")
-        st.caption(f"Filter: {d_sma} | Delta {d_delta} || Exit: {d_dte} DTE | Target {d_target}%")
+        st.caption(f"Filter: {d_sma} | Delta {d_delta} || Exit: {d_dte} DTE | Target {d_target}% | Stop {d_stop}%")
         
         main_bar = st.progress(curr_run / total_runs)
-        inner_bar = st.progress(0, text="Simulating Timeline...")
         
         df_r, bal = run_portfolio_simulation(
             st.session_state.data_map, 
             d_delta, d_sma, 
             d_dte, d_stop, d_target, 
-            start_cap, monthly_add, slippage, fees, inner_bar
+            start_cap, monthly_add, slippage, fees, None
         )
         
         if not df_r.empty:
+            wins = df_r[df_r['pnl_dollars'] > 0]['pnl_dollars']
+            losses = df_r[df_r['pnl_dollars'] <= 0]['pnl_dollars']
+            
+            avg_win = wins.mean() if not wins.empty else 0
+            avg_loss = losses.mean() if not losses.empty else 0
+            
             roi = ((bal - start_cap) / start_cap) * 100
-            wr = len(df_r[df_r['pnl_dollars']>0]) / len(df_r) * 100
+            wr = len(wins) / len(df_r) * 100
             dd_series = (df_r['balance'] - df_r['balance'].cummax()) / df_r['balance'].cummax()
             max_dd = dd_series.min() * 100
             
@@ -466,6 +466,8 @@ with tab_auto:
                 "Final Balance": bal, 
                 "ROI %": roi, 
                 "Win Rate": wr, 
+                "Avg Win": avg_win,
+                "Avg Loss": avg_loss,
                 "Max DD %": max_dd
             })
         st.rerun()
@@ -475,13 +477,40 @@ with tab_auto:
         res_df = pd.DataFrame(st.session_state.opt_results)
         res_df = res_df.sort_values("Final Balance", ascending=False)
         
-        st.subheader("Leaderboard")
+        # --- SUMMARY REPORT GENERATOR ---
         best = res_df.iloc[0]
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Best Balance", f"${best['Final Balance']:,.0f}")
-        c2.metric("Win Rate", f"{best['Win Rate']:.1f}%")
-        c3.metric("Max Drawdown", f"{best['Max DD %']:.1f}%")
         
+        st.divider()
+        st.markdown("### 🏆 Strategy Report: The 'Golden' Configuration")
+        
+        col_sum1, col_sum2 = st.columns(2)
+        with col_sum1:
+            st.markdown(f"""
+            #### 1. How to FIND Trades
+            * **Market Filter:** Only trade when SPY is above the **{best['Crash Guard']}**.
+            * **Aggressiveness:** Sell Puts at **{best['Entry Delta']} Delta**.
+            """)
+        with col_sum2:
+            st.markdown(f"""
+            #### 2. How to EXIT Trades
+            * **Profit Target:** Close early at **{best['Target %']}%** profit.
+            * **Defense:** Cut losses if the premium spikes **{best['Stop %']}%**.
+            * **Time Limit:** If neither hits, exit at **{best['Exit DTE']} Days** to expiration.
+            """)
+        
+        st.info(f"""
+        **Expected Performance:**
+        With these settings, the strategy generated **${best['Final Balance']:,.0f}** in equity.
+        You can expect to win **{best['Win Rate']:.1f}%** of the time, with an average win of **${best['Avg Win']:.0f}** and an average loss of **${best['Avg Loss']:.0f}**.
+        """)
+        st.divider()
+
+        st.subheader("Full Leaderboard")
         st.dataframe(res_df.style.format({
-            "Final Balance": "${:,.0f}", "ROI %": "{:.1f}%", "Win Rate": "{:.1f}%", "Max DD %": "{:.1f}%"
+            "Final Balance": "${:,.0f}", 
+            "ROI %": "{:.1f}%", 
+            "Win Rate": "{:.1f}%", 
+            "Avg Win": "${:,.0f}",
+            "Avg Loss": "${:,.0f}",
+            "Max DD %": "{:.1f}%"
         }).background_gradient(subset="Final Balance", cmap="Greens"), use_container_width=True)
