@@ -64,6 +64,20 @@ def vectorized_black_scholes(S, K, T, r, sigma, type='put'):
 @st.cache_data(ttl=3600*24)
 def get_basket_data(tickers):
     data_map = {}
+    
+    # 1. Fetch SPY for Market Filter
+    try:
+        spy = yf.Ticker("SPY")
+        spy_df = spy.history(period="10y")
+        if not spy_df.empty:
+            if spy_df.index.tz is not None: spy_df.index = spy_df.index.tz_localize(None)
+            spy_df['SMA200'] = spy_df['Close'].rolling(window=200).mean()
+            # Boolean Mask: True if Market is Bullish (Price > SMA)
+            spy_df['Bullish'] = spy_df['Close'] > spy_df['SMA200']
+            data_map['SPY'] = spy_df
+    except: pass
+
+    # 2. Fetch Basket Tickers
     for t in tickers:
         try:
             stock = yf.Ticker(t)
@@ -76,10 +90,14 @@ def get_basket_data(tickers):
             df = df[~df.index.duplicated(keep='first')]
             data_map[t] = df
         except: continue
+        
     return data_map
 
-# --- CORE SIGNAL GENERATOR (OPTIMIZED) ---
-def generate_signals_for_ticker(ticker, df, entry_delta, exit_dte, stop_loss_pct, profit_target_pct, scan_resolution_low=False):
+# --- CORE SIGNAL GENERATOR ---
+def generate_signals_for_ticker(ticker, df, spy_df, 
+                                entry_delta, use_sma_filter, 
+                                exit_dte, stop_loss_pct, profit_target_pct, 
+                                scan_resolution_low=False):
     signals = []
     r = 0.045
     strike_steps = 10 if scan_resolution_low else 30
@@ -89,12 +107,23 @@ def generate_signals_for_ticker(ticker, df, entry_delta, exit_dte, stop_loss_pct
     dates = df.index
     date_map = {d: i for i, d in enumerate(dates)}
     
+    # Pre-align SPY data for fast lookup
+    # We reindex SPY to match the stock's dates, forward filling for safety
+    spy_aligned = spy_df.reindex(dates, method='ffill')
+    is_market_bullish = spy_aligned['Bullish'].values
+    
     for i, entry_date in enumerate(dates):
         try:
+            # --- FINDER CRITERIA: MARKET FILTER ---
+            if use_sma_filter:
+                # If SPY < 200 SMA, Skip Trade
+                if not is_market_bullish[i]:
+                    continue
+
             S = close_prices[i]
             sigma = hvs[i]
             
-            # TASTY MECHANICS: Target 45 DTE Entry
+            # --- FINDER CRITERIA: 45 DTE ENTRY ---
             target_date = entry_date + timedelta(days=45)
             
             future_slice = df.index[i:]
@@ -106,7 +135,7 @@ def generate_signals_for_ticker(ticker, df, entry_delta, exit_dte, stop_loss_pct
             
             T = (expiry - entry_date).days / 365.0
             
-            # STRIKE SELECTION
+            # --- FINDER CRITERIA: DELTA SELECTION ---
             candidates = np.linspace(S * 0.70, S, strike_steps)
             _, d_arr = vectorized_black_scholes(
                 np.full(strike_steps, S), 
@@ -129,7 +158,7 @@ def generate_signals_for_ticker(ticker, df, entry_delta, exit_dte, stop_loss_pct
             
             if credit < 0.10: continue 
 
-            # WALK FORWARD
+            # --- EXIT CRITERIA: WALK FORWARD ---
             path_S = close_prices[i+1 : expiry_idx+1]
             path_sigma = hvs[i+1 : expiry_idx+1]
             path_dates = dates[i+1 : expiry_idx+1]
@@ -180,15 +209,30 @@ def generate_signals_for_ticker(ticker, df, entry_delta, exit_dte, stop_loss_pct
     return signals
 
 # --- PORTFOLIO MANAGER ---
-def run_portfolio_simulation(data_map, entry_delta, exit_dte, stop_loss, profit_target, 
+def run_portfolio_simulation(data_map, 
+                           # FINDER PARAMS
+                           entry_delta, use_sma_filter,
+                           # EXIT PARAMS
+                           exit_dte, stop_loss, profit_target, 
+                           # ACCOUNT PARAMS
                            start_cap, monthly_add, slippage, fees, 
                            progress_bar_slot=None):
     
+    spy_df = data_map.get('SPY', pd.DataFrame())
+    
+    # 1. GENERATE SIGNALS
     all_signals = []
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
         for ticker, df in data_map.items():
-            futures.append(executor.submit(generate_signals_for_ticker, ticker, df, entry_delta, exit_dte, stop_loss, profit_target, True))
+            if ticker == 'SPY': continue
+            futures.append(executor.submit(
+                generate_signals_for_ticker, 
+                ticker, df, spy_df, 
+                entry_delta, use_sma_filter, 
+                exit_dte, stop_loss, profit_target, 
+                True
+            ))
         for f in concurrent.futures.as_completed(futures):
             all_signals.extend(f.result())
             
@@ -207,6 +251,7 @@ def run_portfolio_simulation(data_map, entry_delta, exit_dte, stop_loss, profit_
     days_since_contrib = 0
     total_days = len(timeline)
 
+    # 2. RUN TIMELINE
     for i, today in enumerate(timeline):
         
         if progress_bar_slot and i % (max(1, int(total_days * 0.05))) == 0:
@@ -237,6 +282,8 @@ def run_portfolio_simulation(data_map, entry_delta, exit_dte, stop_loss, profit_
                 still_active.append(t)
         active_trades = still_active
         
+        # Risk Management: Cap allocation to 20% max per trade (prevents total blowup)
+        # Actually, let's just use simple margin check for speed, SMA filter is the real guard
         while signal_idx < total_signals:
             sig = signal_queue[signal_idx]
             if sig['entry_date'] > today: break
@@ -273,22 +320,29 @@ with st.sidebar:
 tab_manual, tab_auto = st.tabs(["Manual Backtest", "Auto-Optimizer"])
 
 if 'data_map' not in st.session_state:
-    with st.spinner("Initializing Market Data (Top 5 Tickers)..."):
+    with st.spinner("Initializing Market Data (Top 5 Tickers + SPY)..."):
         st.session_state.data_map = get_basket_data(BASKET_TICKERS)
 
 # --- MANUAL LAB ---
 with tab_manual:
-    c1, c2, c3, c4 = st.columns(4)
+    st.subheader("Finder Settings")
+    c1, c2 = st.columns(2)
     with c1: e_delta = st.number_input("Entry Delta", 0.1, 0.5, 0.20, 0.05)
-    with c2: stop_loss = st.number_input("Stop Loss %", 100, 500, 300, 50)
-    with c3: profit_target = st.number_input("Profit Target %", 10, 90, 50, 10)
-    with c4: exit_dte = st.number_input("Exit DTE", 0, 30, 21)
+    with c2: use_sma = st.checkbox("Apply 200 SMA Filter (Crash Guard)", value=True)
+    
+    st.subheader("Exit Settings")
+    c3, c4, c5 = st.columns(3)
+    with c3: stop_loss = st.number_input("Stop Loss %", 100, 500, 300, 50)
+    with c4: profit_target = st.number_input("Profit Target %", 10, 90, 50, 10)
+    with c5: exit_dte = st.number_input("Exit DTE", 0, 30, 21)
     
     if st.button("Run Portfolio Simulation", type="primary"):
         prog_bar = st.progress(0, text="Initializing...")
         
         df_res, final_bal = run_portfolio_simulation(
-            st.session_state.data_map, e_delta, exit_dte, stop_loss, profit_target,
+            st.session_state.data_map, 
+            e_delta, use_sma,
+            exit_dte, stop_loss, profit_target,
             start_cap, monthly_add, slippage, fees, prog_bar
         )
         prog_bar.progress(1.0, text="Done!")
@@ -307,9 +361,9 @@ with tab_manual:
 
 # --- OPTIMIZER ---
 with tab_auto:
-    st.info("Finds best parameters based on 'Tastytrade' style mechanics (45 DTE Entry).")
+    st.info("Finding the best parameters for finding AND exiting trades.")
     
-    scan_depth = st.radio("Scan Mode", ["Standard (Core Mechanics)", "Deep (Wide Scan)"], horizontal=True)
+    scan_depth = st.radio("Scan Mode", ["Standard (Core)", "Deep (Wide)"], horizontal=True)
     
     if 'opt_queue' not in st.session_state: st.session_state.opt_queue = []
     if 'opt_results' not in st.session_state: st.session_state.opt_results = []
@@ -322,19 +376,22 @@ with tab_auto:
 
     if start_opt:
         if scan_depth.startswith("Standard"):
-            # TASTYTRADE INSPIRED GRID
-            deltas = [0.16, 0.20, 0.30] # 1SD vs Standard vs Aggressive
-            dtes = [21, 14]             # Manage at 21 days (Tasty standard) or 14 days
-            targets = [50, 25]          # Manage at 50% profit (Tasty standard) or 25%
-            stops = [200, 300]          # 2x or 3x Credit Risk
+            # FINDER PARAMS
+            sma_filters = [True, False] # Test if Crash Guard helps
+            deltas = [0.16, 0.20, 0.30] 
+            
+            # EXIT PARAMS
+            dtes = [21, 14]             
+            targets = [50]              
+            stops = [200, 300]          
         else:
-            # WIDER NET
-            deltas = [0.15, 0.20, 0.25, 0.30]
-            dtes = [30, 21, 14, 7]      # Removed 0 DTE to enforce Swing Trading
+            sma_filters = [True, False]
+            deltas = [0.15, 0.20, 0.30]
+            dtes = [21, 14, 7]      
             targets = [75, 50, 25]
             stops = [100, 200, 300]
         
-        grid = list(itertools.product(deltas, dtes, targets, stops))
+        grid = list(itertools.product(sma_filters, deltas, dtes, targets, stops))
         st.session_state.opt_queue = grid
         st.session_state.opt_results = []
         st.session_state.is_running = True
@@ -351,20 +408,23 @@ with tab_auto:
             st.rerun()
             
         cfg = st.session_state.opt_queue.pop(0)
-        d_delta, d_dte, d_target, d_stop = cfg
+        d_sma, d_delta, d_dte, d_target, d_stop = cfg
         
         remaining = len(st.session_state.opt_queue)
         total_runs = len(st.session_state.opt_results) + remaining + 1
         curr_run = len(st.session_state.opt_results) + 1
         
         st.write(f"**Processing Config {curr_run}/{total_runs}**")
-        st.caption(f"Entry: {d_delta} Delta | Exit: {d_dte} DTE | Target: {d_target}% | Stop: {d_stop}%")
+        filter_text = "200 SMA Filter ON" if d_sma else "No Filter"
+        st.caption(f"Finder: {filter_text} | Delta {d_delta} || Exit: {d_dte} DTE | Target {d_target}% | Stop {d_stop}%")
         
         main_bar = st.progress(curr_run / total_runs)
         inner_bar = st.progress(0, text="Simulating Timeline...")
         
         df_r, bal = run_portfolio_simulation(
-            st.session_state.data_map, d_delta, d_dte, d_stop, d_target,
+            st.session_state.data_map, 
+            d_delta, d_sma, # Finder
+            d_dte, d_stop, d_target, # Exit
             start_cap, monthly_add, slippage, fees, inner_bar
         )
         
@@ -375,8 +435,15 @@ with tab_auto:
             max_dd = dd_series.min() * 100
             
             st.session_state.opt_results.append({
-                "Delta": d_delta, "DTE": d_dte, "Target": d_target, "Stop": d_stop,
-                "Final Balance": bal, "ROI %": roi, "Win Rate": wr, "Max DD %": max_dd
+                "Market Filter": "200 SMA" if d_sma else "None",
+                "Entry Delta": d_delta, 
+                "Exit DTE": d_dte, 
+                "Target %": d_target, 
+                "Stop %": d_stop,
+                "Final Balance": bal, 
+                "ROI %": roi, 
+                "Win Rate": wr, 
+                "Max DD %": max_dd
             })
         st.rerun()
 
@@ -389,8 +456,8 @@ with tab_auto:
         best = res_df.iloc[0]
         c1, c2, c3 = st.columns(3)
         c1.metric("Best Balance", f"${best['Final Balance']:,.0f}")
-        c2.metric("Config", f"Delta {best['Delta']} | {int(best['DTE'])} DTE")
-        c3.metric("Win Rate", f"{best['Win Rate']:.1f}%")
+        c2.metric("Win Rate", f"{best['Win Rate']:.1f}%")
+        c3.metric("Max Drawdown", f"{best['Max DD %']:.1f}%")
         
         st.dataframe(res_df.style.format({
             "Final Balance": "${:,.0f}", "ROI %": "{:.1f}%", "Win Rate": "{:.1f}%", "Max DD %": "{:.1f}%"
