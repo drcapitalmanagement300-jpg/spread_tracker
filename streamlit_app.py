@@ -111,8 +111,9 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     ax.axvline(x=trade_start_date, color=SUCCESS_COLOR, linestyle='--', linewidth=1, label='Start', alpha=0.7)
     ax.axvline(x=expiration_date, color='#B0BEC5', linestyle='--', linewidth=1, label='Exp', alpha=0.7)
     
-    warning_date = expiration_date - pd.Timedelta(days=7)
-    ax.axvline(x=warning_date, color=STOP_LOSS_COLOR, linestyle='--', linewidth=1, label='7 Days Out', alpha=0.8)
+    # Updated warning date to 14 days
+    warning_date = expiration_date - pd.Timedelta(days=14)
+    ax.axvline(x=warning_date, color=STOP_LOSS_COLOR, linestyle='--', linewidth=1, label='14 Days Out', alpha=0.8)
 
     ax.axhline(y=short_strike, color='#FF5252', linestyle='-', linewidth=1.2, label='Strikes')
     ax.axhline(y=long_strike, color='#FF5252', linestyle='-', linewidth=1.2)
@@ -145,7 +146,13 @@ def render_profit_bar(profit_pct):
     if profit_pct is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
     
-    fill_pct = ((profit_pct + 100) / 150) * 100
+    # Scale: -100% (Loss) to +50% (Target)
+    # 300% Loss is off the chart, we clamp for visual logic
+    
+    # Simple Visual: 0% is middle. 
+    # Max Loss (-300%) <---> Target (+50%)
+    
+    fill_pct = ((profit_pct + 100) / 150) * 100 # Rough visual scale
     display_fill = max(0, min(fill_pct, 100))
     
     if profit_pct < 0:
@@ -203,6 +210,8 @@ else:
         max_loss_total = (width - t["credit"]) * 100 * contracts
 
         current_price = cached.get("current_price")
+        
+        # We don't need delta for exit logic anymore, but can keep for reference if needed
         abs_delta = cached.get("abs_delta") 
         if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
@@ -216,35 +225,53 @@ else:
 
         spread_value = cached.get("spread_value_percent")
         profit_pct = cached.get("current_profit_percent")
-        rules = cached.get("rule_violations", {})
+        
+        # --- NEW: Get Crash Guard Status ---
+        spy_crash_alert = cached.get("spy_below_ma", False) 
 
-        # --- Status Logic ---
+        # --- Status Logic (UPDATED) ---
         status_msg = "Status Nominal"
         status_icon = "✅"
         status_color = SUCCESS_COLOR
 
-        if rules.get("other_rules", False):
-            status_icon = "⚠️"
-            status_color = WARNING_COLOR 
-            if abs_delta and abs_delta >= 0.40:
-                status_msg = "Short Delta High"
-            elif spread_value and spread_value >= 150:
-                status_msg = "Spread Value High"
-            elif current_dte <= 7:
-                status_msg = "Expiration Imminent"
+        # 1. CRASH GUARD (Top Priority)
+        if spy_crash_alert:
+            status_icon = "🚨"
+            status_msg = "MARKET CRASH ALERT (SPY < 200 SMA)"
+            status_color = WARNING_COLOR
         
-        if profit_pct and profit_pct >= 50:
+        # 2. PROFIT TARGET
+        elif profit_pct and profit_pct >= 50:
             status_icon = "💰" 
-            status_msg = "TARGET REACHED"
+            status_msg = "TARGET REACHED (50%)"
             status_color = SUCCESS_COLOR
 
-        delta_color = WARNING_COLOR if abs_delta and abs_delta >= 0.40 else SUCCESS_COLOR
-        delta_val = f"{abs_delta:.2f}" if abs_delta is not None else "Pending"
-        spread_color = WARNING_COLOR if spread_value and spread_value >= 150 else SUCCESS_COLOR
+        # 3. STOP LOSS / RISK RULES
+        else:
+            if spread_value and spread_value >= 300: # Updated to 300%
+                status_icon = "⚠️"
+                status_color = WARNING_COLOR
+                status_msg = "Stop Loss Hit (>300%)"
+            elif current_dte <= 14: # Updated to 14 Days
+                status_icon = "⚠️"
+                status_color = WARNING_COLOR
+                status_msg = "Exit Zone (<14 DTE)"
+        
+        # Colors for metrics
+        spread_color = WARNING_COLOR if spread_value and spread_value >= 300 else SUCCESS_COLOR
         spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
-        dte_color = WARNING_COLOR if current_dte <= 7 else SUCCESS_COLOR
+        
+        dte_color = WARNING_COLOR if current_dte <= 14 else SUCCESS_COLOR
+        
         pop_color = SUCCESS_COLOR if pop_percent >= 60 else "#FFA726"
         if pop_percent < 50: pop_color = WARNING_COLOR
+        
+        # SPY Status Color
+        spy_status_text = "BULLISH (>200 SMA)"
+        spy_status_color = SUCCESS_COLOR
+        if spy_crash_alert:
+            spy_status_text = "BEARISH (<200 SMA)"
+            spy_status_color = WARNING_COLOR
 
         cols = st.columns([3, 4])
 
@@ -269,7 +296,6 @@ else:
             price_display = f"${current_price:.2f}" if current_price else "$-.--"
             theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
             
-            # --- Modified Divider Color Here (border-top: 1px solid #444) ---
             left_card_html = (
                 f"<div style='line-height: 1.4; font-size: 15px;'>"
                 f"<div style='display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;'>"
@@ -333,15 +359,12 @@ else:
                         with col_log2:
                             close_notes = st.text_area("Notes", height=70)
                         
-                        # --- UPDATED CLOSE LOGIC ---
                         if st.form_submit_button("Confirm Close"):
                             if drive_service:
-                                # Prepare trade data for logging
                                 trade_data = t.copy()
                                 trade_data['debit_paid'] = debit_paid
                                 trade_data['notes'] = close_notes
                                 
-                                # Use new function: log_completed_trade
                                 if log_completed_trade(drive_service, trade_data):
                                     st.success(f"Logged {t['ticker']}")
                                     st.session_state.trades.pop(i)
@@ -351,7 +374,6 @@ else:
                                 else:
                                     st.error("Drive Error: Could not log to sheet.")
                             else:
-                                # Fallback if no drive service (just delete locally)
                                 st.session_state.trades.pop(i)
                                 del st.session_state[f"close_mode_{i}"]
                                 st.rerun()
@@ -374,9 +396,15 @@ else:
                 f"<div style='font-size: 14px; margin-bottom: 5px; position: relative;'>"
                 # Dollar P/L in top right of card
                 f"<div style='position: absolute; top: 0; right: 0; font-weight: bold; color: {pl_text_color}; font-size: 1.1em;'>{pl_str}</div>"
-                f"<div style='margin-bottom: 4px; padding-right: 70px;'>Short-delta: <strong style='color:{delta_color}'>{delta_val}</strong> <span style='color:gray; font-size:0.85em;'>(Must not exceed: 0.40)</span></div>"
-                f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Must not exceed: 150%)</span></div>"
-                f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Must not be less than: 7 days)</span></div>"
+                
+                # REPLACED Delta with SPY Status
+                f"<div style='margin-bottom: 4px; padding-right: 70px;'>Market Regime: <strong style='color:{spy_status_color}'>{spy_status_text}</strong></div>"
+                
+                # UPDATED Threshold to 300%
+                f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Stop Loss: 300%)</span></div>"
+                
+                # UPDATED Threshold to 14 Days
+                f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Exit: < 14 days)</span></div>"
                 f"</div>"
             )
             st.markdown(right_card_html, unsafe_allow_html=True)
