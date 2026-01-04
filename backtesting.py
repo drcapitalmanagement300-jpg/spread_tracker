@@ -60,7 +60,7 @@ def vectorized_black_scholes(S, K, T, r, sigma, type='put'):
     
     return price, delta
 
-# --- DATA LOADING ---
+# --- DATA LOADING (STRICT DATE FIX) ---
 @st.cache_data(ttl=3600*24)
 def get_basket_data(tickers):
     data_map = {}
@@ -70,10 +70,17 @@ def get_basket_data(tickers):
         spy = yf.Ticker("SPY")
         spy_df = spy.history(period="10y")
         if not spy_df.empty:
-            if spy_df.index.tz is not None: spy_df.index = spy_df.index.tz_localize(None)
-            spy_df['SMA200'] = spy_df['Close'].rolling(window=200).mean()
-            # Boolean Mask: True if Market is Bullish (Price > SMA)
-            spy_df['Bullish'] = spy_df['Close'] > spy_df['SMA200']
+            # Force Timezone Naive Datetime Index
+            if spy_df.index.tz is not None: 
+                spy_df.index = spy_df.index.tz_localize(None)
+            spy_df.index = pd.to_datetime(spy_df.index) # Double check type
+            
+            # Pre-calculate All Moving Averages
+            spy_df['MA100'] = spy_df['Close'].rolling(window=100).mean()
+            spy_df['MA200'] = spy_df['Close'].rolling(window=200).mean()
+            spy_df['MA300'] = spy_df['Close'].rolling(window=300).mean()
+            spy_df['MA400'] = spy_df['Close'].rolling(window=400).mean()
+            
             data_map['SPY'] = spy_df
     except: pass
 
@@ -83,7 +90,12 @@ def get_basket_data(tickers):
             stock = yf.Ticker(t)
             df = stock.history(period="10y")
             if df.empty: continue
-            if df.index.tz is not None: df.index = df.index.tz_localize(None)
+            
+            # Force Timezone Naive Datetime Index
+            if df.index.tz is not None: 
+                df.index = df.index.tz_localize(None)
+            df.index = pd.to_datetime(df.index)
+            
             df['Returns'] = df['Close'].pct_change()
             df['HV'] = df['Returns'].rolling(window=30).std() * np.sqrt(252)
             df = df.dropna()
@@ -95,7 +107,7 @@ def get_basket_data(tickers):
 
 # --- CORE SIGNAL GENERATOR ---
 def generate_signals_for_ticker(ticker, df, spy_df, 
-                                entry_delta, use_sma_filter, 
+                                entry_delta, sma_filter_type, 
                                 exit_dte, stop_loss_pct, profit_target_pct, 
                                 scan_resolution_low=False):
     signals = []
@@ -107,23 +119,38 @@ def generate_signals_for_ticker(ticker, df, spy_df,
     dates = df.index
     date_map = {d: i for i, d in enumerate(dates)}
     
-    # Pre-align SPY data for fast lookup
-    # We reindex SPY to match the stock's dates, forward filling for safety
-    spy_aligned = spy_df.reindex(dates, method='ffill')
-    is_market_bullish = spy_aligned['Bullish'].values
+    # --- CRASH GUARD LOGIC ---
+    # Pre-align SPY booleans to match stock dates
+    # We create a boolean mask for the entire timeframe at once
+    market_safe = np.full(len(dates), True, dtype=bool) # Default safe
     
+    if sma_filter_type != "None" and not spy_df.empty:
+        try:
+            # Reindex SPY to match stock dates exactly
+            aligned_spy = spy_df.reindex(dates, method='ffill')
+            
+            if sma_filter_type == "MA100":
+                market_safe = (aligned_spy['Close'] > aligned_spy['MA100']).fillna(False).values
+            elif sma_filter_type == "MA200":
+                market_safe = (aligned_spy['Close'] > aligned_spy['MA200']).fillna(False).values
+            elif sma_filter_type == "MA300":
+                market_safe = (aligned_spy['Close'] > aligned_spy['MA300']).fillna(False).values
+            elif sma_filter_type == "MA400":
+                market_safe = (aligned_spy['Close'] > aligned_spy['MA400']).fillna(False).values
+        except Exception:
+            # If alignment fails (e.g. IPO stock), default to safe or skip
+            pass
+            
     for i, entry_date in enumerate(dates):
         try:
-            # --- FINDER CRITERIA: MARKET FILTER ---
-            if use_sma_filter:
-                # If SPY < 200 SMA, Skip Trade
-                if not is_market_bullish[i]:
-                    continue
+            # 1. APPLY FILTER
+            if not market_safe[i]:
+                continue
 
             S = close_prices[i]
             sigma = hvs[i]
             
-            # --- FINDER CRITERIA: 45 DTE ENTRY ---
+            # 2. ENTRY (45 DTE)
             target_date = entry_date + timedelta(days=45)
             
             future_slice = df.index[i:]
@@ -135,7 +162,7 @@ def generate_signals_for_ticker(ticker, df, spy_df,
             
             T = (expiry - entry_date).days / 365.0
             
-            # --- FINDER CRITERIA: DELTA SELECTION ---
+            # 3. STRIKE SELECTION
             candidates = np.linspace(S * 0.70, S, strike_steps)
             _, d_arr = vectorized_black_scholes(
                 np.full(strike_steps, S), 
@@ -158,7 +185,7 @@ def generate_signals_for_ticker(ticker, df, spy_df,
             
             if credit < 0.10: continue 
 
-            # --- EXIT CRITERIA: WALK FORWARD ---
+            # 4. EXIT LOGIC
             path_S = close_prices[i+1 : expiry_idx+1]
             path_sigma = hvs[i+1 : expiry_idx+1]
             path_dates = dates[i+1 : expiry_idx+1]
@@ -211,7 +238,7 @@ def generate_signals_for_ticker(ticker, df, spy_df,
 # --- PORTFOLIO MANAGER ---
 def run_portfolio_simulation(data_map, 
                            # FINDER PARAMS
-                           entry_delta, use_sma_filter,
+                           entry_delta, sma_filter_type,
                            # EXIT PARAMS
                            exit_dte, stop_loss, profit_target, 
                            # ACCOUNT PARAMS
@@ -229,7 +256,7 @@ def run_portfolio_simulation(data_map,
             futures.append(executor.submit(
                 generate_signals_for_ticker, 
                 ticker, df, spy_df, 
-                entry_delta, use_sma_filter, 
+                entry_delta, sma_filter_type, 
                 exit_dte, stop_loss, profit_target, 
                 True
             ))
@@ -282,8 +309,6 @@ def run_portfolio_simulation(data_map,
                 still_active.append(t)
         active_trades = still_active
         
-        # Risk Management: Cap allocation to 20% max per trade (prevents total blowup)
-        # Actually, let's just use simple margin check for speed, SMA filter is the real guard
         while signal_idx < total_signals:
             sig = signal_queue[signal_idx]
             if sig['entry_date'] > today: break
@@ -328,7 +353,7 @@ with tab_manual:
     st.subheader("Finder Settings")
     c1, c2 = st.columns(2)
     with c1: e_delta = st.number_input("Entry Delta", 0.1, 0.5, 0.20, 0.05)
-    with c2: use_sma = st.checkbox("Apply 200 SMA Filter (Crash Guard)", value=True)
+    with c2: sma_mode = st.selectbox("Crash Guard Filter", ["None", "MA100", "MA200", "MA300", "MA400"], index=2)
     
     st.subheader("Exit Settings")
     c3, c4, c5 = st.columns(3)
@@ -341,7 +366,7 @@ with tab_manual:
         
         df_res, final_bal = run_portfolio_simulation(
             st.session_state.data_map, 
-            e_delta, use_sma,
+            e_delta, sma_mode,
             exit_dte, stop_loss, profit_target,
             start_cap, monthly_add, slippage, fees, prog_bar
         )
@@ -361,7 +386,7 @@ with tab_manual:
 
 # --- OPTIMIZER ---
 with tab_auto:
-    st.info("Finding the best parameters for finding AND exiting trades.")
+    st.info("Finds optimal Market Filter and Exit Parameters.")
     
     scan_depth = st.radio("Scan Mode", ["Standard (Core)", "Deep (Wide)"], horizontal=True)
     
@@ -376,22 +401,21 @@ with tab_auto:
 
     if start_opt:
         if scan_depth.startswith("Standard"):
-            # FINDER PARAMS
-            sma_filters = [True, False] # Test if Crash Guard helps
-            deltas = [0.16, 0.20, 0.30] 
-            
-            # EXIT PARAMS
+            # TEST GUARDRAILS
+            smas = ["MA200", "None"] # Compare standard guard vs naked
+            deltas = [0.20, 0.30] 
             dtes = [21, 14]             
             targets = [50]              
             stops = [200, 300]          
         else:
-            sma_filters = [True, False]
+            # DEEP SCAN
+            smas = ["MA100", "MA200", "MA300", "MA400", "None"]
             deltas = [0.15, 0.20, 0.30]
-            dtes = [21, 14, 7]      
-            targets = [75, 50, 25]
-            stops = [100, 200, 300]
+            dtes = [21, 14]      
+            targets = [75, 50]
+            stops = [200, 300]
         
-        grid = list(itertools.product(sma_filters, deltas, dtes, targets, stops))
+        grid = list(itertools.product(smas, deltas, dtes, targets, stops))
         st.session_state.opt_queue = grid
         st.session_state.opt_results = []
         st.session_state.is_running = True
@@ -415,16 +439,15 @@ with tab_auto:
         curr_run = len(st.session_state.opt_results) + 1
         
         st.write(f"**Processing Config {curr_run}/{total_runs}**")
-        filter_text = "200 SMA Filter ON" if d_sma else "No Filter"
-        st.caption(f"Finder: {filter_text} | Delta {d_delta} || Exit: {d_dte} DTE | Target {d_target}% | Stop {d_stop}%")
+        st.caption(f"Filter: {d_sma} | Delta {d_delta} || Exit: {d_dte} DTE | Target {d_target}%")
         
         main_bar = st.progress(curr_run / total_runs)
         inner_bar = st.progress(0, text="Simulating Timeline...")
         
         df_r, bal = run_portfolio_simulation(
             st.session_state.data_map, 
-            d_delta, d_sma, # Finder
-            d_dte, d_stop, d_target, # Exit
+            d_delta, d_sma, 
+            d_dte, d_stop, d_target, 
             start_cap, monthly_add, slippage, fees, inner_bar
         )
         
@@ -435,7 +458,7 @@ with tab_auto:
             max_dd = dd_series.min() * 100
             
             st.session_state.opt_results.append({
-                "Market Filter": "200 SMA" if d_sma else "None",
+                "Crash Guard": d_sma,
                 "Entry Delta": d_delta, 
                 "Exit DTE": d_dte, 
                 "Target %": d_target, 
