@@ -267,10 +267,10 @@ else:
         if pop_percent < 50: pop_color = WARNING_COLOR
         
         # SPY Status Color
-        spy_status_text = "BULLISH (>200 SMA)"
+        spy_status_text = "BULLISH (Index above 200 SMA)"
         spy_status_color = SUCCESS_COLOR
         if spy_crash_alert:
-            spy_status_text = "BEARISH (<200 SMA)"
+            spy_status_text = "BEARISH (Index bellow 200 SMA)"
             spy_status_color = WARNING_COLOR
 
         cols = st.columns([3, 4])
@@ -401,10 +401,10 @@ else:
                 f"<div style='margin-bottom: 4px; padding-right: 70px;'>Market Regime: <strong style='color:{spy_status_color}'>{spy_status_text}</strong></div>"
                 
                 # UPDATED Threshold to 300%
-                f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Stop Loss: 300%)</span></div>"
+                f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Must not exceed 300%)</span></div>"
                 
                 # UPDATED Threshold to 14 Days
-                f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Exit: < 14 days)</span></div>"
+                f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Must be greater than 14 days)</span></div>"
                 f"</div>"
             )
             st.markdown(right_card_html, unsafe_allow_html=True)
