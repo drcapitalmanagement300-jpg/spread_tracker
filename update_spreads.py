@@ -307,7 +307,7 @@ def update_trade(trade, data_manager):
     notif_color = 15158332
     short_abs_delta = abs(short_leg_greeks["delta"]) 
 
-    # --- UPDATED NOTIFICATION LOGIC ---
+    # --- UPDATED NOTIFICATION LOGIC (Golden Config) ---
     
     # Priority 1: Market Crash (SPY < 200 SMA)
     if not is_market_safe:
@@ -315,22 +315,21 @@ def update_trade(trade, data_manager):
         notif_msg = "🚨 **CRASH ALERT**: SPY < 200 SMA. Close All Bullish Positions."
         notif_color = 15158332 # Red
 
-    # Priority 2: Profit Target (50%)
-    elif profit_pct is not None and profit_pct >= 50:
-        psych_profit = (profit_pct / 50.0) * 100.0
-        notif_msg = f"✅ **Target Reached**: {psych_profit:.0f}% Profitable"
+    # Priority 2: Profit Target (75%)
+    elif profit_pct is not None and profit_pct >= 75:
+        notif_msg = f"✅ **Target Reached**: {profit_pct:.1f}% Profit (Goal Met)"
         notif_color = 3066993 # Green
 
-    # Priority 3: Stop Loss (300% of Credit)
-    elif spread_val_pct is not None and spread_val_pct >= 300:
+    # Priority 3: Stop Loss (400% of Credit)
+    elif spread_val_pct is not None and spread_val_pct >= 400:
         rule_violations["other_rules"] = True
-        notif_msg = f"⚠️ **Stop Loss Hit**: Spread value at {spread_val_pct:.0f}% of credit."
+        notif_msg = f"⚠️ **Stop Loss Hit**: Spread value at {spread_val_pct:.0f}% of credit (>400%)."
         notif_color = 15105570 # Orange
 
-    # Priority 4: DTE (14 Days)
-    elif dte <= 14:
+    # Priority 4: DTE (21 Days)
+    elif dte <= 21:
         rule_violations["other_rules"] = True
-        notif_msg = f"⚠️ **Exit Zone**: Only {dte} days remaining (<14)."
+        notif_msg = f"⚠️ **Exit Zone**: Only {dte} days remaining (<21)."
         notif_color = 15105570 # Orange
 
     # Send Notification if needed
