@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy as np
+import textwrap  # <--- Added for HTML formatting
 from datetime import datetime
 
 # Import persistence
@@ -73,10 +74,11 @@ if not drive_service:
 # --- HEADER ---
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
+    # FIX: Safety check for image to prevent crashes
     try:
         st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=110)
-    except:
-        st.write("**DR CAPITAL**")
+    except Exception:
+        st.write("🦁 **DR CAPITAL**")
 
 with header_col2:
     st.markdown("""
@@ -120,7 +122,6 @@ try:
     
     # 3. FIX: Handle Year Rollover (The "0d" Bug Fix)
     # If Entry (e.g. Dec 30) > Exit (e.g. Jan 2), it means Entry was last year.
-    # Currently, pandas defaults both to 2026.
     def fix_year_rollover(row):
         if pd.notnull(row['Entry_Date']) and pd.notnull(row['Exit_Date']):
             if row['Entry_Date'] > row['Exit_Date']:
@@ -254,22 +255,25 @@ for i, row in df.iloc[::-1].iterrows():
         pl_display = f"<span style='color:{WARNING_COLOR}'>-${abs(pl):,.2f}</span> <span style='font-size:0.8em; color:#666;'>/ -${max_loss_val:,.0f} Max</span>"
         risk_badge = f"""<div class="risk-badge">🛡️ Saved <strong>${saved_val:,.2f}</strong> by stopping out.</div>"""
 
+    # Fix display for 0 strikes
+    short_strike_display = f"{row['Short_Strike']:.0f}" if row['Short_Strike'] > 0 else "N/A"
+
     # --- HTML RENDER FIX ---
-    # The HTML string is now flush left (no indentation) so Markdown reads it as HTML, not Code
-    card_html = f"""
-<div class="trade-card" style="border-left: 4px solid {border_color}; background-color: {card_bg}; padding: 10px; border-radius: 4px; margin-bottom: 8px;">
-    <div style="display:flex; justify-content:space-between; align-items:center;">
-        <h3 style="margin:0; font-size: 16px; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span></h3>
-        <h3 style="margin:0; font-size: 16px;">{pl_display}</h3>
-    </div>
-    {risk_badge}
-    <div class="trade-details" style="display:flex; gap: 15px; margin-top: 5px; font-size: 12px; color: #aaa;">
-        <span><strong>Strikes:</strong> {row['Short_Strike']:.0f}/{row['Long_Strike']:.0f}</span>
-        <span><strong>Duration:</strong> {int(row['Duration'])}d</span>
-        <span><strong>Efficiency:</strong> ${row['Realized_PL']/row['Duration']:.2f}/day</span>
-    </div>
-</div>
-"""
+    # Using textwrap.dedent removes the indentation so Markdown renders HTML, not Code block.
+    card_html = textwrap.dedent(f"""
+        <div class="trade-card" style="border-left: 4px solid {border_color}; background-color: {card_bg}; padding: 10px; border-radius: 4px; margin-bottom: 8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h3 style="margin:0; font-size: 16px; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span></h3>
+                <h3 style="margin:0; font-size: 16px;">{pl_display}</h3>
+            </div>
+            {risk_badge}
+            <div class="trade-details" style="display:flex; gap: 15px; margin-top: 5px; font-size: 12px; color: #aaa;">
+                <span><strong>Strikes:</strong> {short_strike_display}/{row['Long_Strike']:.0f}</span>
+                <span><strong>Duration:</strong> {int(row['Duration'])}d</span>
+                <span><strong>Efficiency:</strong> ${row['Realized_PL']/row['Duration']:.2f}/day</span>
+            </div>
+        </div>
+    """)
     st.markdown(card_html, unsafe_allow_html=True)
     
     with st.expander(f"Details", expanded=False):
