@@ -111,9 +111,9 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     ax.axvline(x=trade_start_date, color=SUCCESS_COLOR, linestyle='--', linewidth=1, label='Start', alpha=0.7)
     ax.axvline(x=expiration_date, color='#B0BEC5', linestyle='--', linewidth=1, label='Exp', alpha=0.7)
     
-    # Updated warning date to 14 days
-    warning_date = expiration_date - pd.Timedelta(days=14)
-    ax.axvline(x=warning_date, color=STOP_LOSS_COLOR, linestyle='--', linewidth=1, label='14 Days Out', alpha=0.8)
+    # Updated warning date to 21 days (Golden Config)
+    warning_date = expiration_date - pd.Timedelta(days=21)
+    ax.axvline(x=warning_date, color=STOP_LOSS_COLOR, linestyle='--', linewidth=1, label='21 Days Out', alpha=0.8)
 
     ax.axhline(y=short_strike, color='#FF5252', linestyle='-', linewidth=1.2, label='Strikes')
     ax.axhline(y=long_strike, color='#FF5252', linestyle='-', linewidth=1.2)
@@ -146,20 +146,17 @@ def render_profit_bar(profit_pct):
     if profit_pct is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
     
-    # Scale: -100% (Loss) to +50% (Target)
-    # 300% Loss is off the chart, we clamp for visual logic
+    # Scale adjusted for higher profit target (75%)
+    # -100% (Loss) to +75% (Target)
     
-    # Simple Visual: 0% is middle. 
-    # Max Loss (-300%) <---> Target (+50%)
-    
-    fill_pct = ((profit_pct + 100) / 150) * 100 # Rough visual scale
+    fill_pct = ((profit_pct + 100) / 175) * 100 
     display_fill = max(0, min(fill_pct, 100))
     
     if profit_pct < 0:
         bar_color = WARNING_COLOR 
         label_color = WARNING_COLOR
         status_text = f"LOSS: {profit_pct:.1f}%"
-    elif profit_pct < 50:
+    elif profit_pct < 75: # Updated target
         bar_color = SUCCESS_COLOR
         label_color = SUCCESS_COLOR
         status_text = f"PROFIT: {profit_pct:.1f}%"
@@ -176,12 +173,12 @@ def render_profit_bar(profit_pct):
         f'</div>'
         f'<div style="width: 100%; background-color: #333; height: 6px; border-radius: 3px; position: relative; overflow: hidden; border: 1px solid #444;">'
         f'<div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>'
-        f'<div style="position: absolute; left: 66.6%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>'
+        f'<div style="position: absolute; left: 57%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>'
         f'</div>'
         f'<div style="position: relative; height: 15px; font-size: 9px; color: gray; margin-top: 2px;">'
         f'<span style="position: absolute; left: 0;">Max Loss</span>'
-        f'<span style="position: absolute; left: 66.6%; transform: translateX(-50%);">Break Even</span>'
-        f'<span style="position: absolute; right: 0;">TARGET (50%)</span>'
+        f'<span style="position: absolute; left: 57%; transform: translateX(-50%);">Break Even</span>'
+        f'<span style="position: absolute; right: 0;">TARGET (75%)</span>'
         f'</div>'
         f'</div>'
     )
@@ -211,7 +208,6 @@ else:
 
         current_price = cached.get("current_price")
         
-        # We don't need delta for exit logic anymore, but can keep for reference if needed
         abs_delta = cached.get("abs_delta") 
         if abs_delta is None and cached.get("delta"): 
              abs_delta = abs(cached.get("delta"))
@@ -229,7 +225,7 @@ else:
         # --- NEW: Get Crash Guard Status ---
         spy_crash_alert = cached.get("spy_below_ma", False) 
 
-        # --- Status Logic (UPDATED) ---
+        # --- Status Logic (GOLDEN CONFIG UPDATED) ---
         status_msg = "Status Nominal"
         status_icon = "✅"
         status_color = SUCCESS_COLOR
@@ -240,28 +236,28 @@ else:
             status_msg = "MARKET CRASH ALERT (SPY < 200 SMA)"
             status_color = WARNING_COLOR
         
-        # 2. PROFIT TARGET
-        elif profit_pct and profit_pct >= 50:
+        # 2. PROFIT TARGET (75%)
+        elif profit_pct and profit_pct >= 75:
             status_icon = "💰" 
-            status_msg = "TARGET REACHED (50%)"
+            status_msg = "TARGET REACHED (75%)"
             status_color = SUCCESS_COLOR
 
         # 3. STOP LOSS / RISK RULES
         else:
-            if spread_value and spread_value >= 300: # Updated to 300%
+            if spread_value and spread_value >= 400: # Updated to 400%
                 status_icon = "⚠️"
                 status_color = WARNING_COLOR
-                status_msg = "Stop Loss Hit (>300%)"
-            elif current_dte <= 14: # Updated to 14 Days
+                status_msg = "Stop Loss Hit (>400%)"
+            elif current_dte <= 21: # Updated to 21 Days
                 status_icon = "⚠️"
                 status_color = WARNING_COLOR
-                status_msg = "Exit Zone (<14 DTE)"
+                status_msg = "Exit Zone (<21 DTE)"
         
         # Colors for metrics
-        spread_color = WARNING_COLOR if spread_value and spread_value >= 300 else SUCCESS_COLOR
+        spread_color = WARNING_COLOR if spread_value and spread_value >= 400 else SUCCESS_COLOR
         spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
         
-        dte_color = WARNING_COLOR if current_dte <= 14 else SUCCESS_COLOR
+        dte_color = WARNING_COLOR if current_dte <= 21 else SUCCESS_COLOR
         
         pop_color = SUCCESS_COLOR if pop_percent >= 60 else "#FFA726"
         if pop_percent < 50: pop_color = WARNING_COLOR
@@ -400,11 +396,11 @@ else:
                 # REPLACED Delta with SPY Status
                 f"<div style='margin-bottom: 4px; padding-right: 70px;'>Market Regime: <strong style='color:{spy_status_color}'>{spy_status_text}</strong></div>"
                 
-                # UPDATED Threshold to 300%
-                f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Must not exceed 300%)</span></div>"
+                # UPDATED Threshold to 400%
+                f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Must not exceed 400%)</span></div>"
                 
-                # UPDATED Threshold to 14 Days
-                f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Must be greater than 14 days)</span></div>"
+                # UPDATED Threshold to 21 Days
+                f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Must be greater than 21 days)</span></div>"
                 f"</div>"
             )
             st.markdown(right_card_html, unsafe_allow_html=True)
