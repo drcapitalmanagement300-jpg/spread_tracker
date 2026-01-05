@@ -6,6 +6,7 @@ import numpy as np
 from datetime import datetime
 
 # Import persistence
+# Ensure persistence.py is in the same folder
 from persistence import (
     build_drive_service_from_session,
     get_trade_log,
@@ -69,7 +70,7 @@ if not drive_service:
     st.warning("Please sign in on the Dashboard page to view your Journal.")
     st.stop()
 
-# --- HEADER (No White Line) ---
+# --- HEADER ---
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
     try:
@@ -98,26 +99,42 @@ if not raw_logs:
 # Convert to DataFrame
 df = pd.DataFrame(raw_logs)
 
-# Data Cleaning & Feature Engineering
+# --- DATA CLEANING & LOGIC FIXES ---
 try:
-    # 1. Robust Numeric Conversion (Fixes the $0.00 bug)
+    # 1. Robust Numeric Conversion
     cols_to_num = ['Realized_PL', 'Contracts', 'Credit', 'Short_Strike', 'Long_Strike']
     for c in cols_to_num:
         if c in df.columns:
-            # Remove '$' and ',' if present as strings
+            # Clean strings (remove $ and ,)
             if df[c].dtype == object:
                 df[c] = df[c].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
+                # Handle empty strings that become just '' after replace
+                df[c] = df[c].replace('', '0')
+            
+            # Convert to numeric
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
     
-    # Dates
+    # 2. Date Parsing
     df['Exit_Date'] = pd.to_datetime(df['Exit_Date'])
     df['Entry_Date'] = pd.to_datetime(df['Entry_Date'])
     
-    # Duration
+    # 3. FIX: Handle Year Rollover (The "0d" Bug Fix)
+    # If Entry (e.g. Dec 30) > Exit (e.g. Jan 2), it means Entry was last year.
+    # Currently, pandas defaults both to 2026.
+    def fix_year_rollover(row):
+        if pd.notnull(row['Entry_Date']) and pd.notnull(row['Exit_Date']):
+            if row['Entry_Date'] > row['Exit_Date']:
+                return row['Entry_Date'] - pd.DateOffset(years=1)
+        return row['Entry_Date']
+
+    df['Entry_Date'] = df.apply(fix_year_rollover, axis=1)
+
+    # 4. Duration Calculation
     df['Duration'] = (df['Exit_Date'] - df['Entry_Date']).dt.days
-    df['Duration'] = df['Duration'].replace(0, 1) # Prevent div by zero
+    # Ensure min duration is 1 to prevent division by zero in efficiency
+    df['Duration'] = df['Duration'].clip(lower=1)
     
-    # Max Loss & Risk Saved
+    # 5. Max Loss & Risk Saved
     df['Spread_Width'] = (df['Short_Strike'] - df['Long_Strike']).abs()
     df['Max_Loss_Trade'] = (df['Spread_Width'] - df['Credit']) * 100 * df['Contracts']
     
@@ -126,6 +143,7 @@ try:
 
 except Exception as e:
     st.error(f"Data formatting error: {e}")
+    st.write(df.head()) # Show data for debugging
     st.stop()
 
 # --- ANALYTICS ENGINE ---
@@ -236,27 +254,29 @@ for i, row in df.iloc[::-1].iterrows():
         pl_display = f"<span style='color:{WARNING_COLOR}'>-${abs(pl):,.2f}</span> <span style='font-size:0.8em; color:#666;'>/ -${max_loss_val:,.0f} Max</span>"
         risk_badge = f"""<div class="risk-badge">🛡️ Saved <strong>${saved_val:,.2f}</strong> by stopping out.</div>"""
 
-    with st.container():
-        st.markdown(f"""
-        <div class="trade-card" style="border-left: 4px solid {border_color}; background-color: {card_bg}; padding: 10px; border-radius: 4px; margin-bottom: 8px;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h3 style="margin:0; font-size: 16px; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span></h3>
-                <h3 style="margin:0; font-size: 16px;">{pl_display}</h3>
-            </div>
-            {risk_badge}
-            <div class="trade-details" style="display:flex; gap: 15px; margin-top: 5px; font-size: 12px; color: #aaa;">
-                <span><strong>Strikes:</strong> {row['Short_Strike']:.0f}/{row['Long_Strike']:.0f}</span>
-                <span><strong>Duration:</strong> {int(row['Duration'])}d</span>
-                <span><strong>Efficiency:</strong> ${row['Realized_PL']/row['Duration']:.2f}/day</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        with st.expander(f"Details", expanded=False):
-            c_note, c_act = st.columns([4, 1])
-            with c_note:
-                st.write(f"**Notes:** {row.get('Notes', '-')}")
-            with c_act:
-                if st.button("Delete", key=f"del_{i}"):
-                    if delete_log_entry(drive_service, i):
-                        st.rerun()
+    # --- HTML RENDER FIX ---
+    # The HTML string is now flush left (no indentation) so Markdown reads it as HTML, not Code
+    card_html = f"""
+<div class="trade-card" style="border-left: 4px solid {border_color}; background-color: {card_bg}; padding: 10px; border-radius: 4px; margin-bottom: 8px;">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 style="margin:0; font-size: 16px; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span></h3>
+        <h3 style="margin:0; font-size: 16px;">{pl_display}</h3>
+    </div>
+    {risk_badge}
+    <div class="trade-details" style="display:flex; gap: 15px; margin-top: 5px; font-size: 12px; color: #aaa;">
+        <span><strong>Strikes:</strong> {row['Short_Strike']:.0f}/{row['Long_Strike']:.0f}</span>
+        <span><strong>Duration:</strong> {int(row['Duration'])}d</span>
+        <span><strong>Efficiency:</strong> ${row['Realized_PL']/row['Duration']:.2f}/day</span>
+    </div>
+</div>
+"""
+    st.markdown(card_html, unsafe_allow_html=True)
+    
+    with st.expander(f"Details", expanded=False):
+        c_note, c_act = st.columns([4, 1])
+        with c_note:
+            st.write(f"**Notes:** {row.get('Notes', '-')}")
+        with c_act:
+            if st.button("Delete", key=f"del_{i}"):
+                if delete_log_entry(drive_service, i):
+                    st.rerun()
