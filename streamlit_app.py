@@ -247,11 +247,11 @@ else:
             if spread_value and spread_value >= 400: # Updated to 400%
                 status_icon = "⚠️"
                 status_color = WARNING_COLOR
-                status_msg = "Stop Loss Hit (>400%)"
+                status_msg = "Stop Loss Hit (Greater than 400%)"
             elif current_dte <= 21: # Updated to 21 Days
                 status_icon = "⚠️"
                 status_color = WARNING_COLOR
-                status_msg = "Exit Zone (<21 DTE)"
+                status_msg = "Exit Zone (Less than 21 DTE)"
         
         # Colors for metrics
         spread_color = WARNING_COLOR if spread_value and spread_value >= 400 else SUCCESS_COLOR
