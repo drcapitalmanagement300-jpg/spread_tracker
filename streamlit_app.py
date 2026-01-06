@@ -117,7 +117,8 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     ax.axhspan(short_strike, long_strike, color='#FF5252', alpha=0.15)
 
     if crit_price:
-        ax.axhline(y=crit_price, color=STOP_LOSS_COLOR, linestyle=':', linewidth=1.2, label='Stop Loss')
+        # UPDATED LABEL
+        ax.axhline(y=crit_price, color=STOP_LOSS_COLOR, linestyle=':', linewidth=1.2, label='Stop Loss (400%)')
 
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -143,8 +144,6 @@ def render_profit_bar(profit_pct):
     if profit_pct is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
     
-    # Scale adjusted for new profit target (60%)
-    # Range: -100% (Loss) to +60% (Target) = Total range 160
     fill_pct = ((profit_pct + 100) / 160) * 100 
     display_fill = max(0, min(fill_pct, 100))
     
@@ -152,7 +151,7 @@ def render_profit_bar(profit_pct):
         bar_color = WARNING_COLOR 
         label_color = WARNING_COLOR
         status_text = f"LOSS: {profit_pct:.1f}%"
-    elif profit_pct < 60: # UPDATED TARGET
+    elif profit_pct < 60:
         bar_color = SUCCESS_COLOR
         label_color = SUCCESS_COLOR
         status_text = f"PROFIT: {profit_pct:.1f}%"
@@ -194,7 +193,6 @@ else:
         cached = t.get("cached", {})
         current_dte = days_to_expiry(t["expiration"])
         
-        # Ensure contracts is an int
         contracts = int(t.get("contracts", 1)) 
         
         width = abs(t["short_strike"] - t["long_strike"])
@@ -228,7 +226,7 @@ else:
             status_icon = "🚨"
             status_msg = "MARKET CRASH ALERT (SPY < 200 SMA)"
             status_color = WARNING_COLOR
-        elif profit_pct and profit_pct >= 60: # UPDATED TARGET
+        elif profit_pct and profit_pct >= 60:
             status_icon = "💰" 
             status_msg = "TARGET REACHED (60%)"
             status_color = SUCCESS_COLOR
@@ -392,7 +390,8 @@ else:
             st.markdown(render_profit_bar(profit_pct), unsafe_allow_html=True)
             
             price_hist = t.get("cached", {}).get("price_history", [])
-            crit_price = t.get("cached", {}).get("critical_price_040")
+            # NEW KEY: stop_loss_price
+            stop_price = t.get("cached", {}).get("stop_loss_price")
             
             if price_hist:
                 try:
@@ -409,7 +408,7 @@ else:
                         expiration_date=pd.Timestamp(t['expiration']),
                         short_strike=t['short_strike'],
                         long_strike=t['long_strike'],
-                        crit_price=crit_price
+                        crit_price=stop_price
                     )
                     st.pyplot(fig)
                 except Exception:
