@@ -14,14 +14,12 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-# Import Lock Manager
 try:
     from google_drive import DriveLockManager
 except ImportError:
     logging.warning("Could not import DriveLockManager. Running without locks.")
     DriveLockManager = None
 
-# -------------------- Config & Setup --------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -31,7 +29,6 @@ FILE_ID = os.environ.get("GDRIVE_FILE_ID")
 CREDS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-# -------------------- Data Reliability Layer --------------------
 class MarketDataManager:
     def __init__(self):
         self._price_cache = {}    
@@ -45,25 +42,15 @@ class MarketDataManager:
         return self._ticker_objs[ticker]
 
     def get_market_regime(self):
-        """
-        Checks if SPY is above (Safe) or below (Crash) the 200 SMA.
-        Returns: is_safe (bool), current_price, sma_200
-        """
         if self._market_regime_cache:
             return self._market_regime_cache
-
         try:
             spy = self._get_yf_ticker("SPY")
-            # Need 1y data for 200 SMA
             hist = spy.history(period="1y")
-            
             if hist.empty or len(hist) < 200:
-                # Default to safe if data fails, to prevent panic
                 return True, 0.0, 0.0
-            
             current_price = hist['Close'].iloc[-1]
             sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
-            
             is_safe = current_price > sma_200
             self._market_regime_cache = (is_safe, current_price, sma_200)
             return is_safe, current_price, sma_200
@@ -72,29 +59,21 @@ class MarketDataManager:
             return True, 0.0, 0.0
 
     def get_price_data(self, ticker):
-        """
-        Fetches: Current Price, Daily Change %, 30-Day OHLC History
-        """
         if ticker in self._price_cache:
             return self._price_cache[ticker]
-
         ticker_obj = self._get_yf_ticker(ticker)
         price = None
         change_pct = 0.0
         history_list = []
-        
         for attempt in range(3):
             try:
                 hist = ticker_obj.history(period="1mo")
-                
                 if not hist.empty:
                     price = hist['Close'].iloc[-1]
-                    
                     if len(hist) >= 2:
                         prev_close = hist['Close'].iloc[-2]
                         if prev_close > 0:
                             change_pct = ((price - prev_close) / prev_close) * 100
-                    
                     hist_reset = hist.reset_index()
                     history_list = []
                     for _, row in hist_reset.iterrows():
@@ -108,45 +87,35 @@ class MarketDataManager:
                         })
                     break
             except Exception as e:
-                logger.warning(f"[Attempt {attempt+1}/3] Data fetch failed for {ticker}: {e}")
-                time.sleep(2 * (attempt + 1))
-
+                logger.warning(f"Data fetch failed for {ticker}: {e}")
+                time.sleep(2)
         if price:
             self._price_cache[ticker] = (price, change_pct, history_list)
             return price, change_pct, history_list
-        
         return None, None, []
 
     def get_chain(self, ticker, expiration):
         cache_key = (ticker, expiration)
         if cache_key in self._chain_cache:
             return self._chain_cache[cache_key]
-
         ticker_obj = self._get_yf_ticker(ticker)
         chain = None
-
         try:
             if expiration not in ticker_obj.options:
                 return None
-        except Exception:
-            pass 
-
+        except: pass 
         for attempt in range(3):
             try:
                 chain = ticker_obj.option_chain(expiration)
-                if chain is not None:
-                    break
+                if chain is not None: break
             except Exception as e:
-                logger.warning(f"[Attempt {attempt+1}/3] Chain fetch failed for {ticker} {expiration}: {e}")
-                time.sleep(2 * (attempt + 1))
-
+                logger.warning(f"Chain fetch failed for {ticker}: {e}")
+                time.sleep(2)
         if chain:
             self._chain_cache[cache_key] = chain
             return chain
-        
         return None
 
-# -------------------- Discord & Heartbeat --------------------
 def send_discord_alert(ticker, description, color=15158332):
     if not DISCORD_WEBHOOK_URL: return
     payload = {
@@ -159,14 +128,11 @@ def send_discord_alert(ticker, description, color=15158332):
             "footer": {"text": "DR Capital Portfolio System"}
         }]
     }
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, json=payload).raise_for_status()
-    except Exception as e:
-        logger.error(f"Failed to send Discord alert: {e}")
+    try: requests.post(DISCORD_WEBHOOK_URL, json=payload)
+    except: pass
 
 def handle_heartbeat(updated_trades):
     now_utc = datetime.now(timezone.utc)
-    # Heartbeat between 9AM and 10AM ET
     if now_utc.hour in [13, 14]:
         if not updated_trades: return
         last_hb = updated_trades[0].get("last_heartbeat_date")
@@ -174,25 +140,17 @@ def handle_heartbeat(updated_trades):
         if last_hb != today_str:
             total = len(updated_trades)
             breaches = sum(1 for t in updated_trades if t.get("cached", {}).get("rule_violations", {}).get("other_rules"))
-            summary = (
-                f"☀️ **Morning System Check (9:00 AM ET)**\n"
-                f"✅ **Status:** Online\n"
-                f"📊 **Positions:** {total}\n"
-                f"🚨 **Breaches:** {breaches}\n"
-                f"All systems operational."
-            )
+            summary = f"☀️ **Morning Check**\n✅ **Status:** Online\n📊 **Positions:** {total}\n🚨 **Breaches:** {breaches}"
             send_discord_alert("System Heartbeat", summary, color=3447003) 
             updated_trades[0]["last_heartbeat_date"] = today_str
 
-# -------------------- Google Drive --------------------
 def get_drive_service():
     if not CREDS_JSON or not FILE_ID:
-        raise ValueError("Missing Environment Variables for Google Drive.")
+        raise ValueError("Missing Env Vars")
     creds = Credentials.from_service_account_info(json.loads(CREDS_JSON), scopes=SCOPES)
     return build("drive", "v3", credentials=creds)
 
 def download_json(service):
-    logger.info("Downloading JSON from Drive...")
     fh = io.BytesIO()
     request = service.files().get_media(fileId=FILE_ID)
     downloader = MediaIoBaseDownload(fh, request)
@@ -200,19 +158,17 @@ def download_json(service):
     while not done: _, done = downloader.next_chunk()
     fh.seek(0)
     try: return json.load(fh)
-    except json.JSONDecodeError: return []
+    except: return []
 
 def upload_json(service, data):
-    logger.info("Uploading updated JSON to Drive...")
     fh = io.BytesIO(json.dumps(data, indent=2).encode("utf-8"))
     media = MediaIoBaseUpload(fh, mimetype="application/json", resumable=False)
     service.files().update(fileId=FILE_ID, media_body=media).execute()
 
-# -------------------- Math & Financials --------------------
 def days_to_expiry(expiry_str):
     if not expiry_str: return 0
     try: expiry = date.fromisoformat(expiry_str)
-    except ValueError: return 0
+    except: return 0
     return max((expiry - date.today()).days, 0)
 
 def calculate_greeks(option_type, S, K, T, r, sigma):
@@ -234,14 +190,12 @@ def calculate_greeks(option_type, S, K, T, r, sigma):
 def calculate_price_for_delta(target_delta, option_type, K, T, r, sigma):
     if T <= 0 or sigma <= 0 or K <= 0: return None
     try:
-        if option_type == "put":
-            target_prob = 1.0 - abs(target_delta)
-        else:
-            target_prob = abs(target_delta)
+        if option_type == "put": target_prob = 1.0 - abs(target_delta)
+        else: target_prob = abs(target_delta)
         d1 = norm.ppf(target_prob)
         ln_s_k = d1 * sigma * np.sqrt(T) - (r + 0.5 * sigma**2) * T
         return K * np.exp(ln_s_k)
-    except Exception: return None
+    except: return None
 
 def get_option_data(data_manager, ticker, expiration_str, short_strike, long_strike):
     try:
@@ -255,11 +209,8 @@ def get_option_data(data_manager, ticker, expiration_str, short_strike, long_str
                 float(long_row['lastPrice'].values[0]), 
                 float(short_row['impliedVolatility'].values[0]), 
                 float(long_row['impliedVolatility'].values[0]))
-    except Exception as e:
-        logger.error(f"Error processing option data for {ticker}: {e}")
-        return None, None, None, None
+    except: return None, None, None, None
 
-# -------------------- Core Update Logic --------------------
 def update_trade(trade, data_manager):
     ticker = trade.get("ticker")
     expiry_str = trade.get("expiration")
@@ -267,14 +218,12 @@ def update_trade(trade, data_manager):
         short_strike = float(trade.get("short_strike", 0))
         long_strike = float(trade.get("long_strike", 0))
         credit_received = float(trade.get("credit", 0))
+        # PRESERVE CONTRACTS
         contracts = int(trade.get("contracts", 1)) 
     except ValueError: return trade 
 
-    # 1. Fetch Basic Data
     current_price, day_change_pct, price_history = data_manager.get_price_data(ticker)
     short_price, long_price, short_iv, long_iv = get_option_data(data_manager, ticker, expiry_str, short_strike, long_strike)
-    
-    # 2. Fetch Market Regime (Crash Guard)
     is_market_safe, _, _ = data_manager.get_market_regime()
 
     dte = days_to_expiry(expiry_str)
@@ -307,44 +256,32 @@ def update_trade(trade, data_manager):
     notif_color = 15158332
     short_abs_delta = abs(short_leg_greeks["delta"]) 
 
-    # --- UPDATED NOTIFICATION LOGIC (Golden Config) ---
-    
-    # Priority 1: Market Crash (SPY < 200 SMA)
     if not is_market_safe:
         rule_violations["other_rules"] = True
-        notif_msg = "🚨 **CRASH ALERT**: SPY < 200 SMA. Close All Bullish Positions."
-        notif_color = 15158332 # Red
-
-    # Priority 2: Profit Target (75%)
+        notif_msg = "🚨 **CRASH ALERT**: SPY < 200 SMA."
     elif profit_pct is not None and profit_pct >= 75:
-        notif_msg = f"✅ **Target Reached**: {profit_pct:.1f}% Profit (Goal Met)"
-        notif_color = 3066993 # Green
-
-    # Priority 3: Stop Loss (400% of Credit)
+        notif_msg = f"✅ **Target Reached**: {profit_pct:.1f}% Profit"
+        notif_color = 3066993 
     elif spread_val_pct is not None and spread_val_pct >= 400:
         rule_violations["other_rules"] = True
-        notif_msg = f"⚠️ **Stop Loss Hit**: Spread value at {spread_val_pct:.0f}% of credit (>400%)."
-        notif_color = 15105570 # Orange
-
-    # Priority 4: DTE (21 Days)
+        notif_msg = f"⚠️ **Stop Loss Hit**: Spread value > 400%."
+        notif_color = 15105570
     elif dte <= 21:
         rule_violations["other_rules"] = True
-        notif_msg = f"⚠️ **Exit Zone**: Only {dte} days remaining (<21)."
-        notif_color = 15105570 # Orange
+        notif_msg = f"⚠️ **Exit Zone**: {dte} days left."
+        notif_color = 15105570
 
-    # Send Notification if needed
     if notif_msg:
         last_sent_str = trade.get("last_alert_sent")
         should_send = True
         if last_sent_str:
             last_sent = datetime.fromisoformat(last_sent_str).replace(tzinfo=timezone.utc)
-            # Don't spam: Only alert once every 20 hours
             if datetime.now(timezone.utc) - last_sent < timedelta(hours=20): should_send = False
         if should_send:
             send_discord_alert(f"Position Alert: {ticker}", notif_msg, notif_color)
             trade["last_alert_sent"] = datetime.now(timezone.utc).isoformat()
 
-    trade["contracts"] = contracts
+    trade["contracts"] = contracts # Ensure value is saved back
     
     trade["cached"] = {
         "current_price": current_price,
@@ -360,7 +297,7 @@ def update_trade(trade, data_manager):
         "current_profit_percent": profit_pct,
         "spread_value_percent": spread_val_pct,
         "rule_violations": rule_violations,
-        "spy_below_ma": not is_market_safe, # Store this so Dashboard can see it
+        "spy_below_ma": not is_market_safe,
         "last_updated": datetime.now(timezone.utc).isoformat()
     }
 
@@ -392,9 +329,6 @@ def main():
             handle_heartbeat(updated_trades)
             upload_json(service, updated_trades)
             logger.info("Update complete.")
-        except Exception as ie:
-            logger.error(f"Error: {ie}")
-            raise
         finally:
             if lock: lock.release()
     except Exception as e:
