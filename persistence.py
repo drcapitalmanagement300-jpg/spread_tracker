@@ -1,428 +1,324 @@
 import streamlit as st
-from datetime import date, datetime
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from streamlit_autorefresh import st_autorefresh
+import json
+import io
+import os
+from datetime import datetime, date
+from typing import Any, Dict, List, Optional
 
-# ---------------- Persistence ----------------
-from persistence import (
-    ensure_logged_in,
-    build_drive_service_from_session,
-    save_to_drive,
-    load_from_drive,
-    log_completed_trade, 
-    logout,
-)
+# --- CONFIG ---
+DRIVE_FILE_NAME = "credit_spreads.json"
+SPREADSHEET_NAME = "TradeJournal_V2" 
+SHEET_TITLE = "TradeLog"
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets"
+]
+LOCAL_TOKEN_FILE = "google_oauth_token.json"
 
-# ---------------- Page config ----------------
-st.set_page_config(page_title="Dashboard", layout="wide")
+# ----------------------------- AUTHENTICATION -----------------------------
+def _get_oauth_config():
+    if "google_oauth" not in st.secrets:
+        st.error("Missing 'google_oauth' in Streamlit Secrets.")
+        st.stop()
+    return st.secrets["google_oauth"]
 
-# ---------------- Constants ----------------
-SUCCESS_COLOR = "#00C853"
-WARNING_COLOR = "#d32f2f"
-STOP_LOSS_COLOR = "#FFA726"
-WHITE_DIVIDER_HTML = "<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: 10px; margin-bottom: 10px;'>"
+def _get_web_client_config(cfg):
+    return {
+        "web": {
+            "client_id": cfg["client_id"],
+            "client_secret": cfg["client_secret"],
+            "redirect_uris": [cfg["redirect_uri"]],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
 
-# ---------------- UI Refresh ----------------
-st_autorefresh(interval=60_000, key="ui_refresh")
+def _credentials_to_dict(creds):
+    return {
+        'token': creds.token,
+        'refresh_token': creds.refresh_token,
+        'token_uri': creds.token_uri,
+        'client_id': creds.client_id,
+        'client_secret': creds.client_secret,
+        'scopes': creds.scopes
+    }
 
-# ---------------- Auth / Drive ----------------
-ensure_logged_in()
-
-drive_service = None
-try:
-    drive_service = build_drive_service_from_session()
-except Exception:
-    drive_service = None
-
-# ---------------- Header ----------------
-header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
-
-with header_col1:
+def _save_local_token(creds_dict):
     try:
-        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
-    except Exception:
-        st.write("**DR CAPITAL**")
+        with open(LOCAL_TOKEN_FILE, "w") as f:
+            json.dump(creds_dict, f)
+    except: pass
 
-with header_col2:
-    st.markdown("""
-    <div style='text-align: left; padding-top: 10px;'>
-        <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Put Credit Spread Monitor</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-with header_col3:
-    st.write("") 
-    if st.button("Log out"):
-        try:
-            logout()
-        except Exception:
-            st.session_state.pop("credentials", None)
-        st.rerun()
-
-# Solid White Divider
-st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
-
-# ---------------- Helpers ----------------
-def days_to_expiry(expiry) -> int:
-    if isinstance(expiry, str):
-        try:
-            expiry = date.fromisoformat(expiry)
-        except:
-            return 0
-    return max((expiry - date.today()).days, 0)
-
-def format_money(x):
+def _load_local_token():
     try:
-        return f"${float(x):.2f}"
-    except Exception:
-        return "-"
+        if os.path.exists(LOCAL_TOKEN_FILE):
+            with open(LOCAL_TOKEN_FILE, "r") as f:
+                return json.load(f)
+    except: return None
 
-# --- Charting & Progress Bar Functions ---
-def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_strike, crit_price=None):
-    bg_color = '#0E1117'    
-    card_color = '#262730'  
-    text_color = '#FAFAFA'  
-    grid_color = '#444444'  
+def get_creds_from_session():
+    # Deferred Import to prevent circular dependencies
+    from google.oauth2.credentials import Credentials as OAuthCredentials
+    from google.auth.transport.requests import Request
+    import google.auth.exceptions
+
+    # 1. Try Session
+    creds_dict = st.session_state.get("credentials")
     
-    fig, ax = plt.subplots(figsize=(8, 3))
-    fig.patch.set_facecolor(bg_color)
-    ax.set_facecolor(bg_color)
-
-    width = 0.6  
-    width2 = 0.05 
+    # 2. Try Local Cache
+    if not creds_dict:
+        creds_dict = _load_local_token()
+        
+    if not creds_dict: return None
     
-    up = df[df.Close >= df.Open]
-    down = df[df.Close < df.Open]
-    
-    ax.bar(up.Date, up.High - up.Low, bottom=up.Low, color=SUCCESS_COLOR, width=width2, align='center')
-    ax.bar(down.Date, down.High - down.Low, bottom=down.Low, color=WARNING_COLOR, width=width2, align='center')
-    ax.bar(up.Date, up.Close - up.Open, bottom=up.Open, color=SUCCESS_COLOR, width=width, align='center')
-    ax.bar(down.Date, down.Open - down.Close, bottom=down.Close, color=WARNING_COLOR, width=width, align='center')
+    try:
+        creds = OAuthCredentials(**creds_dict)
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                new_dict = _credentials_to_dict(creds)
+                st.session_state["credentials"] = new_dict
+                _save_local_token(new_dict)
+            except google.auth.exceptions.RefreshError:
+                st.warning("Session expired. Please sign in again.")
+                st.session_state.pop("credentials", None)
+                if os.path.exists(LOCAL_TOKEN_FILE):
+                    os.remove(LOCAL_TOKEN_FILE)
+                return None
+        return creds
+    except: return None
 
-    min_date = df['Date'].min()
-    max_date = max(df['Date'].max(), expiration_date) + pd.Timedelta(days=5)
-    ax.set_xlim(left=min_date, right=max_date)
+def ensure_logged_in():
+    # Deferred imports
+    from google_auth_oauthlib.flow import Flow
 
-    ax.axvline(x=trade_start_date, color=SUCCESS_COLOR, linestyle='--', linewidth=1, label='Start', alpha=0.7)
-    ax.axvline(x=expiration_date, color='#B0BEC5', linestyle='--', linewidth=1, label='Exp', alpha=0.7)
-    
-    warning_date = expiration_date - pd.Timedelta(days=21)
-    ax.axvline(x=warning_date, color=STOP_LOSS_COLOR, linestyle='--', linewidth=1, label='21 Days Out', alpha=0.8)
+    if get_creds_from_session(): return
 
-    ax.axhline(y=short_strike, color='#FF5252', linestyle='-', linewidth=1.2, label='Strikes')
-    ax.axhline(y=long_strike, color='#FF5252', linestyle='-', linewidth=1.2)
-    ax.axhspan(short_strike, long_strike, color='#FF5252', alpha=0.15)
+    if "code" in st.query_params:
+        try:
+            cfg = _get_oauth_config()
+            flow = Flow.from_client_config(
+                _get_web_client_config(cfg),
+                scopes=SCOPES,
+                redirect_uri=cfg["redirect_uri"]
+            )
+            flow.fetch_token(code=st.query_params["code"])
+            creds_dict = _credentials_to_dict(flow.credentials)
+            st.session_state["credentials"] = creds_dict
+            _save_local_token(creds_dict)
+            st.query_params.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Login failed: {e}")
+            st.stop()
 
-    if crit_price:
-        ax.axhline(y=crit_price, color=STOP_LOSS_COLOR, linestyle=':', linewidth=1.2, label='Stop Loss')
-
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_color(text_color)
-    ax.spines['left'].set_color(text_color)
-    
-    ax.tick_params(axis='x', colors=text_color, labelsize=8)
-    ax.tick_params(axis='y', colors=text_color, labelsize=8)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
-    ax.grid(True, which='major', linestyle=':', color=grid_color, alpha=0.4)
-    
-    ax.set_title(f"Price Action vs Strikes (Exp: {expiration_date.date()})", 
-                 color=text_color, fontsize=9, fontweight='bold', pad=10)
-    
-    leg = ax.legend(loc='upper left', fontsize=7, facecolor=card_color, edgecolor=grid_color)
-    for text in leg.get_texts():
-        text.set_color(text_color)
-
-    plt.tight_layout()
-    return fig
-
-def render_profit_bar(profit_pct):
-    if profit_pct is None:
-        return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
-    
-    fill_pct = ((profit_pct + 100) / 175) * 100 
-    display_fill = max(0, min(fill_pct, 100))
-    
-    if profit_pct < 0:
-        bar_color = WARNING_COLOR 
-        label_color = WARNING_COLOR
-        status_text = f"LOSS: {profit_pct:.1f}%"
-    elif profit_pct < 75:
-        bar_color = SUCCESS_COLOR
-        label_color = SUCCESS_COLOR
-        status_text = f"PROFIT: {profit_pct:.1f}%"
-    else:
-        bar_color = SUCCESS_COLOR 
-        label_color = SUCCESS_COLOR
-        status_text = f"WIN TARGET: {profit_pct:.1f}%"
-
-    return (
-        f'<div style="margin-bottom: 12px; margin-top: 5px;">'
-        f'<div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">'
-        f'<strong style="color: #ddd;">Target Progress</strong>'
-        f'<span style="color:{label_color}; font-weight:bold;">{status_text}</span>'
-        f'</div>'
-        f'<div style="width: 100%; background-color: #333; height: 6px; border-radius: 3px; position: relative; overflow: hidden; border: 1px solid #444;">'
-        f'<div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>'
-        f'<div style="position: absolute; left: 57%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>'
-        f'</div>'
-        f'<div style="position: relative; height: 15px; font-size: 9px; color: gray; margin-top: 2px;">'
-        f'<span style="position: absolute; left: 0;">Max Loss</span>'
-        f'<span style="position: absolute; left: 57%; transform: translateX(-50%);">Break Even</span>'
-        f'<span style="position: absolute; right: 0;">TARGET (75%)</span>'
-        f'</div>'
-        f'</div>'
+    cfg = _get_oauth_config()
+    flow = Flow.from_client_config(
+        _get_web_client_config(cfg),
+        scopes=SCOPES,
+        redirect_uri=cfg["redirect_uri"]
     )
+    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
+    
+    st.markdown("### 🔒 Security Check")
+    st.warning("Please sign in to access your Cloud Dashboard.")
+    st.markdown(f"[**Sign in with Google**]({auth_url})", unsafe_allow_html=True)
+    st.stop()
 
-# ---------------- Load Drive State ----------------
-if drive_service:
-    st.session_state.trades = load_from_drive(drive_service) or []
-else:
-    if "trades" not in st.session_state:
-        st.session_state.trades = []
+def logout():
+    st.session_state.clear()
+    if os.path.exists(LOCAL_TOKEN_FILE):
+        os.remove(LOCAL_TOKEN_FILE)
+    st.rerun()
 
-# ---------------- Display Trades ----------------
-if not st.session_state.trades:
-    st.info("No active trades. Go to 'Spread Finder' to scan for new opportunities.")
-else:
-    for i, t in enumerate(st.session_state.trades):
-        cached = t.get("cached", {})
-        current_dte = days_to_expiry(t["expiration"])
-        
-        # Ensure contracts is an int
-        contracts = int(t.get("contracts", 1)) 
-        
-        width = abs(t["short_strike"] - t["long_strike"])
-        max_gain_total = t["credit"] * 100 * contracts
-        max_loss_total = (width - t["credit"]) * 100 * contracts
+# ----------------------------- SERVICES -----------------------------
+def build_drive_service_from_session():
+    from googleapiclient.discovery import build
+    creds = get_creds_from_session()
+    if creds: return build('drive', 'v3', credentials=creds)
+    return None
 
-        current_price = cached.get("current_price")
-        
-        abs_delta = cached.get("abs_delta") 
-        if abs_delta is None and cached.get("delta"): 
-             abs_delta = abs(cached.get("delta"))
-        
-        net_theta = cached.get("net_theta", 0.0)
-        daily_theta_dollars = net_theta * 100.0 * contracts 
+def build_sheets_service_from_session():
+    from googleapiclient.discovery import build
+    creds = get_creds_from_session()
+    if creds: return build('sheets', 'v4', credentials=creds)
+    return None
 
-        pop_percent = 0.0
-        if abs_delta is not None:
-            pop_percent = (1.0 - abs_delta) * 100.0
+# ----------------------------- DRIVE HELPERS -----------------------------
+def _find_file_id(service, filename):
+    try:
+        q = f"name = '{filename}' and trashed = false"
+        results = service.files().list(q=q, spaces="drive", fields="files(id, name)").execute()
+        files = results.get('files', [])
+        return files[0]['id'] if files else None
+    except: return None
 
-        spread_value = cached.get("spread_value_percent")
-        profit_pct = cached.get("current_profit_percent")
-        
-        spy_crash_alert = cached.get("spy_below_ma", False) 
+# ----------------------------- JSON STORAGE -----------------------------
+def load_from_drive(service):
+    if not service: return []
+    file_id = _find_file_id(service, DRIVE_FILE_NAME)
+    if not file_id: return []
+    try:
+        data = service.files().get_media(fileId=file_id).execute()
+        return json.loads(data.decode('utf-8'))
+    except: return []
 
-        # --- Status Logic ---
-        status_msg = "Status Nominal"
-        status_icon = "✅"
-        status_color = SUCCESS_COLOR
-
-        if spy_crash_alert:
-            status_icon = "🚨"
-            status_msg = "MARKET CRASH ALERT (SPY < 200 SMA)"
-            status_color = WARNING_COLOR
-        elif profit_pct and profit_pct >= 75:
-            status_icon = "💰" 
-            status_msg = "TARGET REACHED (75%)"
-            status_color = SUCCESS_COLOR
+def save_to_drive(service, trades):
+    from googleapiclient.http import MediaIoBaseUpload
+    if not service: return False
+    clean_trades = []
+    for t in trades:
+        ct = t.copy()
+        for k, v in ct.items():
+            if isinstance(v, (date, datetime)): ct[k] = v.isoformat()
+        clean_trades.append(ct)
+    
+    content = json.dumps(clean_trades, indent=2)
+    media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='application/json')
+    file_id = _find_file_id(service, DRIVE_FILE_NAME)
+    
+    try:
+        if file_id:
+            service.files().update(fileId=file_id, media_body=media).execute()
         else:
-            if spread_value and spread_value >= 400:
-                status_icon = "⚠️"
-                status_color = WARNING_COLOR
-                status_msg = "Stop Loss Hit (>400%)"
-            elif current_dte <= 21:
-                status_icon = "⚠️"
-                status_color = WARNING_COLOR
-                status_msg = "Exit Zone (<21 DTE)"
+            service.files().create(body={'name': DRIVE_FILE_NAME}, media_body=media).execute()
+        return True
+    except: return False
+
+# ----------------------------- SHEETS LOGGING -----------------------------
+def _get_spreadsheet_id(service, sheets_service):
+    # 1. Find existing
+    q = f"name = '{SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet'"
+    files = service.files().list(q=q).execute().get('files', [])
+    if files: return files[0]['id']
+    
+    # 2. Create new if not found
+    ss = sheets_service.spreadsheets().create(body={'properties': {'title': SPREADSHEET_NAME}}).execute()
+    return ss['spreadsheetId']
+
+def _ensure_sheet_exists(sheets_service, spreadsheet_id):
+    meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    sheet_id = None
+    existing_sheets = meta.get('sheets', [])
+    
+    for s in existing_sheets:
+        if s['properties']['title'] == SHEET_TITLE:
+            sheet_id = s['properties']['sheetId']
+            break
+            
+    if sheet_id is None:
+        req = {"addSheet": {"properties": {"title": SHEET_TITLE}}}
+        res = sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": [req]}).execute()
+        sheet_id = res['replies'][0]['addSheet']['properties']['sheetId']
         
-        spread_color = WARNING_COLOR if spread_value and spread_value >= 400 else SUCCESS_COLOR
-        spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
+    headers = [["Ticker", "Entry_Date", "Exit_Date", "Short_Strike", "Long_Strike", "Credit", "Debit", "Contracts", "Realized_PL", "Notes"]]
+    sheets_service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A1",
+        valueInputOption="RAW", body={"values": headers}
+    ).execute()
         
-        dte_color = WARNING_COLOR if current_dte <= 21 else SUCCESS_COLOR
+    return sheet_id
+
+def log_completed_trade(service, trade_data):
+    if not service: return False
+    try:
+        sheets_service = build_sheets_service_from_session()
+        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
+        _ensure_sheet_exists(sheets_service, spreadsheet_id)
+
+        ticker = trade_data.get('ticker', 'UNKNOWN')
+        entry_date = trade_data.get('entry_date', '')
+        exit_date = trade_data.get('exit_date', datetime.now().strftime("%Y-%m-%d"))
         
-        pop_color = SUCCESS_COLOR if pop_percent >= 60 else "#FFA726"
-        if pop_percent < 50: pop_color = WARNING_COLOR
+        # Safe numeric extraction
+        try: s_strike = float(trade_data.get('short_strike', 0))
+        except: s_strike = 0
         
-        spy_status_text = "BULLISH (Index above 200 SMA)"
-        spy_status_color = SUCCESS_COLOR
-        if spy_crash_alert:
-            spy_status_text = "BEARISH (Index bellow 200 SMA)"
-            spy_status_color = WARNING_COLOR
+        try: l_strike = float(trade_data.get('long_strike', 0))
+        except: l_strike = 0
+        
+        try: credit = float(trade_data.get('credit', 0))
+        except: credit = 0.0
+        
+        try: debit = float(trade_data.get('debit_paid', 0))
+        except: debit = 0.0
+        
+        try: contracts = int(trade_data.get('contracts', 1))
+        except: contracts = 1
 
-        cols = st.columns([3, 4])
+        pl = (credit - debit) * 100 * contracts
+        notes = trade_data.get('notes', '')
 
-        # -------- LEFT CARD --------
-        with cols[0]:
-            day_change = cached.get("day_change_percent", 0.0)
-            if day_change is None: day_change = 0.0
-            
-            if day_change > 0:
-                change_color = SUCCESS_COLOR 
-                arrow = "▲"
-                change_str = f"{day_change:.2f}%"
-            elif day_change < 0:
-                change_color = WARNING_COLOR
-                arrow = "▼"
-                change_str = f"{abs(day_change):.2f}%" 
-            else:
-                change_color = "gray"
-                arrow = ""
-                change_str = "0.00%"
+        row = [[
+            ticker,
+            entry_date,
+            exit_date,
+            s_strike,
+            l_strike,
+            credit,
+            debit,
+            contracts,
+            pl,
+            notes
+        ]]
+        
+        sheets_service.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A1",
+            valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={"values": row}
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"Log Error: {e}")
+        return False
 
-            price_display = f"${current_price:.2f}" if current_price else "$-.--"
-            theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
-            
-            left_card_html = (
-                f"<div style='line-height: 1.4; font-size: 15px;'>"
-                f"<div style='display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;'>"
-                    f"<h3 style='margin: 0; display: flex; align-items: center; gap: 8px;'>"
-                    f"{t['ticker']} "
-                    f"<span style='font-size: 0.9em; color: #ddd; font-weight: normal;'>{price_display}</span>"
-                    f"<span style='color: {change_color}; font-size: 0.85em;'>"
-                    f"{arrow} {change_str}"
-                    f"</span>"
-                    f"</h3>"
-                    f"<div style='display:flex; flex-direction:column; align-items:flex-end; gap:2px;'>"
-                        f"<span style='font-size:10px; color:gray; text-transform:uppercase; letter-spacing:0.5px;'>Daily Theta Gain</span>"
-                        f"<div style='background-color: rgba(0, 200, 83, 0.1); border: 1px solid {SUCCESS_COLOR}; color: {SUCCESS_COLOR}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;'>"
-                        f"{theta_text}"
-                        f"</div>"
-                    f"</div>"
-                f"</div>"
-                
-                f"<div style='display: grid; grid-template-columns: 1fr 1fr; gap: 2px;'>"
-                    f"<div><strong>Short:</strong> {t['short_strike']}</div>"
-                    f"<div><strong>Max Gain:</strong> {format_money(max_gain_total)}</div>"
-                    f"<div><strong>Long:</strong> {t['long_strike']}</div>"
-                    f"<div><strong>Max Loss:</strong> {format_money(max_loss_total)}</div>"
-                    f"<div><strong>Width:</strong> {width:.2f}</div>"
-                    f"<div><strong>Contracts:</strong> {contracts}</div>"
-                    f"<div style='grid-column: span 2;'><strong>Exp:</strong> {t['expiration']}</div>"
-                f"</div>"
-                
-                f"<div style='margin-top: 15px; padding-top: 10px; border-top: 1px solid #444; display: flex; justify-content: space-between; align-items: center;'>"
-                    f"<div style='color: {status_color}; font-weight: bold;'>"
-                    f"{status_icon} {status_msg}"
-                    f"</div>"
-                    f"<div style='font-size: 13px; color: gray;'>"
-                    f"P.O.P: <strong style='color: {pop_color};'>{pop_percent:.0f}%</strong>"
-                    f"</div>"
-                f"</div>"
-                f"</div>"
-            )
-            st.markdown(left_card_html, unsafe_allow_html=True)
-            
-            st.write("") 
-            
-            if st.button("Close Position / Log", key=f"btn_close_{i}"):
-                st.session_state[f"close_mode_{i}"] = True
+def get_trade_log(service):
+    if not service: return []
+    try:
+        sheets_service = build_sheets_service_from_session()
+        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
+        
+        res = sheets_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A:Z"
+        ).execute()
+        
+        rows = res.get('values', [])
+        if len(rows) < 2: return []
+        
+        headers = rows[0]
+        data = []
+        for i, r in enumerate(rows[1:]):
+            item = {}
+            for j, h in enumerate(headers):
+                if j < len(r): item[h] = r[j]
+                else: item[h] = ""
+            item['_row_index'] = i + 1 
+            data.append(item)
+        return data
+    except: return []
 
-            if st.session_state.get(f"close_mode_{i}", False):
-                with st.container():
-                    st.markdown("---")
-                    st.info("📉 Closing Position & Logging to Journal")
-                    with st.form(key=f"close_form_{i}"):
-                        col_log1, col_log2 = st.columns(2)
-                        with col_log1:
-                            default_debit = 0.0
-                            current_short = t.get("cached", {}).get("short_option_price")
-                            current_long = t.get("cached", {}).get("long_option_price")
-                            if current_short is not None and current_long is not None:
-                                est_price = current_short - current_long
-                                if est_price > 0:
-                                    default_debit = est_price
-                            
-                            debit_paid = st.number_input("Debit Paid ($)", min_value=0.0, value=float(f"{default_debit:.2f}"), step=0.01)
-                            
-                            # UPDATED: Exit Date Input (defaults to Today)
-                            exit_date_val = st.date_input("Exit Date", value=datetime.now().date())
-                        
-                        with col_log2:
-                            close_notes = st.text_area("Notes", height=70)
-                        
-                        if st.form_submit_button("Confirm Close"):
-                            if drive_service:
-                                # Prepare trade data for the log
-                                trade_data = t.copy()
-                                trade_data['debit_paid'] = debit_paid
-                                trade_data['notes'] = close_notes
-                                # EXPLICITLY pass the input date as string
-                                trade_data['exit_date'] = exit_date_val.isoformat()
-                                # EXPLICITLY pass contracts from the trade object
-                                trade_data['contracts'] = contracts
-                                
-                                if log_completed_trade(drive_service, trade_data):
-                                    st.success(f"Logged {t['ticker']}")
-                                    st.session_state.trades.pop(i)
-                                    save_to_drive(drive_service, st.session_state.trades)
-                                    del st.session_state[f"close_mode_{i}"]
-                                    st.rerun()
-                                else:
-                                    st.error("Drive Error: Could not log to sheet.")
-                            else:
-                                st.session_state.trades.pop(i)
-                                del st.session_state[f"close_mode_{i}"]
-                                st.rerun()
-
-                    if st.button("Cancel", key=f"cancel_{i}"):
-                        del st.session_state[f"close_mode_{i}"]
-                        st.rerun()
-
-        # -------- RIGHT CARD --------
-        with cols[1]:
-            pl_dollars = 0.0
-            if profit_pct is not None:
-                pl_dollars = max_gain_total * (profit_pct / 100.0)
-            
-            pl_text_color = SUCCESS_COLOR if pl_dollars >= 0 else WARNING_COLOR
-            pl_str = f"{'+' if pl_dollars > 0 else ''}${pl_dollars:.2f}"
-
-            right_card_html = (
-                f"<div style='font-size: 14px; margin-bottom: 5px; position: relative;'>"
-                f"<div style='position: absolute; top: 0; right: 0; font-weight: bold; color: {pl_text_color}; font-size: 1.1em;'>{pl_str}</div>"
-                f"<div style='margin-bottom: 4px; padding-right: 70px;'>Market Regime: <strong style='color:{spy_status_color}'>{spy_status_text}</strong></div>"
-                f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Must not exceed 400%)</span></div>"
-                f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Must be greater than 21 days)</span></div>"
-                f"</div>"
-            )
-            st.markdown(right_card_html, unsafe_allow_html=True)
-            
-            st.markdown(render_profit_bar(profit_pct), unsafe_allow_html=True)
-            
-            price_hist = t.get("cached", {}).get("price_history", [])
-            crit_price = t.get("cached", {}).get("critical_price_040")
-            
-            if price_hist:
-                try:
-                    df_chart = pd.DataFrame(price_hist)
-                    df_chart['Date'] = pd.to_datetime(df_chart['date'])
-                    df_chart['Close'] = df_chart['close']
-                    df_chart['Open'] = df_chart['open'] if 'open' in df_chart.columns else df_chart['close']
-                    df_chart['High'] = df_chart['high'] if 'high' in df_chart.columns else df_chart['close']
-                    df_chart['Low'] = df_chart['low'] if 'low' in df_chart.columns else df_chart['close']
-                    
-                    fig = plot_spread_chart(
-                        df=df_chart,
-                        trade_start_date=pd.Timestamp(t['entry_date']),
-                        expiration_date=pd.Timestamp(t['expiration']),
-                        short_strike=t['short_strike'],
-                        long_strike=t['long_strike'],
-                        crit_price=crit_price
-                    )
-                    st.pyplot(fig)
-                except Exception:
-                    st.caption("Chart Error")
-            else:
-                st.caption("Loading chart...")
-
-        st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
-
-# ---------------- External Tools ----------------
-t1, t2 = st.columns(2)
-with t1: st.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
-with t2: st.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
+def delete_log_entry(service, row_index):
+    if not service: return False
+    try:
+        sheets_service = build_sheets_service_from_session()
+        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
+        sheet_id = _ensure_sheet_exists(sheets_service, spreadsheet_id)
+        
+        grid_index = row_index + 1 
+        req = {
+            "deleteDimension": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": grid_index,
+                    "endIndex": grid_index + 1
+                }
+            }
+        }
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": [req]}
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"Delete Error: {e}")
+        return False
