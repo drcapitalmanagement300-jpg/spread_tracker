@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 from datetime import date, datetime
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -23,10 +24,9 @@ SUCCESS_COLOR = "#00C853"
 WARNING_COLOR = "#d32f2f"
 STOP_LOSS_COLOR = "#FFA726"
 WHITE_DIVIDER_HTML = "<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: 10px; margin-bottom: 10px;'>"
+LOGO_FILE = "754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG"
 
 # ---------------- UI Refresh ----------------
-# This automatically re-runs the script every 60 seconds, 
-# which triggers the load_from_drive() below, keeping data in sync.
 st_autorefresh(interval=60_000, key="ui_refresh")
 
 # ---------------- Auth / Drive ----------------
@@ -42,10 +42,11 @@ except Exception:
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 
 with header_col1:
-    try:
-        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
-    except Exception:
-        st.write("**DR CAPITAL**")
+    # SAFE IMAGE LOADING (Crash Fix)
+    if os.path.exists(LOGO_FILE):
+        st.image(LOGO_FILE, width=130)
+    else:
+        st.write("🦁 **DR CAPITAL**")
 
 with header_col2:
     st.markdown("""
@@ -64,7 +65,6 @@ with header_col3:
             st.session_state.pop("credentials", None)
         st.rerun()
 
-# Solid White Divider
 st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # ---------------- Helpers ----------------
@@ -111,7 +111,6 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     ax.axvline(x=trade_start_date, color=SUCCESS_COLOR, linestyle='--', linewidth=1, label='Start', alpha=0.7)
     ax.axvline(x=expiration_date, color='#B0BEC5', linestyle='--', linewidth=1, label='Exp', alpha=0.7)
     
-    # Updated warning date to 21 days (Golden Config)
     warning_date = expiration_date - pd.Timedelta(days=21)
     ax.axvline(x=warning_date, color=STOP_LOSS_COLOR, linestyle='--', linewidth=1, label='21 Days Out', alpha=0.8)
 
@@ -146,17 +145,19 @@ def render_profit_bar(profit_pct):
     if profit_pct is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
     
-    # Scale adjusted for higher profit target (75%)
-    # -100% (Loss) to +75% (Target)
+    # Scale adjusted for new profit target (60%)
+    # -100% (Loss) to +60% (Target)
+    target_pct = 60.0
+    range_span = 100 + target_pct # 160
     
-    fill_pct = ((profit_pct + 100) / 175) * 100 
+    fill_pct = ((profit_pct + 100) / range_span) * 100 
     display_fill = max(0, min(fill_pct, 100))
     
     if profit_pct < 0:
         bar_color = WARNING_COLOR 
         label_color = WARNING_COLOR
         status_text = f"LOSS: {profit_pct:.1f}%"
-    elif profit_pct < 75: # Updated target
+    elif profit_pct < target_pct:
         bar_color = SUCCESS_COLOR
         label_color = SUCCESS_COLOR
         status_text = f"PROFIT: {profit_pct:.1f}%"
@@ -173,18 +174,17 @@ def render_profit_bar(profit_pct):
         f'</div>'
         f'<div style="width: 100%; background-color: #333; height: 6px; border-radius: 3px; position: relative; overflow: hidden; border: 1px solid #444;">'
         f'<div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>'
-        f'<div style="position: absolute; left: 57%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>'
+        f'<div style="position: absolute; left: 62.5%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>'
         f'</div>'
         f'<div style="position: relative; height: 15px; font-size: 9px; color: gray; margin-top: 2px;">'
         f'<span style="position: absolute; left: 0;">Max Loss</span>'
-        f'<span style="position: absolute; left: 57%; transform: translateX(-50%);">Break Even</span>'
-        f'<span style="position: absolute; right: 0;">TARGET (75%)</span>'
+        f'<span style="position: absolute; left: 62.5%; transform: translateX(-50%);">Break Even</span>'
+        f'<span style="position: absolute; right: 0;">TARGET ({target_pct:.0f}%)</span>'
         f'</div>'
         f'</div>'
     )
 
 # ---------------- Load Drive State ----------------
-# Automatically fetch the latest data from Drive every time the app reruns.
 if drive_service:
     st.session_state.trades = load_from_drive(drive_service) or []
 else:
@@ -197,15 +197,11 @@ if not st.session_state.trades:
 else:
     for i, t in enumerate(st.session_state.trades):
         cached = t.get("cached", {})
-
         current_dte = days_to_expiry(t["expiration"])
-        
         contracts = t.get("contracts", 1) 
-        
         width = abs(t["short_strike"] - t["long_strike"])
         max_gain_total = t["credit"] * 100 * contracts
         max_loss_total = (width - t["credit"]) * 100 * contracts
-
         current_price = cached.get("current_price")
         
         abs_delta = cached.get("abs_delta") 
@@ -221,48 +217,37 @@ else:
 
         spread_value = cached.get("spread_value_percent")
         profit_pct = cached.get("current_profit_percent")
-        
-        # --- NEW: Get Crash Guard Status ---
         spy_crash_alert = cached.get("spy_below_ma", False) 
 
-        # --- Status Logic (GOLDEN CONFIG UPDATED) ---
+        # --- Status Logic (UPDATED TO 60%) ---
         status_msg = "Status Nominal"
         status_icon = "✅"
         status_color = SUCCESS_COLOR
 
-        # 1. CRASH GUARD (Top Priority)
         if spy_crash_alert:
             status_icon = "🚨"
             status_msg = "MARKET CRASH ALERT (SPY < 200 SMA)"
             status_color = WARNING_COLOR
-        
-        # 2. PROFIT TARGET (75%)
-        elif profit_pct and profit_pct >= 75:
+        elif profit_pct and profit_pct >= 60: # NEW TARGET
             status_icon = "💰" 
-            status_msg = "TARGET REACHED (75%)"
+            status_msg = "TARGET REACHED (60%)"
             status_color = SUCCESS_COLOR
-
-        # 3. STOP LOSS / RISK RULES
         else:
-            if spread_value and spread_value >= 400: # Updated to 400%
+            if spread_value and spread_value >= 400:
                 status_icon = "⚠️"
                 status_color = WARNING_COLOR
                 status_msg = "Stop Loss Hit (Greater than 400%)"
-            elif current_dte <= 21: # Updated to 21 Days
+            elif current_dte <= 21:
                 status_icon = "⚠️"
                 status_color = WARNING_COLOR
                 status_msg = "Exit Zone (Less than 21 DTE)"
         
-        # Colors for metrics
         spread_color = WARNING_COLOR if spread_value and spread_value >= 400 else SUCCESS_COLOR
         spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
-        
         dte_color = WARNING_COLOR if current_dte <= 21 else SUCCESS_COLOR
-        
         pop_color = SUCCESS_COLOR if pop_percent >= 60 else "#FFA726"
         if pop_percent < 50: pop_color = WARNING_COLOR
         
-        # SPY Status Color
         spy_status_text = "BULLISH (Index above 200 SMA)"
         spy_status_color = SUCCESS_COLOR
         if spy_crash_alert:
@@ -361,9 +346,11 @@ else:
                                 trade_data['debit_paid'] = debit_paid
                                 trade_data['notes'] = close_notes
                                 
+                                # This now handles the Sheets Logging
                                 if log_completed_trade(drive_service, trade_data):
                                     st.success(f"Logged {t['ticker']}")
                                     st.session_state.trades.pop(i)
+                                    # This saves the JSON to Drive (with Lock)
                                     save_to_drive(drive_service, st.session_state.trades)
                                     del st.session_state[f"close_mode_{i}"]
                                     st.rerun()
@@ -380,7 +367,6 @@ else:
 
         # -------- RIGHT CARD --------
         with cols[1]:
-            # Calculate current Dollar P/L for display
             pl_dollars = 0.0
             if profit_pct is not None:
                 pl_dollars = max_gain_total * (profit_pct / 100.0)
@@ -390,24 +376,15 @@ else:
 
             right_card_html = (
                 f"<div style='font-size: 14px; margin-bottom: 5px; position: relative;'>"
-                # Dollar P/L in top right of card
                 f"<div style='position: absolute; top: 0; right: 0; font-weight: bold; color: {pl_text_color}; font-size: 1.1em;'>{pl_str}</div>"
-                
-                # REPLACED Delta with SPY Status
                 f"<div style='margin-bottom: 4px; padding-right: 70px;'>Market Regime: <strong style='color:{spy_status_color}'>{spy_status_text}</strong></div>"
-                
-                # UPDATED Threshold to 400%
                 f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Must not exceed 400%)</span></div>"
-                
-                # UPDATED Threshold to 21 Days
                 f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Must be greater than 21 days)</span></div>"
                 f"</div>"
             )
             st.markdown(right_card_html, unsafe_allow_html=True)
-            
             st.markdown(render_profit_bar(profit_pct), unsafe_allow_html=True)
             
-            # Chart
             price_hist = t.get("cached", {}).get("price_history", [])
             crit_price = t.get("cached", {}).get("critical_price_040")
             
@@ -434,10 +411,9 @@ else:
             else:
                 st.caption("Loading chart...")
 
-        # Solid White Divider between trades
         st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
-# ---------------- External Tools (No Header) ----------------
+# ---------------- External Tools ----------------
 t1, t2 = st.columns(2)
 with t1: st.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
 with t2: st.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
