@@ -93,10 +93,7 @@ df = pd.DataFrame(raw_logs)
 
 # --- DATA CLEANING ---
 try:
-    # 1. Rename to snake_case if reading from Sheets with standardized headers
-    # Headers in persistence.py: Ticker, Entry_Date, Exit_Date, Short_Strike, Long_Strike, Credit, Debit, Contracts, Realized_PL, Notes
-    
-    # 2. Robust Numeric Conversion
+    # 1. Robust Numeric Conversion
     cols_to_num = ['Realized_PL', 'Contracts', 'Credit', 'Short_Strike', 'Long_Strike']
     for c in cols_to_num:
         if c in df.columns:
@@ -105,11 +102,11 @@ try:
                 df[c] = df[c].replace('', '0')
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
     
-    # 3. Date Parsing
+    # 2. Date Parsing
     df['Exit_Date'] = pd.to_datetime(df['Exit_Date'], errors='coerce')
     df['Entry_Date'] = pd.to_datetime(df['Entry_Date'], errors='coerce')
     
-    # 4. FIX: Handle Year Rollover (The "0d" Bug Fix)
+    # 3. FIX: Handle Year Rollover
     def fix_year_rollover(row):
         if pd.notnull(row['Entry_Date']) and pd.notnull(row['Exit_Date']):
             if row['Entry_Date'] > row['Exit_Date']:
@@ -118,11 +115,11 @@ try:
 
     df['Entry_Date'] = df.apply(fix_year_rollover, axis=1)
 
-    # 5. Duration Calculation
+    # 4. Duration Calculation
     df['Duration'] = (df['Exit_Date'] - df['Entry_Date']).dt.days
     df['Duration'] = df['Duration'].clip(lower=1)
     
-    # 6. Max Loss & Risk Saved
+    # 5. Max Loss & Risk Saved
     df['Spread_Width'] = (df['Short_Strike'] - df['Long_Strike']).abs()
     df['Max_Loss_Trade'] = (df['Spread_Width'] - df['Credit']) * 100 * df['Contracts']
     
@@ -235,25 +232,25 @@ for i, row in df.iloc[::-1].iterrows():
 
     short_strike_display = f"{row['Short_Strike']:.0f}" if row['Short_Strike'] > 0 else "N/A"
     
-    # Safe date formatting
     date_str = "Unknown"
     if pd.notnull(row['Exit_Date']):
         date_str = row['Exit_Date'].strftime('%b %d')
 
-    card_html = textwrap.dedent(f"""
-        <div class="trade-card" style="border-left: 4px solid {border_color}; background-color: {card_bg}; padding: 10px; border-radius: 4px; margin-bottom: 8px;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h3 style="margin:0; font-size: 16px; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{date_str}</span></h3>
-                <h3 style="margin:0; font-size: 16px;">{pl_display}</h3>
-            </div>
-            {risk_badge}
-            <div class="trade-details" style="display:flex; gap: 15px; margin-top: 5px; font-size: 12px; color: #aaa;">
-                <span><strong>Strikes:</strong> {short_strike_display}/{row['Long_Strike']:.0f}</span>
-                <span><strong>Duration:</strong> {int(row['Duration'])}d</span>
-                <span><strong>Contracts:</strong> {int(row['Contracts'])}</span>
-            </div>
-        </div>
-    """)
+    # FLAT HTML STRUCTURE - NO INDENTATION
+    card_html = f"""
+<div class="trade-card" style="border-left: 4px solid {border_color}; background-color: {card_bg}; padding: 10px; border-radius: 4px; margin-bottom: 8px;">
+<div style="display:flex; justify-content:space-between; align-items:center;">
+<h3 style="margin:0; font-size: 16px; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{date_str}</span></h3>
+<h3 style="margin:0; font-size: 16px;">{pl_display}</h3>
+</div>
+{risk_badge}
+<div class="trade-details" style="display:flex; gap: 15px; margin-top: 5px; font-size: 12px; color: #aaa;">
+<span><strong>Strikes:</strong> {short_strike_display}/{row['Long_Strike']:.0f}</span>
+<span><strong>Duration:</strong> {int(row['Duration'])}d</span>
+<span><strong>Contracts:</strong> {int(row['Contracts'])}</span>
+</div>
+</div>
+"""
     st.markdown(card_html, unsafe_allow_html=True)
     
     with st.expander(f"Details", expanded=False):
@@ -262,5 +259,5 @@ for i, row in df.iloc[::-1].iterrows():
             st.write(f"**Notes:** {row.get('Notes', '-')}")
         with c_act:
             if st.button("Delete", key=f"del_{i}"):
-                if delete_log_entry(drive_service, row['_row_index'] - 1): # API adjustment
+                if delete_log_entry(drive_service, row['_row_index'] - 1): 
                     st.rerun()
