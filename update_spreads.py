@@ -315,8 +315,8 @@ def update_trade(trade, data_manager):
         notif_msg = "🚨 **CRASH ALERT**: SPY < 200 SMA. Close All Bullish Positions."
         notif_color = 15158332 # Red
 
-    # Priority 2: Profit Target (UPDATED TO 60%)
-    elif profit_pct is not None and profit_pct >= 60:
+    # Priority 2: Profit Target (75%)
+    elif profit_pct is not None and profit_pct >= 75:
         notif_msg = f"✅ **Target Reached**: {profit_pct:.1f}% Profit (Goal Met)"
         notif_color = 3066993 # Green
 
