@@ -3,11 +3,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy as np
-import textwrap  # <--- Added for HTML formatting
+import textwrap 
 from datetime import datetime
 
 # Import persistence
-# Ensure persistence.py is in the same folder
 from persistence import (
     build_drive_service_from_session,
     get_trade_log,
@@ -24,9 +23,9 @@ WARNING_COLOR = "#d32f2f"
 NEUTRAL_COLOR = "#757575"
 BG_COLOR = '#0E1117'
 TEXT_COLOR = '#FAFAFA'
-SAVED_COLOR = '#FFA726' # Orange for "Risk Saved"
+SAVED_COLOR = '#FFA726' 
 
-# Configure Matplotlib for Dark Theme
+# Configure Matplotlib
 plt.rcParams.update({
     "figure.facecolor": BG_COLOR,
     "axes.facecolor": BG_COLOR,
@@ -40,22 +39,14 @@ plt.rcParams.update({
     "grid.alpha": 0.3
 })
 
-# --- COMPACT CSS ---
 st.markdown("""
 <style>
-    /* Reduce top padding for main container */
     .block-container { padding-top: 2rem; padding-bottom: 2rem; }
-    
-    /* Compact Metrics */
     div[data-testid="stMetricValue"] { font-size: 20px !important; }
     div[data-testid="stMetricLabel"] { font-size: 12px !important; }
-    
-    /* Compact Cards */
     .trade-card { padding: 10px 15px !important; margin-bottom: 8px !important; }
     .trade-card h3 { font-size: 16px !important; }
     .trade-details { font-size: 12px !important; margin-top: 5px !important; }
-    
-    /* Risk Badge */
     .risk-badge { font-size: 11px; margin-top: 4px; color: #FFA726; font-weight: 500; }
 </style>
 """, unsafe_allow_html=True)
@@ -74,7 +65,6 @@ if not drive_service:
 # --- HEADER ---
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
-    # FIX: Safety check for image to prevent crashes
     try:
         st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=110)
     except Exception:
@@ -101,27 +91,25 @@ if not raw_logs:
 # Convert to DataFrame
 df = pd.DataFrame(raw_logs)
 
-# --- DATA CLEANING & LOGIC FIXES ---
+# --- DATA CLEANING ---
 try:
-    # 1. Robust Numeric Conversion
+    # 1. Rename to snake_case if reading from Sheets with standardized headers
+    # Headers in persistence.py: Ticker, Entry_Date, Exit_Date, Short_Strike, Long_Strike, Credit, Debit, Contracts, Realized_PL, Notes
+    
+    # 2. Robust Numeric Conversion
     cols_to_num = ['Realized_PL', 'Contracts', 'Credit', 'Short_Strike', 'Long_Strike']
     for c in cols_to_num:
         if c in df.columns:
-            # Clean strings (remove $ and ,)
             if df[c].dtype == object:
                 df[c] = df[c].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
-                # Handle empty strings that become just '' after replace
                 df[c] = df[c].replace('', '0')
-            
-            # Convert to numeric
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
     
-    # 2. Date Parsing
-    df['Exit_Date'] = pd.to_datetime(df['Exit_Date'])
-    df['Entry_Date'] = pd.to_datetime(df['Entry_Date'])
+    # 3. Date Parsing
+    df['Exit_Date'] = pd.to_datetime(df['Exit_Date'], errors='coerce')
+    df['Entry_Date'] = pd.to_datetime(df['Entry_Date'], errors='coerce')
     
-    # 3. FIX: Handle Year Rollover (The "0d" Bug Fix)
-    # If Entry (e.g. Dec 30) > Exit (e.g. Jan 2), it means Entry was last year.
+    # 4. FIX: Handle Year Rollover (The "0d" Bug Fix)
     def fix_year_rollover(row):
         if pd.notnull(row['Entry_Date']) and pd.notnull(row['Exit_Date']):
             if row['Entry_Date'] > row['Exit_Date']:
@@ -130,21 +118,20 @@ try:
 
     df['Entry_Date'] = df.apply(fix_year_rollover, axis=1)
 
-    # 4. Duration Calculation
+    # 5. Duration Calculation
     df['Duration'] = (df['Exit_Date'] - df['Entry_Date']).dt.days
-    # Ensure min duration is 1 to prevent division by zero in efficiency
     df['Duration'] = df['Duration'].clip(lower=1)
     
-    # 5. Max Loss & Risk Saved
+    # 6. Max Loss & Risk Saved
     df['Spread_Width'] = (df['Short_Strike'] - df['Long_Strike']).abs()
     df['Max_Loss_Trade'] = (df['Spread_Width'] - df['Credit']) * 100 * df['Contracts']
     
-    # Risk Saved Logic: Only applies to NEGATIVE P&L
+    # Risk Saved Logic
     df['Risk_Saved'] = df.apply(lambda x: (x['Max_Loss_Trade'] - abs(x['Realized_PL'])) if x['Realized_PL'] < 0 else 0, axis=1)
 
 except Exception as e:
     st.error(f"Data formatting error: {e}")
-    st.write(df.head()) # Show data for debugging
+    st.write(df.head()) 
     st.stop()
 
 # --- ANALYTICS ENGINE ---
@@ -181,22 +168,19 @@ m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Net P&L", f"${total_pl:,.0f}", delta_color="normal")
 m2.metric("Win Rate", f"{win_rate:.0f}%", f"{len(wins)}W - {len(losses)}L")
 m3.metric("Profit Factor", f"{profit_factor:.2f}")
-m4.metric("Risk Averted", f"${total_risk_saved:,.0f}", delta_color="normal", help="Total capital saved by closing losers before Max Loss.")
+m4.metric("Risk Averted", f"${total_risk_saved:,.0f}", delta_color="normal")
 m5.metric("Avg Duration", f"{df['Duration'].mean():.0f} Days")
 
 st.markdown(f"<div style='background-color: rgba(255,255,255,0.05); padding: 8px 15px; border-radius: 5px; border-left: 3px solid {eff_color}; font-size: 14px; margin-bottom: 20px;'>{eff_insight}</div>", unsafe_allow_html=True)
 
-# --- CHARTS (Matplotlib) ---
+# --- CHARTS ---
 c1, c2 = st.columns(2)
-
 df_sorted = df.sort_values(by="Exit_Date")
 
-# 1. EQUITY CURVE
 with c1:
     st.markdown("**💰 Equity Curve**")
     if not df.empty:
         df_sorted['Cumulative_PL'] = df_sorted['Realized_PL'].cumsum()
-        
         fig, ax = plt.subplots(figsize=(6, 2.5))
         ax.plot(df_sorted['Exit_Date'], df_sorted['Cumulative_PL'], color=SUCCESS_COLOR, linewidth=2)
         ax.fill_between(df_sorted['Exit_Date'], df_sorted['Cumulative_PL'], color=SUCCESS_COLOR, alpha=0.1)
@@ -207,14 +191,11 @@ with c1:
     else:
         st.caption("No data.")
 
-# 2. RISK AVERTED CURVE
 with c2:
-    st.markdown(f"**🛡️ Cumulative Risk Averted** <span style='font-size:0.8em; color:{SAVED_COLOR}'> (The 'Smart Exit' Chart)</span>", unsafe_allow_html=True)
+    st.markdown(f"**🛡️ Cumulative Risk Averted** <span style='font-size:0.8em; color:{SAVED_COLOR}'> (Smart Exit)</span>", unsafe_allow_html=True)
     if not df.empty:
         df_sorted['Cumulative_Saved'] = df_sorted['Risk_Saved'].cumsum()
-        
         fig2, ax2 = plt.subplots(figsize=(6, 2.5))
-        
         ax2.plot(df_sorted['Exit_Date'], df_sorted['Cumulative_Saved'], color=SAVED_COLOR, linewidth=2, linestyle='--')
         ax2.fill_between(df_sorted['Exit_Date'], df_sorted['Cumulative_Saved'], color=SAVED_COLOR, alpha=0.1)
         ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
@@ -226,17 +207,14 @@ with c2:
 
 st.markdown("---")
 
-# --- THE GALLERY (Trade Cards) ---
+# --- THE GALLERY ---
 st.subheader("Trade History")
 
-# Reverse order to show newest first
 for i, row in df.iloc[::-1].iterrows():
-    
     pl = row['Realized_PL']
     is_win = pl > 0
     is_scratch = (pl == 0)
     
-    # Compact Colors
     if is_win:
         border_color = SUCCESS_COLOR
         card_bg = "rgba(0, 200, 83, 0.05)"
@@ -255,22 +233,24 @@ for i, row in df.iloc[::-1].iterrows():
         pl_display = f"<span style='color:{WARNING_COLOR}'>-${abs(pl):,.2f}</span> <span style='font-size:0.8em; color:#666;'>/ -${max_loss_val:,.0f} Max</span>"
         risk_badge = f"""<div class="risk-badge">🛡️ Saved <strong>${saved_val:,.2f}</strong> by stopping out.</div>"""
 
-    # Fix display for 0 strikes
     short_strike_display = f"{row['Short_Strike']:.0f}" if row['Short_Strike'] > 0 else "N/A"
+    
+    # Safe date formatting
+    date_str = "Unknown"
+    if pd.notnull(row['Exit_Date']):
+        date_str = row['Exit_Date'].strftime('%b %d')
 
-    # --- HTML RENDER FIX ---
-    # Using textwrap.dedent removes the indentation so Markdown renders HTML, not Code block.
     card_html = textwrap.dedent(f"""
         <div class="trade-card" style="border-left: 4px solid {border_color}; background-color: {card_bg}; padding: 10px; border-radius: 4px; margin-bottom: 8px;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h3 style="margin:0; font-size: 16px; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span></h3>
+                <h3 style="margin:0; font-size: 16px; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{date_str}</span></h3>
                 <h3 style="margin:0; font-size: 16px;">{pl_display}</h3>
             </div>
             {risk_badge}
             <div class="trade-details" style="display:flex; gap: 15px; margin-top: 5px; font-size: 12px; color: #aaa;">
                 <span><strong>Strikes:</strong> {short_strike_display}/{row['Long_Strike']:.0f}</span>
                 <span><strong>Duration:</strong> {int(row['Duration'])}d</span>
-                <span><strong>Efficiency:</strong> ${row['Realized_PL']/row['Duration']:.2f}/day</span>
+                <span><strong>Contracts:</strong> {int(row['Contracts'])}</span>
             </div>
         </div>
     """)
@@ -282,5 +262,5 @@ for i, row in df.iloc[::-1].iterrows():
             st.write(f"**Notes:** {row.get('Notes', '-')}")
         with c_act:
             if st.button("Delete", key=f"del_{i}"):
-                if delete_log_entry(drive_service, i):
+                if delete_log_entry(drive_service, row['_row_index'] - 1): # API adjustment
                     st.rerun()
