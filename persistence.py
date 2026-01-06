@@ -158,7 +158,7 @@ def _find_file_id(service, filename):
         return files[0]['id'] if files else None
     except: return None
 
-# ----------------------------- JSON STORAGE (WITH LOCKING) -----------------------------
+# ----------------------------- JSON STORAGE -----------------------------
 def load_from_drive(service):
     if not service: return []
     file_id = _find_file_id(service, DRIVE_FILE_NAME)
@@ -170,12 +170,10 @@ def load_from_drive(service):
 
 def save_to_drive(service, trades):
     """
-    Saves trades to Drive using DriveLockManager to prevent race conditions
-    with the background update script.
+    Saves trades to Drive using DriveLockManager to prevent race conditions.
     """
     if not service: return False
     
-    # Clean data (date objects to strings)
     clean_trades = []
     for t in trades:
         ct = t.copy()
@@ -187,14 +185,13 @@ def save_to_drive(service, trades):
     media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='application/json')
     file_id = _find_file_id(service, DRIVE_FILE_NAME)
     
-    # --- LOCKING LOGIC ---
     lock = None
     if DriveLockManager and file_id:
         lock = DriveLockManager(service, file_id)
         try:
-            lock.acquire() # Wait for background script to finish
+            lock.acquire()
         except Exception as e:
-            print(f"Warning: Could not acquire lock, proceeding anyway: {e}")
+            print(f"Warning: Could not acquire lock, proceeding: {e}")
             lock = None
 
     try:
@@ -207,14 +204,16 @@ def save_to_drive(service, trades):
         print(f"Save Error: {e}")
         return False
     finally:
-        if lock:
-            lock.release()
+        if lock: lock.release()
 
-# ----------------------------- SHEETS LOGGING -----------------------------
+# ----------------------------- SHEETS LOGGING (THE WRITER) -----------------------------
 def _get_spreadsheet_id(service, sheets_service):
+    # 1. Find existing
     q = f"name = '{SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet'"
     files = service.files().list(q=q).execute().get('files', [])
     if files: return files[0]['id']
+    
+    # 2. Create new
     ss = sheets_service.spreadsheets().create(body={'properties': {'title': SPREADSHEET_NAME}}).execute()
     return ss['spreadsheetId']
 
@@ -226,15 +225,21 @@ def _ensure_sheet_exists(sheets_service, spreadsheet_id):
             sheet_id = s['properties']['sheetId']
             break
             
+    # FIXED: Columns match Log Review expectations exactly
+    header_row = ["Ticker", "Entry Date", "Exit Date", "Short Strike", "Long Strike", "Contracts", "Credit", "Debit", "PnL", "Earnings Date", "Notes"]
+            
     if sheet_id is None:
+        # Create sheet
         req = {"addSheet": {"properties": {"title": SHEET_TITLE}}}
         res = sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": [req]}).execute()
         sheet_id = res['replies'][0]['addSheet']['properties']['sheetId']
-        headers = [["Ticker", "Entry", "Exit", "Strike_Short", "Strike_Long", "Credit", "Debit", "Contracts", "PnL", "Notes"]]
+        
+        # Add Headers
         sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A1",
-            valueInputOption="RAW", body={"values": headers}
+            valueInputOption="RAW", body={"values": [header_row]}
         ).execute()
+        
     return sheet_id
 
 def log_completed_trade(service, trade_data):
@@ -244,18 +249,24 @@ def log_completed_trade(service, trade_data):
         spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
         _ensure_sheet_exists(sheets_service, spreadsheet_id)
 
+        # Data extraction with safe defaults
         credit = float(trade_data.get('credit', 0))
         debit = float(trade_data.get('debit_paid', 0))
         contracts = int(trade_data.get('contracts', 1))
         pl = (credit - debit) * contracts * 100
         
+        # FIXED: Row order must match the header above
         row = [[
             trade_data.get('ticker'),
             trade_data.get('entry_date'),
-            datetime.now().strftime("%Y-%m-%d"),
+            datetime.now().strftime("%Y-%m-%d"), # Exit Date (Today)
             trade_data.get('short_strike'),
             trade_data.get('long_strike'),
-            credit, debit, contracts, pl,
+            contracts,
+            credit,
+            debit,
+            pl,
+            trade_data.get('earnings_date', ''), # Earnings Date
             trade_data.get('notes', '')
         ]]
         
@@ -264,23 +275,28 @@ def log_completed_trade(service, trade_data):
             valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={"values": row}
         ).execute()
         return True
-    except: return False
+    except Exception as e:
+        print(f"Log Error: {e}")
+        return False
 
 def get_trade_log(service):
     if not service: return []
     try:
         sheets_service = build_sheets_service_from_session()
         spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
+        
         res = sheets_service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A:Z"
         ).execute()
+        
         rows = res.get('values', [])
         if len(rows) < 2: return []
+        
         headers = rows[0]
         data = []
         for i, r in enumerate(rows[1:]):
             item = {headers[j]: (r[j] if j < len(r) else "") for j in range(len(headers))}
-            item['_row_index'] = i + 1
+            item['_row_index'] = i + 1 
             data.append(item)
         return data
     except: return []
@@ -291,7 +307,9 @@ def delete_log_entry(service, row_index):
         sheets_service = build_sheets_service_from_session()
         spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
         sheet_id = _ensure_sheet_exists(sheets_service, spreadsheet_id)
+        
         grid_index = row_index + 1 
+        
         req = {
             "deleteDimension": {
                 "range": {
@@ -302,6 +320,7 @@ def delete_log_entry(service, row_index):
                 }
             }
         }
+        
         sheets_service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id, body={"requests": [req]}
         ).execute()
