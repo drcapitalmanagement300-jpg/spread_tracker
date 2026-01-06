@@ -171,6 +171,50 @@ def days_to_expiry(expiry_str):
     except: return 0
     return max((expiry - date.today()).days, 0)
 
+# --- MATH FUNCTIONS ---
+
+def bs_price(option_type, S, K, T, r, sigma):
+    """Calculates Black-Scholes price."""
+    if T <= 0 or S <= 0 or K <= 0 or sigma <= 0: return 0.0
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    if option_type == "call":
+        return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+    else: # put
+        return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+
+def find_stop_loss_price(target_value, option_type, short_K, long_K, T, r, short_sigma, long_sigma):
+    """
+    Finds the underlying price S where the spread value (Short - Long) equals target_value.
+    Uses a binary search.
+    """
+    width = abs(short_K - long_K)
+    if target_value >= width: return None # Impossible, max value is width
+    if target_value <= 0: return None # Impossible for credit spread
+
+    # Search range: from effectively 0 to double the short strike
+    low = 0.01
+    high = short_K * 2.0
+    
+    # Binary Search
+    for _ in range(20): # 20 iterations gives sufficient precision
+        mid = (low + high) / 2
+        p_short = bs_price(option_type, mid, short_K, T, r, short_sigma)
+        p_long = bs_price(option_type, mid, long_K, T, r, long_sigma)
+        
+        # Current spread value at price 'mid'
+        spread_val = p_short - p_long
+        
+        # For Puts: As S decreases (moves left), Spread Value increases.
+        # If current val > target, we are "too deep" (price too low). We need Higher Price.
+        if spread_val > target_value:
+            low = mid
+        else:
+            # If current val < target, we are not deep enough. We need Lower Price.
+            high = mid
+            
+    return high
+
 def calculate_greeks(option_type, S, K, T, r, sigma):
     if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
         return {"delta": 0.0, "gamma": 0.0, "theta": 0.0}
@@ -186,16 +230,6 @@ def calculate_greeks(option_type, S, K, T, r, sigma):
     else:
         theta_annual = term1 + r * K * np.exp(-r * T) * norm.cdf(-d2)
     return {"delta": delta, "gamma": gamma, "theta": theta_annual / 365.0}
-
-def calculate_price_for_delta(target_delta, option_type, K, T, r, sigma):
-    if T <= 0 or sigma <= 0 or K <= 0: return None
-    try:
-        if option_type == "put": target_prob = 1.0 - abs(target_delta)
-        else: target_prob = abs(target_delta)
-        d1 = norm.ppf(target_prob)
-        ln_s_k = d1 * sigma * np.sqrt(T) - (r + 0.5 * sigma**2) * T
-        return K * np.exp(ln_s_k)
-    except: return None
 
 def get_option_data(data_manager, ticker, expiration_str, short_strike, long_strike):
     try:
@@ -230,14 +264,29 @@ def update_trade(trade, data_manager):
 
     short_leg_greeks = {"delta": 0, "gamma": 0, "theta": 0}
     long_leg_greeks = {"delta": 0, "gamma": 0, "theta": 0}
-    critical_price_040 = None
+    
+    # REPLACED: critical_price_040 logic
+    stop_loss_price = None
 
     if current_price and dte > 0:
         if short_iv:
             short_leg_greeks = calculate_greeks("put", current_price, short_strike, T_years, 0.05, short_iv)
-            critical_price_040 = calculate_price_for_delta(0.40, "put", short_strike, T_years, 0.05, short_iv)
         if long_iv:
             long_leg_greeks = calculate_greeks("put", current_price, long_strike, T_years, 0.05, long_iv)
+            
+        # NEW: Calculate 400% Stop Loss Price
+        if short_iv and long_iv and credit_received > 0:
+            target_stop_loss_value = credit_received * 4.0
+            stop_loss_price = find_stop_loss_price(
+                target_value=target_stop_loss_value,
+                option_type="put",
+                short_K=short_strike,
+                long_K=long_strike,
+                T=T_years,
+                r=0.05,
+                short_sigma=short_iv,
+                long_sigma=long_iv
+            )
 
     net_delta = (-1 * short_leg_greeks["delta"]) + (1 * long_leg_greeks["delta"])
     net_gamma = (-1 * short_leg_greeks["gamma"]) + (1 * long_leg_greeks["gamma"])
@@ -258,7 +307,7 @@ def update_trade(trade, data_manager):
     if not is_market_safe:
         rule_violations["other_rules"] = True
         notif_msg = "🚨 **CRASH ALERT**: SPY < 200 SMA."
-    elif profit_pct is not None and profit_pct >= 60: # UPDATED TARGET
+    elif profit_pct is not None and profit_pct >= 60:
         notif_msg = f"✅ **Target Reached**: {profit_pct:.1f}% Profit"
         notif_color = 3066993 
     elif spread_val_pct is not None and spread_val_pct >= 400:
@@ -280,13 +329,14 @@ def update_trade(trade, data_manager):
             send_discord_alert(f"Position Alert: {ticker}", notif_msg, notif_color)
             trade["last_alert_sent"] = datetime.now(timezone.utc).isoformat()
 
-    trade["contracts"] = contracts # Ensure value is saved back
+    trade["contracts"] = contracts 
     
     trade["cached"] = {
         "current_price": current_price,
         "day_change_percent": day_change_pct,
         "price_history": price_history,
-        "critical_price_040": critical_price_040,
+        # SAVING THE 400% PRICE HERE
+        "stop_loss_price": stop_loss_price,
         "short_option_price": short_price,
         "long_option_price": long_price,
         "abs_delta": short_abs_delta, 
