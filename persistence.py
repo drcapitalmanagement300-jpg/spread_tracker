@@ -2,8 +2,8 @@ import streamlit as st
 import json
 import io
 import os
-import csv
 from datetime import datetime, date
+from typing import Any, Dict, List, Optional
 
 # --- GOOGLE AUTH IMPORTS ---
 from google.oauth2.credentials import Credentials as OAuthCredentials
@@ -14,20 +14,13 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google_auth_oauthlib.flow import Flow
 
 # --- CONFIG ---
-TRADES_FILE_NAME = "open_trades.json"
-LOG_FILE_NAME = "trade_log.csv"
-
-# THE MASTER HEADER LIST
-# If the file on Drive doesn't match this, it will be WIPED and RESET.
-EXPECTED_HEADERS = [
-    'Ticker', 'Entry_Date', 'Exit_Date', 'Strategy', 'Direction',
-    'Short_Strike', 'Long_Strike', 'Contracts', 'Credit', 'Debit',
-    'Realized_PL', 'Status', 'Notes', 'Earnings_Date'
-]
-
+DRIVE_FILE_NAME = "credit_spreads.json"
+SPREADSHEET_NAME = "SpreadSniper_Data"
+SHEET_TITLE = "TradeLog"
 SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
-    "https://www.googleapis.com/auth/drive"
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets"
 ]
 LOCAL_TOKEN_FILE = "google_oauth_token.json"
 
@@ -73,7 +66,10 @@ def _load_local_token():
     except: return None
 
 def get_creds_from_session():
+    # 1. Try Session
     creds_dict = st.session_state.get("credentials")
+    
+    # 2. Try Local Cache
     if not creds_dict:
         creds_dict = _load_local_token()
         
@@ -88,6 +84,10 @@ def get_creds_from_session():
                 st.session_state["credentials"] = new_dict
                 _save_local_token(new_dict)
             except google.auth.exceptions.RefreshError:
+                st.warning("Session expired. Please sign in again.")
+                st.session_state.pop("credentials", None)
+                if os.path.exists(LOCAL_TOKEN_FILE):
+                    os.remove(LOCAL_TOKEN_FILE)
                 return None
         return creds
     except: return None
@@ -122,7 +122,7 @@ def ensure_logged_in():
     auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
     
     st.markdown("### 🔒 Security Check")
-    st.warning("Please sign in to access your Google Drive.")
+    st.warning("Please sign in to access your Cloud Dashboard.")
     st.markdown(f"[**Sign in with Google**]({auth_url})", unsafe_allow_html=True)
     st.stop()
 
@@ -132,9 +132,15 @@ def logout():
         os.remove(LOCAL_TOKEN_FILE)
     st.rerun()
 
+# ----------------------------- SERVICES -----------------------------
 def build_drive_service_from_session():
     creds = get_creds_from_session()
     if creds: return build('drive', 'v3', credentials=creds)
+    return None
+
+def build_sheets_service_from_session():
+    creds = get_creds_from_session()
+    if creds: return build('sheets', 'v4', credentials=creds)
     return None
 
 # ----------------------------- DRIVE HELPERS -----------------------------
@@ -146,10 +152,10 @@ def _find_file_id(service, filename):
         return files[0]['id'] if files else None
     except: return None
 
-# ----------------------------- OPEN TRADES (JSON) -----------------------------
+# ----------------------------- JSON STORAGE -----------------------------
 def load_from_drive(service):
     if not service: return []
-    file_id = _find_file_id(service, TRADES_FILE_NAME)
+    file_id = _find_file_id(service, DRIVE_FILE_NAME)
     if not file_id: return []
     try:
         data = service.files().get_media(fileId=file_id).execute()
@@ -167,193 +173,157 @@ def save_to_drive(service, trades):
     
     content = json.dumps(clean_trades, indent=2)
     media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='application/json')
-    file_id = _find_file_id(service, TRADES_FILE_NAME)
+    file_id = _find_file_id(service, DRIVE_FILE_NAME)
     
     try:
         if file_id:
             service.files().update(fileId=file_id, media_body=media).execute()
         else:
-            service.files().create(body={'name': TRADES_FILE_NAME}, media_body=media).execute()
+            service.files().create(body={'name': DRIVE_FILE_NAME}, media_body=media).execute()
         return True
     except: return False
 
-# ----------------------------- CLOSED LOG (CSV) -----------------------------
+# ----------------------------- SHEETS LOGGING (RESTORED) -----------------------------
+def _get_spreadsheet_id(service, sheets_service):
+    # 1. Find existing
+    q = f"name = '{SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet'"
+    files = service.files().list(q=q).execute().get('files', [])
+    if files: return files[0]['id']
+    
+    # 2. Create new
+    ss = sheets_service.spreadsheets().create(body={'properties': {'title': SPREADSHEET_NAME}}).execute()
+    return ss['spreadsheetId']
 
-def _check_and_fix_csv_headers(service, file_id):
-    """
-    Downloads the first line of the CSV.
-    If headers don't match EXPECTED_HEADERS, it deletes the file so it can be recreated.
-    Returns True if file is good, False if it was deleted (needs recreation).
-    """
-    try:
-        # Download just the beginning (we can't easily partial download with this lib, 
-        # so we download content to memory)
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-        
-        fh.seek(0)
-        content = fh.read().decode('utf-8')
-        
-        # Check if empty or bad headers
-        if not content.strip():
-            # Empty file
-            service.files().delete(fileId=file_id).execute()
-            return False
+def _ensure_sheet_exists(sheets_service, spreadsheet_id):
+    meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    sheet_id = None
+    for s in meta['sheets']:
+        if s['properties']['title'] == SHEET_TITLE:
+            sheet_id = s['properties']['sheetId']
+            break
             
-        first_line = content.splitlines()[0]
-        expected_line = ",".join(EXPECTED_HEADERS)
+    if sheet_id is None:
+        # Create sheet
+        req = {"addSheet": {"properties": {"title": SHEET_TITLE}}}
+        res = sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": [req]}).execute()
+        sheet_id = res['replies'][0]['addSheet']['properties']['sheetId']
         
-        # Simple string comparison (robust enough for exact match requirement)
-        # We strip carriage returns just in case
-        if first_line.strip() != expected_line.strip():
-            print("CSV Header mismatch. Wiping file...")
-            service.files().delete(fileId=file_id).execute()
-            return False
-            
-        return True
-    except Exception as e:
-        print(f"Error checking CSV: {e}")
-        return True # Assume safe to prevent loops, or could be False
+        # Add Headers
+        headers = [["Ticker", "Entry", "Exit", "Strike_Short", "Strike_Long", "Credit", "Debit", "Contracts", "PnL", "Notes"]]
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A1",
+            valueInputOption="RAW", body={"values": headers}
+        ).execute()
+        
+    return sheet_id
 
 def log_completed_trade(service, trade_data):
-    """
-    Appends a closed trade to the CSV on Drive.
-    """
     if not service: return False
-    
-    # 1. Calculate P&L
     try:
+        sheets_service = build_sheets_service_from_session()
+        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
+        _ensure_sheet_exists(sheets_service, spreadsheet_id)
+
         credit = float(trade_data.get('credit', 0))
         debit = float(trade_data.get('debit_paid', 0))
         contracts = int(trade_data.get('contracts', 1))
-        pnl = (credit - debit) * contracts * 100
-    except:
-        pnl = 0
-
-    # 2. Prepare Row Dict
-    row_dict = {
-        'Ticker': trade_data.get('ticker'),
-        'Entry_Date': trade_data.get('entry_date'),
-        'Exit_Date': trade_data.get('exit_date'),
-        'Strategy': trade_data.get('strategy', 'Credit Spread'),
-        'Direction': trade_data.get('direction', 'Neutral'),
-        'Short_Strike': trade_data.get('short_strike'),
-        'Long_Strike': trade_data.get('long_strike'),
-        'Contracts': contracts,
-        'Credit': credit,
-        'Debit': debit,
-        'Realized_PL': pnl,
-        'Status': 'Closed',
-        'Notes': trade_data.get('notes', ''),
-        'Earnings_Date': trade_data.get('earnings_date', '')
-    }
-
-    # 3. Handle Drive File
-    file_id = _find_file_id(service, LOG_FILE_NAME)
-    
-    # Self-Healing: Check structure if it exists
-    if file_id:
-        is_good = _check_and_fix_csv_headers(service, file_id)
-        if not is_good:
-            file_id = None # Forces recreation below
-
-    # 4. Prepare Content
-    output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=EXPECTED_HEADERS)
-    
-    if not file_id:
-        # New File: Write Header + Row
-        writer.writeheader()
-        writer.writerow(row_dict)
-        media = MediaIoBaseUpload(io.BytesIO(output.getvalue().encode('utf-8')), mimetype='text/csv')
-        service.files().create(body={'name': LOG_FILE_NAME}, media_body=media).execute()
-    else:
-        # Existing File: Append Row
-        # Note: Drive API doesn't support "append" directly. We must download, append, upload.
-        # Efficient approach for small logs: Download, Append, Update.
+        pl = (credit - debit) * contracts * 100
         
-        # Download existing
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
+        row = [[
+            trade_data.get('ticker'),
+            trade_data.get('entry_date'),
+            datetime.now().strftime("%Y-%m-%d"),
+            trade_data.get('short_strike'),
+            trade_data.get('long_strike'),
+            credit, debit, contracts, pl,
+            trade_data.get('notes', '')
+        ]]
         
-        existing_content = fh.getvalue().decode('utf-8')
-        
-        # Append new line
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=EXPECTED_HEADERS)
-        writer.writerow(row_dict)
-        new_row_csv = output.getvalue()
-        
-        final_content = existing_content
-        if not final_content.endswith('\n'):
-            final_content += '\n'
-        final_content += new_row_csv
-        
-        media = MediaIoBaseUpload(io.BytesIO(final_content.encode('utf-8')), mimetype='text/csv')
-        service.files().update(fileId=file_id, media_body=media).execute()
-
-    return True
+        sheets_service.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A1",
+            valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={"values": row}
+        ).execute()
+        return True
+    except: return False
 
 def get_trade_log(service):
-    """
-    Reads the CSV from Drive and returns a list of dicts.
-    """
     if not service: return []
-    file_id = _find_file_id(service, LOG_FILE_NAME)
-    if not file_id: return []
-    
     try:
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-            
-        fh.seek(0)
-        content = fh.read().decode('utf-8')
+        sheets_service = build_sheets_service_from_session()
+        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
         
-        return list(csv.DictReader(io.StringIO(content)))
+        res = sheets_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A:Z"
+        ).execute()
+        
+        rows = res.get('values', [])
+        if len(rows) < 2: return []
+        
+        headers = rows[0]
+        data = []
+        for i, r in enumerate(rows[1:]):
+            # Row index in sheet is i + 2 (1-based, +1 for header)
+            item = {headers[j]: (r[j] if j < len(r) else "") for j in range(len(headers))}
+            item['_row_index'] = i + 1 # API uses 0-based index for delete, usually data starts at index 1
+            data.append(item)
+        return data
     except: return []
 
 def delete_log_entry(service, row_index):
     """
-    Deletes a row by index.
+    Deletes a specific row from the Google Sheet.
+    row_index: The 0-based index of the data row to delete (relative to data start).
     """
     if not service: return False
-    file_id = _find_file_id(service, LOG_FILE_NAME)
-    if not file_id: return False
-    
     try:
-        # Download
-        request = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done: status, done = downloader.next_chunk()
+        sheets_service = build_sheets_service_from_session()
+        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
+        sheet_id = _ensure_sheet_exists(sheets_service, spreadsheet_id)
         
-        content = fh.getvalue().decode('utf-8')
-        rows = list(csv.DictReader(io.StringIO(content)))
+        # Calculate actual grid index (Header is index 0, Data starts at 1)
+        grid_index = row_index + 1 
         
-        if 0 <= row_index < len(rows):
-            del rows[row_index]
-            
-            # Rewrite
-            output = io.StringIO()
-            writer = csv.DictWriter(output, fieldnames=EXPECTED_HEADERS)
-            writer.writeheader()
-            writer.writerows(rows)
-            
-            media = MediaIoBaseUpload(io.BytesIO(output.getvalue().encode('utf-8')), mimetype='text/csv')
-            service.files().update(fileId=file_id, media_body=media).execute()
-            return True
+        req = {
+            "deleteDimension": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": grid_index,
+                    "endIndex": grid_index + 1
+                }
+            }
+        }
+        
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": [req]}
+        ).execute()
+        return True
+    except Exception as e:
+        print(f"Delete Error: {e}")
         return False
+
+def update_log_entry(service, row_index, updated_data):
+    """
+    Updates a specific row in the Google Sheet.
+    """
+    if not service: return False
+    try:
+        sheets_service = build_sheets_service_from_session()
+        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
+        
+        # Convert dict back to list based on headers
+        # Note: This implies we know the header order. Ideally we fetch headers first.
+        # For simplicity, we assume standard order or just map values if passed as list.
+        if isinstance(updated_data, list):
+            values = updated_data
+        else:
+            return False # Wrapper expects list for update currently
+            
+        range_name = f"{SHEET_TITLE}!A{row_index + 2}" # +2 for 1-based + header
+        
+        sheets_service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=range_name,
+            valueInputOption="USER_ENTERED", body={"values": [values]}
+        ).execute()
+        return True
     except: return False
