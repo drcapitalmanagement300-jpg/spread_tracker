@@ -143,14 +143,16 @@ def render_profit_bar(profit_pct):
     if profit_pct is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
     
-    fill_pct = ((profit_pct + 100) / 175) * 100 
+    # Scale adjusted for new profit target (60%)
+    # Range: -100% (Loss) to +60% (Target) = Total range 160
+    fill_pct = ((profit_pct + 100) / 160) * 100 
     display_fill = max(0, min(fill_pct, 100))
     
     if profit_pct < 0:
         bar_color = WARNING_COLOR 
         label_color = WARNING_COLOR
         status_text = f"LOSS: {profit_pct:.1f}%"
-    elif profit_pct < 75:
+    elif profit_pct < 60: # UPDATED TARGET
         bar_color = SUCCESS_COLOR
         label_color = SUCCESS_COLOR
         status_text = f"PROFIT: {profit_pct:.1f}%"
@@ -172,7 +174,7 @@ def render_profit_bar(profit_pct):
         f'<div style="position: relative; height: 15px; font-size: 9px; color: gray; margin-top: 2px;">'
         f'<span style="position: absolute; left: 0;">Max Loss</span>'
         f'<span style="position: absolute; left: 57%; transform: translateX(-50%);">Break Even</span>'
-        f'<span style="position: absolute; right: 0;">TARGET (75%)</span>'
+        f'<span style="position: absolute; right: 0;">TARGET (60%)</span>'
         f'</div>'
         f'</div>'
     )
@@ -226,9 +228,9 @@ else:
             status_icon = "🚨"
             status_msg = "MARKET CRASH ALERT (SPY < 200 SMA)"
             status_color = WARNING_COLOR
-        elif profit_pct and profit_pct >= 75:
+        elif profit_pct and profit_pct >= 60: # UPDATED TARGET
             status_icon = "💰" 
-            status_msg = "TARGET REACHED (75%)"
+            status_msg = "TARGET REACHED (60%)"
             status_color = SUCCESS_COLOR
         else:
             if spread_value and spread_value >= 400:
@@ -338,8 +340,6 @@ else:
                                     default_debit = est_price
                             
                             debit_paid = st.number_input("Debit Paid ($)", min_value=0.0, value=float(f"{default_debit:.2f}"), step=0.01)
-                            
-                            # UPDATED: Exit Date Input (defaults to Today)
                             exit_date_val = st.date_input("Exit Date", value=datetime.now().date())
                         
                         with col_log2:
@@ -347,13 +347,10 @@ else:
                         
                         if st.form_submit_button("Confirm Close"):
                             if drive_service:
-                                # Prepare trade data for the log
                                 trade_data = t.copy()
                                 trade_data['debit_paid'] = debit_paid
                                 trade_data['notes'] = close_notes
-                                # EXPLICITLY pass the input date as string
                                 trade_data['exit_date'] = exit_date_val.isoformat()
-                                # EXPLICITLY pass contracts from the trade object
                                 trade_data['contracts'] = contracts
                                 
                                 if log_completed_trade(drive_service, trade_data):
