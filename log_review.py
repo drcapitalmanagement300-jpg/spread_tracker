@@ -46,6 +46,9 @@ st.markdown("""
     .trade-card h3 { font-size: 16px !important; }
     .trade-details { font-size: 12px !important; margin-top: 5px !important; }
     .risk-badge { font-size: 11px; margin-top: 4px; color: #FFA726; font-weight: 500; }
+    .earnings-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: bold; margin-left: 10px; vertical-align: middle; }
+    .earnings-danger { background-color: rgba(211, 47, 47, 0.2); color: #ff5252; border: 1px solid #ff5252; }
+    .earnings-safe { background-color: rgba(0, 200, 83, 0.1); color: #69f0ae; border: 1px solid #00c853; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -61,7 +64,6 @@ if not drive_service:
 
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
-    # SAFE IMAGE LOADING
     if os.path.exists(LOGO_FILE):
         st.image(LOGO_FILE, width=110)
     else:
@@ -85,7 +87,9 @@ if not raw_logs:
 
 df = pd.DataFrame(raw_logs)
 
+# --- DATA CLEANING (PATCHED) ---
 try:
+    # 1. Numeric Clean
     cols_to_num = ['Realized_PL', 'Contracts', 'Credit', 'Short_Strike', 'Long_Strike']
     for c in cols_to_num:
         if c in df.columns:
@@ -94,18 +98,32 @@ try:
                 df[c] = df[c].replace('', '0')
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
     
-    df['Exit_Date'] = pd.to_datetime(df['Exit_Date'])
-    df['Entry_Date'] = pd.to_datetime(df['Entry_Date'])
+    # 2. Date Parsing (PATCHED: Added errors='coerce')
+    # This ensures "0.93" or garbage data becomes NaT instead of crashing
+    df['Exit_Date'] = pd.to_datetime(df['Exit_Date'], errors='coerce')
+    df['Entry_Date'] = pd.to_datetime(df['Entry_Date'], errors='coerce')
     
+    # Drop rows where dates failed to parse (Garbage Data in sheet)
+    df = df.dropna(subset=['Exit_Date', 'Entry_Date'])
+
+    if 'Earnings_Date' not in df.columns:
+        df['Earnings_Date'] = pd.NaT
+    else:
+        df['Earnings_Date'] = pd.to_datetime(df['Earnings_Date'], errors='coerce')
+
+    # 3. Year Rollover Logic
     def fix_year_rollover(row):
         if pd.notnull(row['Entry_Date']) and pd.notnull(row['Exit_Date']):
             if row['Entry_Date'] > row['Exit_Date']:
                 return row['Entry_Date'] - pd.DateOffset(years=1)
         return row['Entry_Date']
-
     df['Entry_Date'] = df.apply(fix_year_rollover, axis=1)
+
+    # 4. Duration
     df['Duration'] = (df['Exit_Date'] - df['Entry_Date']).dt.days
     df['Duration'] = df['Duration'].clip(lower=1)
+    
+    # 5. Risk Logic
     df['Spread_Width'] = (df['Short_Strike'] - df['Long_Strike']).abs()
     df['Max_Loss_Trade'] = (df['Spread_Width'] - df['Credit']) * 100 * df['Contracts']
     df['Risk_Saved'] = df.apply(lambda x: (x['Max_Loss_Trade'] - abs(x['Realized_PL'])) if x['Realized_PL'] < 0 else 0, axis=1)
@@ -114,6 +132,7 @@ except Exception as e:
     st.error(f"Data formatting error: {e}")
     st.stop()
 
+# --- ANALYTICS ENGINE ---
 total_trades = len(df)
 wins = df[df['Realized_PL'] > 0]
 losses = df[df['Realized_PL'] <= 0]
@@ -122,6 +141,7 @@ total_risk_saved = df['Risk_Saved'].sum()
 win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
 profit_factor = (wins['Realized_PL'].sum() / abs(losses['Realized_PL'].sum())) if not losses.empty and losses['Realized_PL'].sum() != 0 else float('inf')
 
+# Efficiency (Velocity)
 fast_trades = df[df['Duration'] < 14]
 slow_trades = df[df['Duration'] >= 14]
 fast_pl_daily = (fast_trades['Realized_PL'] / fast_trades['Duration']).mean() if not fast_trades.empty else 0
@@ -160,6 +180,7 @@ with c1:
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         st.pyplot(fig, use_container_width=True)
+
 with c2:
     st.markdown(f"**🛡️ Risk Averted** <span style='font-size:0.8em; color:{SAVED_COLOR}'> (Smart Stops)</span>", unsafe_allow_html=True)
     if not df.empty:
@@ -198,13 +219,25 @@ for i, row in df.iloc[::-1].iterrows():
         pl_display = f"<span style='color:{WARNING_COLOR}'>-${abs(pl):,.2f}</span> <span style='font-size:0.8em; color:#666;'>/ -${max_loss_val:,.0f} Max</span>"
         risk_badge = f"""<div class="risk-badge">🛡️ Saved <strong>${saved_val:,.2f}</strong> by stopping out.</div>"""
 
+    earnings_display = ""
+    if pd.notnull(row['Earnings_Date']):
+        e_date = row['Earnings_Date']
+        held_through = (e_date >= row['Entry_Date']) and (e_date <= row['Exit_Date'])
+        if held_through:
+            earnings_display = f"""<span class="earnings-badge earnings-danger">⚠️ HELD THRU EARNINGS ({e_date.strftime('%b %d')})</span>"""
+        else:
+            earnings_display = f"""<span style="font-size:10px; color:#666; margin-left:10px;">✅ Earnings: {e_date.strftime('%b %d')} (Avoided)</span>"""
+
     short_strike_display = f"{row['Short_Strike']:.0f}" if row['Short_Strike'] > 0 else "N/A"
 
-    # HTML Render Fix: Using textwrap.dedent ensures no indentation issues
     card_html = textwrap.dedent(f"""
         <div class="trade-card" style="border-left: 4px solid {border_color}; background-color: {card_bg}; padding: 10px; border-radius: 4px; margin-bottom: 8px;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h3 style="margin:0; font-size: 16px; color:white;">{row['Ticker']} <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span></h3>
+                <h3 style="margin:0; font-size: 16px; color:white;">
+                    {row['Ticker']} 
+                    <span style="font-size:0.7em; color:#888;">{row['Exit_Date'].strftime('%b %d')}</span>
+                    {earnings_display}
+                </h3>
                 <h3 style="margin:0; font-size: 16px;">{pl_display}</h3>
             </div>
             {risk_badge}
@@ -220,7 +253,9 @@ for i, row in df.iloc[::-1].iterrows():
     with st.expander(f"Details", expanded=False):
         c_note, c_act = st.columns([4, 1])
         with c_note:
-            st.write(f"**Notes:** {row.get('Notes', '-')}")
+            note_text = row.get('Notes', '-')
+            if note_text == "0" or note_text == 0: note_text = "-"
+            st.write(f"**Notes:** {note_text}")
         with c_act:
             if st.button("Delete", key=f"del_{i}"):
                 if delete_log_entry(drive_service, i):
