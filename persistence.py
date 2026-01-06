@@ -15,7 +15,8 @@ from google_auth_oauthlib.flow import Flow
 
 # --- CONFIG ---
 DRIVE_FILE_NAME = "credit_spreads.json"
-SPREADSHEET_NAME = "SpreadSniper_Data"
+# CHANGED: New name to create a clean sheet structure
+SPREADSHEET_NAME = "TradeJournal_V2" 
 SHEET_TITLE = "TradeLog"
 SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
@@ -167,6 +168,7 @@ def save_to_drive(service, trades):
     clean_trades = []
     for t in trades:
         ct = t.copy()
+        # JSON serialize dates
         for k, v in ct.items():
             if isinstance(v, (date, datetime)): ct[k] = v.isoformat()
         clean_trades.append(ct)
@@ -183,60 +185,94 @@ def save_to_drive(service, trades):
         return True
     except: return False
 
-# ----------------------------- SHEETS LOGGING (RESTORED) -----------------------------
+# ----------------------------- SHEETS LOGGING (NEW) -----------------------------
 def _get_spreadsheet_id(service, sheets_service):
     # 1. Find existing
     q = f"name = '{SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet'"
     files = service.files().list(q=q).execute().get('files', [])
     if files: return files[0]['id']
     
-    # 2. Create new
+    # 2. Create new if not found
     ss = sheets_service.spreadsheets().create(body={'properties': {'title': SPREADSHEET_NAME}}).execute()
     return ss['spreadsheetId']
 
 def _ensure_sheet_exists(sheets_service, spreadsheet_id):
     meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     sheet_id = None
-    for s in meta['sheets']:
+    existing_sheets = meta.get('sheets', [])
+    
+    for s in existing_sheets:
         if s['properties']['title'] == SHEET_TITLE:
             sheet_id = s['properties']['sheetId']
             break
             
+    # If sheet doesn't exist, create it
     if sheet_id is None:
-        # Create sheet
         req = {"addSheet": {"properties": {"title": SHEET_TITLE}}}
         res = sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": [req]}).execute()
         sheet_id = res['replies'][0]['addSheet']['properties']['sheetId']
         
-        # Add Headers
-        headers = [["Ticker", "Entry", "Exit", "Strike_Short", "Strike_Long", "Credit", "Debit", "Contracts", "PnL", "Notes"]]
-        sheets_service.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A1",
-            valueInputOption="RAW", body={"values": headers}
-        ).execute()
+    # Always enforce headers on row 1 to ensure structure
+    headers = [["Ticker", "Entry_Date", "Exit_Date", "Short_Strike", "Long_Strike", "Credit", "Debit", "Contracts", "Realized_PL", "Notes"]]
+    sheets_service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A1",
+        valueInputOption="RAW", body={"values": headers}
+    ).execute()
         
     return sheet_id
 
 def log_completed_trade(service, trade_data):
+    """
+    Logs the trade. Expects trade_data to have:
+    - contracts
+    - exit_date
+    - debit_paid
+    - credit
+    - ticker
+    - entry_date
+    - short_strike / long_strike
+    """
     if not service: return False
     try:
         sheets_service = build_sheets_service_from_session()
         spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
         _ensure_sheet_exists(sheets_service, spreadsheet_id)
 
+        # 1. Extract Values safely
+        ticker = trade_data.get('ticker', 'UNKNOWN')
+        entry_date = trade_data.get('entry_date', '')
+        
+        # Pull Exit Date from Dashboard passed data
+        exit_date = trade_data.get('exit_date', datetime.now().strftime("%Y-%m-%d"))
+
+        s_strike = trade_data.get('short_strike', 0)
+        l_strike = trade_data.get('long_strike', 0)
+        
         credit = float(trade_data.get('credit', 0))
         debit = float(trade_data.get('debit_paid', 0))
-        contracts = int(trade_data.get('contracts', 1))
-        pl = (credit - debit) * contracts * 100
         
+        # Pull Contracts from Dashboard passed data
+        contracts = int(trade_data.get('contracts', 1))
+
+        # 2. Calculate PnL
+        # (Credit - Debit) * 100 * Contracts
+        pl = (credit - debit) * 100 * contracts
+        
+        notes = trade_data.get('notes', '')
+
+        # 3. Construct Row 
+        # MUST MATCH HEADERS: ["Ticker", "Entry_Date", "Exit_Date", "Short_Strike", "Long_Strike", "Credit", "Debit", "Contracts", "Realized_PL", "Notes"]
         row = [[
-            trade_data.get('ticker'),
-            trade_data.get('entry_date'),
-            datetime.now().strftime("%Y-%m-%d"),
-            trade_data.get('short_strike'),
-            trade_data.get('long_strike'),
-            credit, debit, contracts, pl,
-            trade_data.get('notes', '')
+            ticker,
+            entry_date,
+            exit_date,
+            s_strike,
+            l_strike,
+            credit,
+            debit,
+            contracts,
+            pl,
+            notes
         ]]
         
         sheets_service.spreadsheets().values().append(
@@ -244,7 +280,9 @@ def log_completed_trade(service, trade_data):
             valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={"values": row}
         ).execute()
         return True
-    except: return False
+    except Exception as e:
+        print(f"Log Error: {e}")
+        return False
 
 def get_trade_log(service):
     if not service: return []
@@ -262,9 +300,16 @@ def get_trade_log(service):
         headers = rows[0]
         data = []
         for i, r in enumerate(rows[1:]):
-            # Row index in sheet is i + 2 (1-based, +1 for header)
-            item = {headers[j]: (r[j] if j < len(r) else "") for j in range(len(headers))}
-            item['_row_index'] = i + 1 # API uses 0-based index for delete, usually data starts at index 1
+            # Map row values to headers
+            item = {}
+            for j, h in enumerate(headers):
+                if j < len(r):
+                    item[h] = r[j]
+                else:
+                    item[h] = ""
+            
+            # API uses 0-based index for delete, usually data starts at index 1 relative to data block
+            item['_row_index'] = i + 1 
             data.append(item)
         return data
     except: return []
@@ -301,29 +346,3 @@ def delete_log_entry(service, row_index):
     except Exception as e:
         print(f"Delete Error: {e}")
         return False
-
-def update_log_entry(service, row_index, updated_data):
-    """
-    Updates a specific row in the Google Sheet.
-    """
-    if not service: return False
-    try:
-        sheets_service = build_sheets_service_from_session()
-        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
-        
-        # Convert dict back to list based on headers
-        # Note: This implies we know the header order. Ideally we fetch headers first.
-        # For simplicity, we assume standard order or just map values if passed as list.
-        if isinstance(updated_data, list):
-            values = updated_data
-        else:
-            return False # Wrapper expects list for update currently
-            
-        range_name = f"{SHEET_TITLE}!A{row_index + 2}" # +2 for 1-based + header
-        
-        sheets_service.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id, range=range_name,
-            valueInputOption="USER_ENTERED", body={"values": [values]}
-        ).execute()
-        return True
-    except: return False
