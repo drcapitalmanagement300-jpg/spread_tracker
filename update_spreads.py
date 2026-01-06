@@ -218,7 +218,6 @@ def update_trade(trade, data_manager):
         short_strike = float(trade.get("short_strike", 0))
         long_strike = float(trade.get("long_strike", 0))
         credit_received = float(trade.get("credit", 0))
-        # PRESERVE CONTRACTS
         contracts = int(trade.get("contracts", 1)) 
     except ValueError: return trade 
 
@@ -259,7 +258,7 @@ def update_trade(trade, data_manager):
     if not is_market_safe:
         rule_violations["other_rules"] = True
         notif_msg = "🚨 **CRASH ALERT**: SPY < 200 SMA."
-    elif profit_pct is not None and profit_pct >= 75:
+    elif profit_pct is not None and profit_pct >= 60: # UPDATED TARGET
         notif_msg = f"✅ **Target Reached**: {profit_pct:.1f}% Profit"
         notif_color = 3066993 
     elif spread_val_pct is not None and spread_val_pct >= 400:
