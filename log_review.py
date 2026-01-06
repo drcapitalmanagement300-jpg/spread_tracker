@@ -55,6 +55,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- AUTHENTICATION ---
 drive_service = None
 try:
     drive_service = build_drive_service_from_session()
@@ -65,6 +66,7 @@ if not drive_service:
     st.warning("Please sign in on the Dashboard page to view your Journal.")
     st.stop()
 
+# --- HEADER ---
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
     if os.path.exists(LOGO_FILE):
@@ -83,15 +85,15 @@ with header_col2:
 with header_col3:
     st.write("") 
 
+# --- LOAD DATA ---
 raw_logs = get_trade_log(drive_service)
 if not raw_logs:
-    st.info("No closed trades found in the Journal yet.")
+    st.info("📝 No closed trades found. Go to the **Dashboard** to log your first trade!")
     st.stop()
 
 df = pd.DataFrame(raw_logs)
 
 # --- COLUMN NORMALIZATION ---
-# Standardize names to Underscores for code usage
 column_map = {
     'Entry Date': 'Entry_Date',
     'Exit Date': 'Exit_Date',
@@ -103,57 +105,79 @@ column_map = {
 }
 df = df.rename(columns=column_map)
 
-# Handle Missing 'Contracts' column (Backwards Compatibility)
-if 'Contracts' not in df.columns:
-    df['Contracts'] = 1 
+# Ensure essential columns exist
+expected_cols = ['Ticker', 'Entry_Date', 'Exit_Date', 'Realized_PL', 'Contracts']
+for col in expected_cols:
+    if col not in df.columns:
+        if col == 'Contracts':
+            df[col] = 1
+        elif col == 'Ticker':
+            df[col] = 'Unknown'
+        else:
+            df[col] = 0
 
 # --- DATA CLEANING ---
 try:
+    # 1. Clean Numeric Columns
     cols_to_num = ['Realized_PL', 'Contracts', 'Credit', 'Short_Strike', 'Long_Strike', 'Debit']
     for c in cols_to_num:
         if c in df.columns:
+            # Remove currency symbols if present
             if df[c].dtype == object:
                 df[c] = df[c].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
                 df[c] = df[c].replace('', '0')
-            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
+            
+            # Convert to numeric
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+            
+            # Special handling for Contracts: Fill NaN with 1, not 0
+            if c == 'Contracts':
+                df[c] = df[c].fillna(1.0)
+            else:
+                df[c] = df[c].fillna(0.0)
     
-    # Force Date Conversion (Robust)
-    if 'Exit_Date' not in df.columns:
-        st.error("Missing 'Exit Date' column in data. Please check your Google Sheet.")
-        st.stop()
-    if 'Entry_Date' not in df.columns:
-        st.error("Missing 'Entry Date' column in data.")
-        st.stop()
-
+    # 2. Clean Dates
     df['Exit_Date'] = pd.to_datetime(df['Exit_Date'].astype(str), errors='coerce')
     df['Entry_Date'] = pd.to_datetime(df['Entry_Date'].astype(str), errors='coerce')
     
-    # Drop Garbage Rows
+    # Drop rows where essential dates are missing
     df = df.dropna(subset=['Exit_Date', 'Entry_Date'])
 
+    # Earnings Date Cleaning
     if 'Earnings_Date' not in df.columns:
         df['Earnings_Date'] = pd.NaT
     else:
         df['Earnings_Date'] = pd.to_datetime(df['Earnings_Date'].astype(str), errors='coerce')
 
+    # 3. Logic Fixes (Rollover & Derived Metrics)
     def fix_year_rollover(row):
+        # Fix unlikely case where Entry is AFTER Exit (often due to year boundary typo)
         if row['Entry_Date'] > row['Exit_Date']:
             return row['Entry_Date'] - pd.DateOffset(years=1)
         return row['Entry_Date']
 
     if not df.empty:
         df['Entry_Date'] = df.apply(fix_year_rollover, axis=1)
+        
+        # Calculate Duration
         df['Duration'] = (df['Exit_Date'] - df['Entry_Date']).dt.days
-        df['Duration'] = df['Duration'].clip(lower=1)
+        df['Duration'] = df['Duration'].clip(lower=1) # Minimum 1 day duration
         
         if 'Debit' not in df.columns: df['Debit'] = 0.0
         
+        # Calculate Risk Metrics
         df['Spread_Width'] = (df['Short_Strike'] - df['Long_Strike']).abs()
+        
+        # Protect against Zero spread width if data is missing
+        df['Spread_Width'] = df['Spread_Width'].replace(0, 0) 
+        
         df['Max_Loss_Trade'] = (df['Spread_Width'] - df['Credit']) * 100 * df['Contracts']
+        
+        # Risk Saved Calculation
         df['Risk_Saved'] = df.apply(lambda x: (x['Max_Loss_Trade'] - abs(x['Realized_PL'])) if x['Realized_PL'] < 0 else 0, axis=1)
 
     if df.empty:
-        st.warning("All log entries contained invalid data. Please clear your Log Sheet or check the format.")
+        st.warning("⚠️ Log entries found, but they contain invalid dates. Please check your Log Sheet format.")
         st.stop()
 
 except Exception as e:
@@ -165,11 +189,14 @@ except Exception as e:
 total_trades = len(df)
 wins = df[df['Realized_PL'] > 0]
 losses = df[df['Realized_PL'] <= 0]
+
 total_pl = df['Realized_PL'].sum()
 total_risk_saved = df['Risk_Saved'].sum()
+
 win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
 profit_factor = (wins['Realized_PL'].sum() / abs(losses['Realized_PL'].sum())) if not losses.empty and losses['Realized_PL'].sum() != 0 else float('inf')
 
+# Efficiency Metrics
 fast_trades = df[df['Duration'] < 14]
 slow_trades = df[df['Duration'] >= 14]
 fast_pl_daily = (fast_trades['Realized_PL'] / fast_trades['Duration']).mean() if not fast_trades.empty else 0
@@ -177,6 +204,7 @@ slow_pl_daily = (slow_trades['Realized_PL'] / slow_trades['Duration']).mean() if
 
 eff_insight = "Data insufficient for efficiency analysis."
 eff_color = "gray"
+
 if not fast_trades.empty and not slow_trades.empty:
     if fast_pl_daily > slow_pl_daily:
         ratio = fast_pl_daily / slow_pl_daily if slow_pl_daily > 0 else 1.0
@@ -186,6 +214,7 @@ if not fast_trades.empty and not slow_trades.empty:
         eff_insight = "🐢 **Patience Pays:** Longer duration trades are currently yielding higher daily returns."
         eff_color = "#FFA726"
 
+# --- METRICS DISPLAY ---
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Net P&L", f"${total_pl:,.0f}", delta_color="normal")
 m2.metric("Win Rate", f"{win_rate:.0f}%", f"{len(wins)}W - {len(losses)}L")
@@ -195,8 +224,10 @@ m5.metric("Avg Duration", f"{df['Duration'].mean():.0f} Days")
 
 st.markdown(f"<div style='background-color: rgba(255,255,255,0.05); padding: 8px 15px; border-radius: 5px; border-left: 3px solid {eff_color}; font-size: 14px; margin-bottom: 20px;'>{eff_insight}</div>", unsafe_allow_html=True)
 
+# --- CHARTS ---
 c1, c2 = st.columns(2)
 df_sorted = df.sort_values(by="Exit_Date")
+
 with c1:
     st.markdown("**💰 Equity Curve**")
     if not df.empty:
@@ -222,13 +253,20 @@ with c2:
         st.pyplot(fig2, use_container_width=True)
 
 st.markdown("---")
+
+# --- TRADE HISTORY ---
 st.subheader("Trade History")
 
-for i, row in df.iloc[::-1].iterrows():
+# Iterate in reverse to show newest first
+# We use enumerate on the REVERSED dataframe to keep UI consistent, 
+# BUT we must pass the ORIGINAL index to delete_log_entry for safety.
+for i, row in df.sort_values(by='Exit_Date', ascending=False).iterrows():
+    
     pl = row['Realized_PL']
     is_win = pl > 0
     is_scratch = (pl == 0)
     
+    # Styling Logic
     if is_win:
         border_color = SUCCESS_COLOR
         card_bg = "rgba(0, 200, 83, 0.05)"
@@ -247,6 +285,7 @@ for i, row in df.iloc[::-1].iterrows():
         pl_display = f"<span style='color:{WARNING_COLOR}'>-${abs(pl):,.2f}</span> <span style='font-size:0.8em; color:#666;'>/ -${max_loss_val:,.0f} Max</span>"
         risk_badge = f"""<div class="risk-badge">🛡️ Saved <strong>${saved_val:,.2f}</strong> by stopping out.</div>"""
 
+    # Earnings Logic
     earnings_display = ""
     if pd.notnull(row['Earnings_Date']):
         e_date = row['Earnings_Date']
@@ -258,6 +297,7 @@ for i, row in df.iloc[::-1].iterrows():
 
     short_strike_display = f"{row['Short_Strike']:.0f}" if row['Short_Strike'] > 0 else "N/A"
 
+    # HTML Card Construction
     card_html = textwrap.dedent(f"""
         <div class="trade-card" style="border-left: 4px solid {border_color}; background-color: {card_bg}; padding: 10px; border-radius: 4px; margin-bottom: 8px;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -283,6 +323,7 @@ for i, row in df.iloc[::-1].iterrows():
         with c_note:
             st.write(f"**Notes:** {row.get('Notes', '-')}")
         with c_act:
+            # Use the dataframe index 'i' which corresponds to the original list index
             if st.button("Delete", key=f"del_{i}"):
                 if delete_log_entry(drive_service, i):
                     st.rerun()
