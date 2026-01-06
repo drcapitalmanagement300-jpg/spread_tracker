@@ -25,8 +25,6 @@ STOP_LOSS_COLOR = "#FFA726"
 WHITE_DIVIDER_HTML = "<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: 10px; margin-bottom: 10px;'>"
 
 # ---------------- UI Refresh ----------------
-# This automatically re-runs the script every 60 seconds, 
-# which triggers the load_from_drive() below, keeping data in sync.
 st_autorefresh(interval=60_000, key="ui_refresh")
 
 # ---------------- Auth / Drive ----------------
@@ -111,7 +109,6 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     ax.axvline(x=trade_start_date, color=SUCCESS_COLOR, linestyle='--', linewidth=1, label='Start', alpha=0.7)
     ax.axvline(x=expiration_date, color='#B0BEC5', linestyle='--', linewidth=1, label='Exp', alpha=0.7)
     
-    # Updated warning date to 21 days (Golden Config)
     warning_date = expiration_date - pd.Timedelta(days=21)
     ax.axvline(x=warning_date, color=STOP_LOSS_COLOR, linestyle='--', linewidth=1, label='21 Days Out', alpha=0.8)
 
@@ -146,9 +143,6 @@ def render_profit_bar(profit_pct):
     if profit_pct is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
     
-    # Scale adjusted for higher profit target (75%)
-    # -100% (Loss) to +75% (Target)
-    
     fill_pct = ((profit_pct + 100) / 175) * 100 
     display_fill = max(0, min(fill_pct, 100))
     
@@ -156,7 +150,7 @@ def render_profit_bar(profit_pct):
         bar_color = WARNING_COLOR 
         label_color = WARNING_COLOR
         status_text = f"LOSS: {profit_pct:.1f}%"
-    elif profit_pct < 75: # Updated target
+    elif profit_pct < 75:
         bar_color = SUCCESS_COLOR
         label_color = SUCCESS_COLOR
         status_text = f"PROFIT: {profit_pct:.1f}%"
@@ -184,7 +178,6 @@ def render_profit_bar(profit_pct):
     )
 
 # ---------------- Load Drive State ----------------
-# Automatically fetch the latest data from Drive every time the app reruns.
 if drive_service:
     st.session_state.trades = load_from_drive(drive_service) or []
 else:
@@ -197,10 +190,10 @@ if not st.session_state.trades:
 else:
     for i, t in enumerate(st.session_state.trades):
         cached = t.get("cached", {})
-
         current_dte = days_to_expiry(t["expiration"])
         
-        contracts = t.get("contracts", 1) 
+        # Ensure contracts is an int
+        contracts = int(t.get("contracts", 1)) 
         
         width = abs(t["short_strike"] - t["long_strike"])
         max_gain_total = t["credit"] * 100 * contracts
@@ -222,38 +215,31 @@ else:
         spread_value = cached.get("spread_value_percent")
         profit_pct = cached.get("current_profit_percent")
         
-        # --- NEW: Get Crash Guard Status ---
         spy_crash_alert = cached.get("spy_below_ma", False) 
 
-        # --- Status Logic (GOLDEN CONFIG UPDATED) ---
+        # --- Status Logic ---
         status_msg = "Status Nominal"
         status_icon = "✅"
         status_color = SUCCESS_COLOR
 
-        # 1. CRASH GUARD (Top Priority)
         if spy_crash_alert:
             status_icon = "🚨"
             status_msg = "MARKET CRASH ALERT (SPY < 200 SMA)"
             status_color = WARNING_COLOR
-        
-        # 2. PROFIT TARGET (75%)
         elif profit_pct and profit_pct >= 75:
             status_icon = "💰" 
             status_msg = "TARGET REACHED (75%)"
             status_color = SUCCESS_COLOR
-
-        # 3. STOP LOSS / RISK RULES
         else:
-            if spread_value and spread_value >= 400: # Updated to 400%
+            if spread_value and spread_value >= 400:
                 status_icon = "⚠️"
                 status_color = WARNING_COLOR
-                status_msg = "Stop Loss Hit (Greater than 400%)"
-            elif current_dte <= 21: # Updated to 21 Days
+                status_msg = "Stop Loss Hit (>400%)"
+            elif current_dte <= 21:
                 status_icon = "⚠️"
                 status_color = WARNING_COLOR
-                status_msg = "Exit Zone (Less than 21 DTE)"
+                status_msg = "Exit Zone (<21 DTE)"
         
-        # Colors for metrics
         spread_color = WARNING_COLOR if spread_value and spread_value >= 400 else SUCCESS_COLOR
         spread_val = f"{spread_value:.0f}" if spread_value is not None else "Pending"
         
@@ -262,7 +248,6 @@ else:
         pop_color = SUCCESS_COLOR if pop_percent >= 60 else "#FFA726"
         if pop_percent < 50: pop_color = WARNING_COLOR
         
-        # SPY Status Color
         spy_status_text = "BULLISH (Index above 200 SMA)"
         spy_status_color = SUCCESS_COLOR
         if spy_crash_alert:
@@ -351,15 +336,25 @@ else:
                                 est_price = current_short - current_long
                                 if est_price > 0:
                                     default_debit = est_price
+                            
                             debit_paid = st.number_input("Debit Paid ($)", min_value=0.0, value=float(f"{default_debit:.2f}"), step=0.01)
+                            
+                            # UPDATED: Exit Date Input (defaults to Today)
+                            exit_date_val = st.date_input("Exit Date", value=datetime.now().date())
+                        
                         with col_log2:
                             close_notes = st.text_area("Notes", height=70)
                         
                         if st.form_submit_button("Confirm Close"):
                             if drive_service:
+                                # Prepare trade data for the log
                                 trade_data = t.copy()
                                 trade_data['debit_paid'] = debit_paid
                                 trade_data['notes'] = close_notes
+                                # EXPLICITLY pass the input date as string
+                                trade_data['exit_date'] = exit_date_val.isoformat()
+                                # EXPLICITLY pass contracts from the trade object
+                                trade_data['contracts'] = contracts
                                 
                                 if log_completed_trade(drive_service, trade_data):
                                     st.success(f"Logged {t['ticker']}")
@@ -380,7 +375,6 @@ else:
 
         # -------- RIGHT CARD --------
         with cols[1]:
-            # Calculate current Dollar P/L for display
             pl_dollars = 0.0
             if profit_pct is not None:
                 pl_dollars = max_gain_total * (profit_pct / 100.0)
@@ -390,16 +384,9 @@ else:
 
             right_card_html = (
                 f"<div style='font-size: 14px; margin-bottom: 5px; position: relative;'>"
-                # Dollar P/L in top right of card
                 f"<div style='position: absolute; top: 0; right: 0; font-weight: bold; color: {pl_text_color}; font-size: 1.1em;'>{pl_str}</div>"
-                
-                # REPLACED Delta with SPY Status
                 f"<div style='margin-bottom: 4px; padding-right: 70px;'>Market Regime: <strong style='color:{spy_status_color}'>{spy_status_text}</strong></div>"
-                
-                # UPDATED Threshold to 400%
                 f"<div style='margin-bottom: 4px;'>Spread Value: <strong style='color:{spread_color}'>{spread_val}%</strong> <span style='color:gray; font-size:0.85em;'>(Must not exceed 400%)</span></div>"
-                
-                # UPDATED Threshold to 21 Days
                 f"<div>DTE: <strong style='color:{dte_color}'>{current_dte}</strong> <span style='color:gray; font-size:0.85em;'>(Must be greater than 21 days)</span></div>"
                 f"</div>"
             )
@@ -407,7 +394,6 @@ else:
             
             st.markdown(render_profit_bar(profit_pct), unsafe_allow_html=True)
             
-            # Chart
             price_hist = t.get("cached", {}).get("price_history", [])
             crit_price = t.get("cached", {}).get("critical_price_040")
             
@@ -434,10 +420,9 @@ else:
             else:
                 st.caption("Loading chart...")
 
-        # Solid White Divider between trades
         st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
-# ---------------- External Tools (No Header) ----------------
+# ---------------- External Tools ----------------
 t1, t2 = st.columns(2)
 with t1: st.link_button("TradingView", "https://www.tradingview.com/", use_container_width=True)
 with t2: st.link_button("Wealthsimple", "https://my.wealthsimple.com/app/home", use_container_width=True)
