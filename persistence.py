@@ -2,8 +2,8 @@ import streamlit as st
 import json
 import io
 import os
+import logging
 from datetime import datetime, date
-from typing import Any, Dict, List, Optional
 
 # --- GOOGLE AUTH IMPORTS ---
 from google.oauth2.credentials import Credentials as OAuthCredentials
@@ -12,6 +12,12 @@ import google.auth.exceptions
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google_auth_oauthlib.flow import Flow
+
+# Import Lock Manager
+try:
+    from google_drive import DriveLockManager
+except ImportError:
+    DriveLockManager = None
 
 # --- CONFIG ---
 DRIVE_FILE_NAME = "credit_spreads.json"
@@ -152,7 +158,7 @@ def _find_file_id(service, filename):
         return files[0]['id'] if files else None
     except: return None
 
-# ----------------------------- JSON STORAGE -----------------------------
+# ----------------------------- JSON STORAGE (WITH LOCKING) -----------------------------
 def load_from_drive(service):
     if not service: return []
     file_id = _find_file_id(service, DRIVE_FILE_NAME)
@@ -163,7 +169,13 @@ def load_from_drive(service):
     except: return []
 
 def save_to_drive(service, trades):
+    """
+    Saves trades to Drive using DriveLockManager to prevent race conditions
+    with the background update script.
+    """
     if not service: return False
+    
+    # Clean data (date objects to strings)
     clean_trades = []
     for t in trades:
         ct = t.copy()
@@ -175,22 +187,34 @@ def save_to_drive(service, trades):
     media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='application/json')
     file_id = _find_file_id(service, DRIVE_FILE_NAME)
     
+    # --- LOCKING LOGIC ---
+    lock = None
+    if DriveLockManager and file_id:
+        lock = DriveLockManager(service, file_id)
+        try:
+            lock.acquire() # Wait for background script to finish
+        except Exception as e:
+            print(f"Warning: Could not acquire lock, proceeding anyway: {e}")
+            lock = None
+
     try:
         if file_id:
             service.files().update(fileId=file_id, media_body=media).execute()
         else:
             service.files().create(body={'name': DRIVE_FILE_NAME}, media_body=media).execute()
         return True
-    except: return False
+    except Exception as e:
+        print(f"Save Error: {e}")
+        return False
+    finally:
+        if lock:
+            lock.release()
 
-# ----------------------------- SHEETS LOGGING (RESTORED) -----------------------------
+# ----------------------------- SHEETS LOGGING -----------------------------
 def _get_spreadsheet_id(service, sheets_service):
-    # 1. Find existing
     q = f"name = '{SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet'"
     files = service.files().list(q=q).execute().get('files', [])
     if files: return files[0]['id']
-    
-    # 2. Create new
     ss = sheets_service.spreadsheets().create(body={'properties': {'title': SPREADSHEET_NAME}}).execute()
     return ss['spreadsheetId']
 
@@ -203,18 +227,14 @@ def _ensure_sheet_exists(sheets_service, spreadsheet_id):
             break
             
     if sheet_id is None:
-        # Create sheet
         req = {"addSheet": {"properties": {"title": SHEET_TITLE}}}
         res = sheets_service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": [req]}).execute()
         sheet_id = res['replies'][0]['addSheet']['properties']['sheetId']
-        
-        # Add Headers
         headers = [["Ticker", "Entry", "Exit", "Strike_Short", "Strike_Long", "Credit", "Debit", "Contracts", "PnL", "Notes"]]
         sheets_service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A1",
             valueInputOption="RAW", body={"values": headers}
         ).execute()
-        
     return sheet_id
 
 def log_completed_trade(service, trade_data):
@@ -251,38 +271,27 @@ def get_trade_log(service):
     try:
         sheets_service = build_sheets_service_from_session()
         spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
-        
         res = sheets_service.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id, range=f"{SHEET_TITLE}!A:Z"
         ).execute()
-        
         rows = res.get('values', [])
         if len(rows) < 2: return []
-        
         headers = rows[0]
         data = []
         for i, r in enumerate(rows[1:]):
-            # Row index in sheet is i + 2 (1-based, +1 for header)
             item = {headers[j]: (r[j] if j < len(r) else "") for j in range(len(headers))}
-            item['_row_index'] = i + 1 # API uses 0-based index for delete, usually data starts at index 1
+            item['_row_index'] = i + 1
             data.append(item)
         return data
     except: return []
 
 def delete_log_entry(service, row_index):
-    """
-    Deletes a specific row from the Google Sheet.
-    row_index: The 0-based index of the data row to delete (relative to data start).
-    """
     if not service: return False
     try:
         sheets_service = build_sheets_service_from_session()
         spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
         sheet_id = _ensure_sheet_exists(sheets_service, spreadsheet_id)
-        
-        # Calculate actual grid index (Header is index 0, Data starts at 1)
         grid_index = row_index + 1 
-        
         req = {
             "deleteDimension": {
                 "range": {
@@ -293,7 +302,6 @@ def delete_log_entry(service, row_index):
                 }
             }
         }
-        
         sheets_service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id, body={"requests": [req]}
         ).execute()
@@ -301,29 +309,3 @@ def delete_log_entry(service, row_index):
     except Exception as e:
         print(f"Delete Error: {e}")
         return False
-
-def update_log_entry(service, row_index, updated_data):
-    """
-    Updates a specific row in the Google Sheet.
-    """
-    if not service: return False
-    try:
-        sheets_service = build_sheets_service_from_session()
-        spreadsheet_id = _get_spreadsheet_id(service, sheets_service)
-        
-        # Convert dict back to list based on headers
-        # Note: This implies we know the header order. Ideally we fetch headers first.
-        # For simplicity, we assume standard order or just map values if passed as list.
-        if isinstance(updated_data, list):
-            values = updated_data
-        else:
-            return False # Wrapper expects list for update currently
-            
-        range_name = f"{SHEET_TITLE}!A{row_index + 2}" # +2 for 1-based + header
-        
-        sheets_service.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id, range=range_name,
-            valueInputOption="USER_ENTERED", body={"values": [values]}
-        ).execute()
-        return True
-    except: return False
