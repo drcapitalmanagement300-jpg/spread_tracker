@@ -425,6 +425,11 @@ if st.session_state.scan_results is not None:
                     """, unsafe_allow_html=True)
                     st.divider()
                     
+                    # Calculate Exit Target (21 Days prior to Exp)
+                    exp_dt = datetime.strptime(s['expiration_raw'], "%Y-%m-%d")
+                    exit_dt = exp_dt - timedelta(days=21)
+                    exit_str = exit_dt.strftime("%b %d, %Y")
+
                     c1, c2 = st.columns(2)
                     with c1:
                         # Added Max Risk side-by-side with Credit
@@ -448,6 +453,7 @@ if st.session_state.scan_results is not None:
                         <div class="metric-label">Expiry</div>
                         <div class="metric-value">{s['dte']} Days</div>
                         <div style="font-size: 10px; color: gray;">{s['expiration']}</div>
+                        <div style="font-size: 10px; color: #FFA726; margin-top: 2px;">Exit: {exit_str}</div>
                         <div style="height: 8px;"></div>
                         <div class="metric-label">Implied Vol</div>
                         <div class="metric-value">{s['iv']:.1f}%</div>
