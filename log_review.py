@@ -2,9 +2,10 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.ticker as ticker  # Added for smarter ticks
 import numpy as np
 import textwrap 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Import persistence
 from persistence import (
@@ -174,6 +175,30 @@ st.markdown(f"<div style='background-color: rgba(255,255,255,0.05); padding: 8px
 c1, c2 = st.columns(2)
 df_sorted = df.sort_values(by="Exit_Date")
 
+def setup_smart_axis(ax, dates):
+    """Prevents repeating dates on the X-axis for sparse data."""
+    if len(dates) < 1: return
+    
+    # 1. Format: Jan 01
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+    
+    # 2. Check Time Span
+    min_date = dates.min()
+    max_date = dates.max()
+    days_diff = (max_date - min_date).days
+    
+    # 3. Apply Logic based on span
+    if days_diff < 3:
+        # If span is tiny (e.g. 1 day), widen view by +/- 1 day so ticks are distinct
+        ax.set_xlim(min_date - timedelta(days=1), max_date + timedelta(days=1))
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+    else:
+        # Normal auto scaling with limit on ticks
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=3, maxticks=8))
+    
+    # 4. Rotate labels to fit
+    plt.setp(ax.get_xticklabels(), rotation=0, ha='center')
+
 with c1:
     st.markdown("**💰 Equity Curve**")
     if not df.empty:
@@ -181,7 +206,10 @@ with c1:
         fig, ax = plt.subplots(figsize=(6, 2.5))
         ax.plot(df_sorted['Exit_Date'], df_sorted['Cumulative_PL'], color=SUCCESS_COLOR, linewidth=2)
         ax.fill_between(df_sorted['Exit_Date'], df_sorted['Cumulative_PL'], color=SUCCESS_COLOR, alpha=0.1)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+        
+        # Apply Smart Axis Fix
+        setup_smart_axis(ax, df_sorted['Exit_Date'])
+
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         st.pyplot(fig, use_container_width=True)
@@ -195,7 +223,10 @@ with c2:
         fig2, ax2 = plt.subplots(figsize=(6, 2.5))
         ax2.plot(df_sorted['Exit_Date'], df_sorted['Cumulative_Saved'], color=SAVED_COLOR, linewidth=2, linestyle='--')
         ax2.fill_between(df_sorted['Exit_Date'], df_sorted['Cumulative_Saved'], color=SAVED_COLOR, alpha=0.1)
-        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+        
+        # Apply Smart Axis Fix
+        setup_smart_axis(ax2, df_sorted['Exit_Date'])
+
         ax2.spines['top'].set_visible(False)
         ax2.spines['right'].set_visible(False)
         st.pyplot(fig2, use_container_width=True)
