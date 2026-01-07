@@ -186,32 +186,36 @@ def bs_price(option_type, S, K, T, r, sigma):
 def find_stop_loss_price(target_value, option_type, short_K, long_K, T, r, short_sigma, long_sigma):
     """
     Finds the underlying price S where the spread value (Short - Long) equals target_value.
-    Uses a binary search.
+    Uses a binary search with fixed Sigma to avoid skewed data artifacts.
     """
     width = abs(short_K - long_K)
-    if target_value >= width: return None # Impossible, max value is width
-    if target_value <= 0: return None # Impossible for credit spread
+    if target_value >= width: return None 
+    if target_value <= 0: return None
 
     # Search range: from effectively 0 to double the short strike
     low = 0.01
     high = short_K * 2.0
     
     # Binary Search
-    for _ in range(20): # 20 iterations gives sufficient precision
+    for _ in range(20):
         mid = (low + high) / 2
         p_short = bs_price(option_type, mid, short_K, T, r, short_sigma)
         p_long = bs_price(option_type, mid, long_K, T, r, long_sigma)
         
-        # Current spread value at price 'mid'
         spread_val = p_short - p_long
         
-        # For Puts: As S decreases (moves left), Spread Value increases.
-        # If current val > target, we are "too deep" (price too low). We need Higher Price.
-        if spread_val > target_value:
-            low = mid
+        # Puts: Lower Price = Higher Value.
+        # If Current Val > Target -> We are too deep. Need Higher Price.
+        if option_type == "put":
+            if spread_val > target_value:
+                low = mid
+            else:
+                high = mid
         else:
-            # If current val < target, we are not deep enough. We need Lower Price.
-            high = mid
+            if spread_val > target_value:
+                high = mid
+            else:
+                low = mid
             
     return high
 
@@ -265,7 +269,6 @@ def update_trade(trade, data_manager):
     short_leg_greeks = {"delta": 0, "gamma": 0, "theta": 0}
     long_leg_greeks = {"delta": 0, "gamma": 0, "theta": 0}
     
-    # REPLACED: critical_price_040 logic
     stop_loss_price = None
 
     if current_price and dte > 0:
@@ -274,9 +277,14 @@ def update_trade(trade, data_manager):
         if long_iv:
             long_leg_greeks = calculate_greeks("put", current_price, long_strike, T_years, 0.05, long_iv)
             
-        # NEW: Calculate 400% Stop Loss Price
-        if short_iv and long_iv and credit_received > 0:
+        # --- STOP LOSS CALCULATION (PATCHED) ---
+        if short_iv and credit_received > 0:
             target_stop_loss_value = credit_received * 4.0
+            
+            # FIX: Use short_iv for BOTH legs to normalize skew.
+            # This prevents bad OTM data from distorting the price target.
+            calc_sigma = short_iv 
+
             stop_loss_price = find_stop_loss_price(
                 target_value=target_stop_loss_value,
                 option_type="put",
@@ -284,8 +292,8 @@ def update_trade(trade, data_manager):
                 long_K=long_strike,
                 T=T_years,
                 r=0.05,
-                short_sigma=short_iv,
-                long_sigma=long_iv
+                short_sigma=calc_sigma, # Clean data
+                long_sigma=calc_sigma   # Assumed flat skew
             )
 
     net_delta = (-1 * short_leg_greeks["delta"]) + (1 * long_leg_greeks["delta"])
@@ -335,7 +343,6 @@ def update_trade(trade, data_manager):
         "current_price": current_price,
         "day_change_percent": day_change_pct,
         "price_history": price_history,
-        # SAVING THE 400% PRICE HERE
         "stop_loss_price": stop_loss_price,
         "short_option_price": short_price,
         "long_option_price": long_price,
