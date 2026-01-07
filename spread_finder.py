@@ -117,6 +117,27 @@ def get_stock_data(ticker):
         sma_100 = hist['Close'].rolling(window=100).mean().iloc[-1] if len(hist) >= 100 else current_price
         is_above_sma = current_price > sma_100
 
+        # --- SECTOR & TYPE FETCH ---
+        try:
+            # We use fast_info where possible or fall back to info for sector
+            # Note: Fetching .info can be slow for many tickers
+            info = stock.info
+            
+            # 1. Asset Type
+            q_type = info.get('quoteType', 'EQUITY').upper()
+            if 'ETF' in q_type: type_str = "(ETF)"
+            elif 'INDEX' in q_type: type_str = "(Index)"
+            elif 'EQUITY' in q_type: type_str = "(Stock)"
+            else: type_str = ""
+
+            # 2. Sector
+            sector_str = info.get('sector', '')
+            if not sector_str:
+                sector_str = info.get('category', 'Unknown Sector') # Fallback for ETFs
+        except:
+            type_str = ""
+            sector_str = "-"
+
         rank = 50
         if not hist['HV'].empty:
             mn, mx = hist['HV'].min(), hist['HV'].max()
@@ -164,6 +185,8 @@ def get_stock_data(ticker):
             "is_above_sma": is_above_sma,
             "earnings_days": earnings_days,
             "earnings_date_str": next_earnings_date_str,
+            "type_str": type_str,
+            "sector_str": sector_str,
             "hist": hist
         }
     except: return None
@@ -417,8 +440,11 @@ if st.session_state.scan_results is not None:
                     st.markdown(f"""
                     <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                         <div>
-                            <div style="font-size: 22px; font-weight: 900; color: white; line-height: 1;">{t}</div>
-                            <div style="margin-top: 4px;"><span class="{pill_class}">${d['price']:.2f} ({d['change_pct']:.2f}%)</span></div>
+                            <div style="font-size: 22px; font-weight: 900; color: white; line-height: 1;">
+                                {t} <span style="font-size: 12px; font-weight: 400; color: #aaa;">{d['type_str']}</span>
+                            </div>
+                            <div style="font-size: 11px; color: #888; margin-bottom: 4px;">{d['sector_str']}</div>
+                            <div style="margin-top: 2px;"><span class="{pill_class}">${d['price']:.2f} ({d['change_pct']:.2f}%)</span></div>
                         </div>
                         <div class="strategy-badge" style="{badge_style}">{badge_text}</div>
                     </div>
