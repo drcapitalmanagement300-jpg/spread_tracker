@@ -204,8 +204,6 @@ def find_stop_loss_price(target_value, option_type, short_K, long_K, T, r, short
         
         spread_val = p_short - p_long
         
-        # Puts: Lower Price = Higher Value.
-        # If Current Val > Target -> We are too deep. Need Higher Price.
         if option_type == "put":
             if spread_val > target_value:
                 low = mid
@@ -236,17 +234,40 @@ def calculate_greeks(option_type, S, K, T, r, sigma):
     return {"delta": delta, "gamma": gamma, "theta": theta_annual / 365.0}
 
 def get_option_data(data_manager, ticker, expiration_str, short_strike, long_strike):
+    """
+    Fetches option data using MIDPOINT pricing (Bid/Ask average) to fix skewed PnL.
+    Fallbacks to lastPrice only if bid/ask are missing.
+    """
     try:
         chain = data_manager.get_chain(ticker, expiration_str)
         if chain is None: return None, None, None, None
         puts = chain.puts
         short_row = puts[puts['strike'] == short_strike]
         long_row = puts[puts['strike'] == long_strike]
+        
         if short_row.empty or long_row.empty: return None, None, None, None
-        return (float(short_row['lastPrice'].values[0]), 
-                float(long_row['lastPrice'].values[0]), 
-                float(short_row['impliedVolatility'].values[0]), 
-                float(long_row['impliedVolatility'].values[0]))
+        
+        # --- ROBUST PRICE EXTRACTION ---
+        def get_mid_price(row):
+            bid = row['bid'].values[0]
+            ask = row['ask'].values[0]
+            last = row['lastPrice'].values[0]
+            
+            # If Bid/Ask are valid (Ask > Bid and non-zero), use Midpoint
+            if ask > 0 and bid >= 0 and ask > bid:
+                return (bid + ask) / 2.0
+            
+            # Fallback to lastPrice if bid/ask are broken
+            return float(last)
+
+        s_price = get_mid_price(short_row)
+        l_price = get_mid_price(long_row)
+        
+        s_iv = float(short_row['impliedVolatility'].values[0])
+        l_iv = float(long_row['impliedVolatility'].values[0])
+        
+        return s_price, l_price, s_iv, l_iv
+
     except: return None, None, None, None
 
 def update_trade(trade, data_manager):
@@ -277,12 +298,9 @@ def update_trade(trade, data_manager):
         if long_iv:
             long_leg_greeks = calculate_greeks("put", current_price, long_strike, T_years, 0.05, long_iv)
             
-        # --- STOP LOSS CALCULATION (PATCHED) ---
+        # --- STOP LOSS CALCULATION ---
         if short_iv and credit_received > 0:
             target_stop_loss_value = credit_received * 4.0
-            
-            # FIX: Use short_iv for BOTH legs to normalize skew.
-            # This prevents bad OTM data from distorting the price target.
             calc_sigma = short_iv 
 
             stop_loss_price = find_stop_loss_price(
@@ -292,8 +310,8 @@ def update_trade(trade, data_manager):
                 long_K=long_strike,
                 T=T_years,
                 r=0.05,
-                short_sigma=calc_sigma, # Clean data
-                long_sigma=calc_sigma   # Assumed flat skew
+                short_sigma=calc_sigma, 
+                long_sigma=calc_sigma   
             )
 
     net_delta = (-1 * short_leg_greeks["delta"]) + (1 * long_leg_greeks["delta"])
@@ -302,8 +320,21 @@ def update_trade(trade, data_manager):
 
     profit_pct = None
     spread_val_pct = None
+    
     if short_price is not None and long_price is not None and credit_received > 0:
-        cost = short_price - long_price
+        # --- SANITY CHECK: INTRINSIC FLOOR & WIDTH CAP ---
+        # The cost to buy back the spread can NEVER be more than the width
+        # And it can rarely be less than 0 (for puts).
+        
+        raw_cost = short_price - long_price
+        width = abs(short_strike - long_strike)
+        
+        # 1. Clamp Max Value to Width (Max Loss)
+        cost = min(raw_cost, width)
+        
+        # 2. Clamp Min Value to 0 (though technically can be slightly negative in weird arb cases, 0 is safe for PnL)
+        cost = max(cost, 0.0)
+        
         profit_pct = ((credit_received - cost) / credit_received) * 100
         spread_val_pct = (cost / credit_received) * 100
 
