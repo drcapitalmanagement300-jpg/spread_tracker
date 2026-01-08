@@ -117,7 +117,6 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     ax.axhspan(short_strike, long_strike, color='#FF5252', alpha=0.15)
 
     if crit_price:
-        # UPDATED LABEL
         ax.axhline(y=crit_price, color=STOP_LOSS_COLOR, linestyle=':', linewidth=1.2, label='Stop Loss (400%)')
 
     ax.spines['top'].set_visible(False)
@@ -140,25 +139,58 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     plt.tight_layout()
     return fig
 
-def render_profit_bar(profit_pct):
-    if profit_pct is None:
+def render_profit_bar(current_pl, max_loss, max_gain):
+    """
+    Renders a Hybrid P&L Bar.
+    - Positive (Green): % of Max Profit (Premium).
+    - Negative (Red): % of Max Risk (Collateral).
+    """
+    if current_pl is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
     
-    fill_pct = ((profit_pct + 100) / 160) * 100 
-    display_fill = max(0, min(fill_pct, 100))
-    
-    if profit_pct < 0:
-        bar_color = WARNING_COLOR 
-        label_color = WARNING_COLOR
-        status_text = f"LOSS: {profit_pct:.1f}%"
-    elif profit_pct < 60:
-        bar_color = SUCCESS_COLOR
-        label_color = SUCCESS_COLOR
-        status_text = f"PROFIT: {profit_pct:.1f}%"
+    # Calculate Hybrid %
+    if current_pl >= 0:
+        # Profit relative to Credit Collected (Target is 60%)
+        display_pct = (current_pl / max_gain) * 100 if max_gain > 0 else 0
+        is_profit = True
     else:
+        # Loss relative to Max Risk (Stop is usually managed before -100%)
+        display_pct = (current_pl / max_loss) * 100 if max_loss > 0 else 0
+        is_profit = False
+
+    # Visual Mapping for the CSS Bar (0 to 100 scale)
+    # We want the bar to split in the middle (50%).
+    # -100% Risk -> 0% Bar
+    # 0% PnL -> 50% Bar
+    # +60% Gain -> ~80% Bar (Target)
+    # +100% Gain -> 100% Bar
+    
+    # Scale Logic:
+    # If Profit: Map 0..100 to 50..100
+    # If Loss: Map -100..0 to 0..50
+    
+    if is_profit:
+        visual_fill = 50 + (display_pct / 2) # e.g., 60% profit -> 50 + 30 = 80% filled
+    else:
+        # display_pct is negative (e.g., -50%)
+        # -100% -> 0 fill. -50% -> 25 fill. 0% -> 50 fill.
+        visual_fill = 50 - (abs(display_pct) / 2)
+        
+    visual_fill = max(0, min(visual_fill, 100))
+    
+    if is_profit:
         bar_color = SUCCESS_COLOR 
         label_color = SUCCESS_COLOR
-        status_text = f"WIN TARGET: {profit_pct:.1f}%"
+        status_text = f"PROFIT: +{display_pct:.1f}% (of Credit)"
+        if display_pct >= 60:
+             status_text = f"WIN TARGET: {display_pct:.1f}%"
+    else:
+        bar_color = WARNING_COLOR
+        label_color = WARNING_COLOR
+        status_text = f"LOSS: {display_pct:.1f}% (of Risk)"
+
+    # Target Marker Position (60% Profit = 80% visual position)
+    target_marker_left = 80 
 
     return (
         f'<div style="margin-bottom: 12px; margin-top: 5px;">'
@@ -166,14 +198,22 @@ def render_profit_bar(profit_pct):
         f'<strong style="color: #ddd;">Target Progress</strong>'
         f'<span style="color:{label_color}; font-weight:bold;">{status_text}</span>'
         f'</div>'
-        f'<div style="width: 100%; background-color: #333; height: 6px; border-radius: 3px; position: relative; overflow: hidden; border: 1px solid #444;">'
-        f'<div style="width: {display_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>'
-        f'<div style="position: absolute; left: 57%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.5);" title="Break Even (0%)"></div>'
+        
+        f'<div style="width: 100%; background-color: #333; height: 8px; border-radius: 4px; position: relative; overflow: hidden; border: 1px solid #444;">'
+            # The Fill Bar
+            f'<div style="width: {visual_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>'
+            
+            # Break Even Marker (Center)
+            f'<div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.8);" title="Break Even"></div>'
+            
+            # Target Marker (60% Profit)
+            f'<div style="position: absolute; left: {target_marker_left}%; top: 0; bottom: 0; width: 2px; background-color: {SUCCESS_COLOR}; opacity: 0.7;" title="Target (60%)"></div>'
         f'</div>'
+        
         f'<div style="position: relative; height: 15px; font-size: 9px; color: gray; margin-top: 2px;">'
-        f'<span style="position: absolute; left: 0;">Max Loss</span>'
-        f'<span style="position: absolute; left: 57%; transform: translateX(-50%);">Break Even</span>'
-        f'<span style="position: absolute; right: 0;">TARGET (60%)</span>'
+        f'<span style="position: absolute; left: 0;">Max Loss (-100%)</span>'
+        f'<span style="position: absolute; left: 50%; transform: translateX(-50%);">Break Even</span>'
+        f'<span style="position: absolute; left: {target_marker_left}%; transform: translateX(-50%);">Target (60%)</span>'
         f'</div>'
         f'</div>'
     )
@@ -193,6 +233,7 @@ else:
         cached = t.get("cached", {})
         current_dte = days_to_expiry(t["expiration"])
         
+        # Ensure contracts is an int
         contracts = int(t.get("contracts", 1)) 
         
         width = abs(t["short_strike"] - t["long_strike"])
@@ -387,10 +428,10 @@ else:
             )
             st.markdown(right_card_html, unsafe_allow_html=True)
             
-            st.markdown(render_profit_bar(profit_pct), unsafe_allow_html=True)
+            # UPDATED CALL: Pass current dollars, max loss, max gain
+            st.markdown(render_profit_bar(pl_dollars, max_loss_total, max_gain_total), unsafe_allow_html=True)
             
             price_hist = t.get("cached", {}).get("price_history", [])
-            # NEW KEY: stop_loss_price
             stop_price = t.get("cached", {}).get("stop_loss_price")
             
             if price_hist:
