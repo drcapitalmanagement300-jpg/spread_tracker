@@ -5,13 +5,12 @@ import numpy as np
 from datetime import datetime
 import json
 
-# --- SILENCE WARNINGS (MUST BE BEFORE IMPORT) ---
+# --- SILENCE WARNINGS ---
 import warnings
-# This blocks the "FutureWarning" text from clogging your logs
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# --- GOOGLE AI LIBRARY ---
+# --- GOOGLE AI LIBRARY (OLD STABLE VERSION) ---
 import google.generativeai as genai
 
 # --- CONFIGURATION ---
@@ -33,6 +32,21 @@ with header_col2:
 with st.sidebar:
     st.header("Hunter Settings")
     dev_mode = st.checkbox("🛠 Dev Mode (Test Logic)", value=False, help="Forces detection of 'Panic' to test AI and UI logic.")
+    
+    # DEBUG TOOL: Check available models
+    if st.button("🔍 Check Available Models"):
+        try:
+            api_key = st.secrets.get("GOOGLE_API_KEY")
+            if api_key:
+                genai.configure(api_key=api_key)
+                # List models and filter for those that generate content
+                models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                st.success("✅ Valid Models Found:")
+                st.code("\n".join(models))
+            else:
+                st.error("No API Key found.")
+        except Exception as e:
+            st.error(f"Error checking models: {e}")
 
 # --- CONSTANTS ---
 LIQUID_TICKERS = [
@@ -63,28 +77,21 @@ def configure_gemini():
 
 # --- PHASE 1: QUANT SCANNER ---
 def scan_for_panic(ticker, dev=False):
-    """
-    Finds stocks that have dropped significantly.
-    """
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="3mo")
         if hist.empty: return None
         
         current_price = hist['Close'].iloc[-1]
-        
-        # Drop Check
         last_30 = hist.tail(30)
         high_30d = last_30['High'].max()
         if high_30d <= 0: return None
         
         drop_pct = ((current_price - high_30d) / high_30d) * 100
-        
-        # Volatility Check
         hist['Returns'] = hist['Close'].pct_change()
         current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
         
-        # --- DEV MODE OVERRIDE ---
+        # DEV OVERRIDE
         if dev:
             if drop_pct > -5.0:
                 return {
@@ -96,7 +103,7 @@ def scan_for_panic(ticker, dev=False):
                     "stock_obj": stock
                 }
         
-        # --- PRODUCTION LOGIC ---
+        # PRODUCTION LOGIC
         if drop_pct > -15.0: return None 
         if current_hv < 30: return None 
 
@@ -124,8 +131,9 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
             headlines.append(f"- {title}")
         news_text = "\n".join(headlines)
         
-        # Use stable model version
-        model = genai.GenerativeModel('gemini-1.5-flash',
+        # --- CRITICAL FIX: USE 'gemini-pro' ---
+        # This is the safest model name for the old v1beta API endpoint.
+        model = genai.GenerativeModel('gemini-pro',
             generation_config={"response_mime_type": "application/json"}
         )
         
