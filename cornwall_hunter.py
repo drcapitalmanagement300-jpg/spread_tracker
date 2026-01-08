@@ -4,10 +4,15 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import json
+import warnings
 
-# --- NEW GOOGLE IMPORT ---
-from google import genai
-from google.genai import types
+# --- REVERT TO OLD RELIABLE LIBRARY ---
+import google.generativeai as genai
+
+# Suppress the "FutureWarning" about the library being deprecated.
+# It still works perfectly fine for now and plays nicer with Google Drive.
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Cornwall Hunter")
@@ -21,7 +26,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini 2.0)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -43,25 +48,23 @@ LIQUID_TICKERS = [
     "LLY", "UNH", "JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "MRNA"
 ]
 
-# --- GEMINI CLIENT SETUP ---
-def get_gemini_client():
+# --- GEMINI SETUP (OLD SDK STYLE) ---
+def configure_gemini():
     api_key = st.secrets.get("GOOGLE_API_KEY")
     if not api_key:
         st.error("Missing GOOGLE_API_KEY in secrets.toml")
-        return None
+        return False
     try:
-        # NEW SYNTAX: Client initialization
-        return genai.Client(api_key=api_key)
+        genai.configure(api_key=api_key)
+        return True
     except Exception as e:
-        st.error(f"Gemini Client Error: {e}")
-        return None
+        st.error(f"Gemini Config Error: {e}")
+        return False
 
 # --- PHASE 1: QUANT SCANNER ---
 def scan_for_panic(ticker, dev=False):
     """
     Finds stocks that have dropped significantly.
-    Normal Mode: >15% drop in 20 days.
-    Dev Mode: FORCE PASS by simulating panic data if real data is healthy.
     """
     try:
         stock = yf.Ticker(ticker)
@@ -89,7 +92,7 @@ def scan_for_panic(ticker, dev=False):
                     "price": current_price,
                     "high_30d": current_price * 1.25, 
                     "drop_pct": -20.0, 
-                    "hv": 85.0,       
+                    "hv": 85.0,        
                     "stock_obj": stock
                 }
         
@@ -107,13 +110,9 @@ def scan_for_panic(ticker, dev=False):
         }
     except: return None
 
-# --- PHASE 2: AI CLASSIFIER (NEW SDK) ---
-def analyze_solvency_gemini(client, ticker, stock_obj, dev=False):
-    """
-    Uses Google Gemini via the new 'google-genai' SDK.
-    """
+# --- PHASE 2: AI CLASSIFIER (OLD SDK) ---
+def analyze_solvency_gemini(ticker, stock_obj, dev=False):
     try:
-        # 1. Fetch News
         news_items = stock_obj.news
         if not news_items:
             if dev: return {"category": "SOLVABLE", "reason": "(DEV) No news, forced solvable."}
@@ -125,7 +124,11 @@ def analyze_solvency_gemini(client, ticker, stock_obj, dev=False):
             headlines.append(f"- {title}")
         news_text = "\n".join(headlines)
         
-        # 2. Prepare Prompt
+        # CONFIG FOR OLD SDK
+        model = genai.GenerativeModel('gemini-1.5-flash',
+            generation_config={"response_mime_type": "application/json"}
+        )
+        
         prompt = f"""
         Analyze the recent news for {ticker} causing the price drop. 
         Headlines:
@@ -138,19 +141,11 @@ def analyze_solvency_gemini(client, ticker, stock_obj, dev=False):
         Return JSON format: {{"category": "TERMINAL" or "SOLVABLE", "reason": "Short summary (max 15 words)"}}
         """
         
-        # 3. Generate Content (NEW SYNTAX)
-        # Using gemini-2.0-flash-exp (or gemini-1.5-flash)
-        response = client.models.generate_content(
-            model='gemini-2.0-flash-exp', 
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
-        )
-        
+        response = model.generate_content(prompt)
         return json.loads(response.text)
         
     except Exception as e:
+        if "429" in str(e): return {"category": "RATE_LIMIT", "reason": "Gemini Rate Limit Hit."}
         return {"category": "ERROR", "reason": str(e)}
 
 # --- PHASE 3: OPTION MATH ---
@@ -201,8 +196,7 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
 # --- MAIN EXECUTION ---
 
 if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
-    client = get_gemini_client()
-    if not client: st.stop()
+    if not configure_gemini(): st.stop()
     
     status = st.empty()
     bar = st.progress(0)
@@ -221,8 +215,12 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"💥 Panic: {ticker}. Asking Gemini...")
         
         # 2. AI (Gemini)
-        verdict = analyze_solvency_gemini(client, ticker, panic_data['stock_obj'], dev=dev_mode)
+        verdict = analyze_solvency_gemini(ticker, panic_data['stock_obj'], dev=dev_mode)
         
+        if verdict.get('category') == "RATE_LIMIT":
+            st.warning("Gemini Rate Limit reached. Pausing...")
+            break
+            
         if verdict.get('category') == 'SOLVABLE' or dev_mode:
             # 3. Math
             recovery_target = panic_data['high_30d']
