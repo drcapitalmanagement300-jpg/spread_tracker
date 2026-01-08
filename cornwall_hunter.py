@@ -4,15 +4,15 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import json
+
+# --- SILENCE WARNINGS (MUST BE BEFORE IMPORT) ---
 import warnings
+# This blocks the "FutureWarning" text from clogging your logs
+warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=UserWarning)
 
-# --- REVERT TO OLD RELIABLE LIBRARY ---
+# --- GOOGLE AI LIBRARY ---
 import google.generativeai as genai
-
-# Suppress the "FutureWarning" about the library being deprecated.
-# It still works perfectly fine for now and plays nicer with Google Drive.
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Cornwall Hunter")
@@ -48,7 +48,7 @@ LIQUID_TICKERS = [
     "LLY", "UNH", "JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "MRNA"
 ]
 
-# --- GEMINI SETUP (OLD SDK STYLE) ---
+# --- GEMINI SETUP ---
 def configure_gemini():
     api_key = st.secrets.get("GOOGLE_API_KEY")
     if not api_key:
@@ -110,7 +110,7 @@ def scan_for_panic(ticker, dev=False):
         }
     except: return None
 
-# --- PHASE 2: AI CLASSIFIER (OLD SDK) ---
+# --- PHASE 2: AI CLASSIFIER ---
 def analyze_solvency_gemini(ticker, stock_obj, dev=False):
     try:
         news_items = stock_obj.news
@@ -124,7 +124,7 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
             headlines.append(f"- {title}")
         news_text = "\n".join(headlines)
         
-        # CONFIG FOR OLD SDK
+        # Use stable model version
         model = genai.GenerativeModel('gemini-1.5-flash',
             generation_config={"response_mime_type": "application/json"}
         )
