@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import json
-import time  # <--- NEW: Needed for the sleep timer
+import time
 
 # --- SILENCE WARNINGS ---
 import warnings
@@ -131,8 +131,6 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
             headlines.append(f"- {title}")
         news_text = "\n".join(headlines)
         
-        # --- MODEL NAME UPDATED ---
-        # Using gemini-2.0-flash (fastest and available to you)
         model = genai.GenerativeModel('gemini-2.0-flash',
             generation_config={"response_mime_type": "application/json"}
         )
@@ -210,35 +208,44 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     bar = st.progress(0)
     found_opportunities = []
     
-    # DEV MODE LIMIT: Only scan first 5 tickers to save time
-    scan_list = LIQUID_TICKERS[:5] if dev_mode else LIQUID_TICKERS
+    # 1. Dev Mode: Use tiny list. Production: Use full list.
+    scan_list = LIQUID_TICKERS[:3] if dev_mode else LIQUID_TICKERS
     
+    # 2. Rate Limit Logic
+    last_call_time = 0
+    RATE_LIMIT_DELAY = 4.1  # Seconds (Free tier is ~15 req/min, so 1 req every 4s)
+
     for i, ticker in enumerate(scan_list):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        # 1. Quant
+        # --- QUANT (Fast, Local) ---
         panic_data = scan_for_panic(ticker, dev=dev_mode)
         if not panic_data: continue
         
         status.text(f"💥 Panic: {ticker}. Asking Gemini...")
         
-        # 2. AI (Gemini)
+        # --- SMART THROTTLE (Wait BEFORE trying) ---
+        # Calculate how long since the last AI call
+        elapsed = time.time() - last_call_time
+        if elapsed < RATE_LIMIT_DELAY:
+            sleep_time = RATE_LIMIT_DELAY - elapsed
+            status.text(f"⏳ Throttling for {sleep_time:.1f}s (Gemini Free Tier)...")
+            time.sleep(sleep_time)
+        
+        # --- AI CALL (Gemini) ---
         verdict = analyze_solvency_gemini(ticker, panic_data['stock_obj'], dev=dev_mode)
+        last_call_time = time.time() # Reset timer
         
-        # --- RATE LIMIT HANDLING ---
+        # Fail safe if we still hit it
         if verdict.get('category') == "RATE_LIMIT":
-            st.warning("Gemini Rate Limit reached. Cooling down for 60 seconds...")
-            time.sleep(60) # Longer sleep if we actually hit the wall
-            # Retry once
+            st.warning("Rate limit hit despite throttle. Cooling down 60s...")
+            time.sleep(60)
             verdict = analyze_solvency_gemini(ticker, panic_data['stock_obj'], dev=dev_mode)
-        
-        # --- STANDARD THROTTLE ---
-        # Sleep 4 seconds after every AI call to stay under 15 RPM limit
-        time.sleep(4)
-            
+            last_call_time = time.time()
+
+        # --- MATH & RESULTS ---
         if verdict.get('category') == 'SOLVABLE' or dev_mode:
-            # 3. Math
             recovery_target = panic_data['high_30d']
             opportunity = find_cornwall_option(
                 panic_data['stock_obj'], 
@@ -255,6 +262,11 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                     "verdict": verdict,
                     "option": opportunity
                 })
+                
+                # DEV MODE SHORTCUT: Stop after finding ONE result
+                if dev_mode:
+                    status.text("Dev Mode: Result found. Stopping early.")
+                    break
     
     status.empty()
     bar.empty()
