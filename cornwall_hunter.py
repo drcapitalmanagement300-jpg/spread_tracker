@@ -10,7 +10,7 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# --- GOOGLE AI LIBRARY (OLD STABLE VERSION) ---
+# --- GOOGLE AI LIBRARY ---
 import google.generativeai as genai
 
 # --- CONFIGURATION ---
@@ -25,7 +25,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini 2.0)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -33,13 +33,12 @@ with st.sidebar:
     st.header("Hunter Settings")
     dev_mode = st.checkbox("🛠 Dev Mode (Test Logic)", value=False, help="Forces detection of 'Panic' to test AI and UI logic.")
     
-    # DEBUG TOOL: Check available models
+    # DEBUG TOOL
     if st.button("🔍 Check Available Models"):
         try:
             api_key = st.secrets.get("GOOGLE_API_KEY")
             if api_key:
                 genai.configure(api_key=api_key)
-                # List models and filter for those that generate content
                 models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
                 st.success("✅ Valid Models Found:")
                 st.code("\n".join(models))
@@ -131,9 +130,9 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
             headlines.append(f"- {title}")
         news_text = "\n".join(headlines)
         
-        # --- CRITICAL FIX: USE 'gemini-pro' ---
-        # This is the safest model name for the old v1beta API endpoint.
-        model = genai.GenerativeModel('gemini-pro',
+        # --- MODEL NAME UPDATED ---
+        # Using the exact name from your "Check Models" list
+        model = genai.GenerativeModel('gemini-2.0-flash',
             generation_config={"response_mime_type": "application/json"}
         )
         
