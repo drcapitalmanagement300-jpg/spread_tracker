@@ -81,7 +81,7 @@ def format_money(x):
         return "-"
 
 # --- Charting & Progress Bar Functions ---
-def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_strike, crit_price=None):
+def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_strike):
     bg_color = '#0E1117'    
     card_color = '#262730'  
     text_color = '#FAFAFA'  
@@ -116,8 +116,7 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     ax.axhline(y=long_strike, color='#FF5252', linestyle='-', linewidth=1.2)
     ax.axhspan(short_strike, long_strike, color='#FF5252', alpha=0.15)
 
-    if crit_price:
-        ax.axhline(y=crit_price, color=STOP_LOSS_COLOR, linestyle=':', linewidth=1.2, label='Stop Loss (400%)')
+    # REMOVED: Stop Loss Line logic was here
 
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -432,7 +431,7 @@ else:
             st.markdown(render_profit_bar(pl_dollars, max_loss_total, max_gain_total), unsafe_allow_html=True)
             
             price_hist = t.get("cached", {}).get("price_history", [])
-            stop_price = t.get("cached", {}).get("stop_loss_price")
+            # stop_price = t.get("cached", {}).get("stop_loss_price") # Unused now
             
             if price_hist:
                 try:
@@ -448,8 +447,8 @@ else:
                         trade_start_date=pd.Timestamp(t['entry_date']),
                         expiration_date=pd.Timestamp(t['expiration']),
                         short_strike=t['short_strike'],
-                        long_strike=t['long_strike'],
-                        crit_price=stop_price
+                        long_strike=t['long_strike']
+                        # crit_price removed
                     )
                     st.pyplot(fig)
                 except Exception:
