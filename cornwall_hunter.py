@@ -107,6 +107,7 @@ def scan_for_panic(ticker, dev=False):
 def analyze_solvency(client, ticker, stock_obj, dev=False):
     """
     Fetches news and asks GPT-4o if the drop is terminal or solvable.
+    Robust against missing dictionary keys.
     """
     try:
         # 1. Fetch News via yfinance
@@ -121,7 +122,13 @@ def analyze_solvency(client, ticker, stock_obj, dev=False):
                 }
             return {"category": "UNKNOWN", "reason": "No news found."}
         
-        headlines = [f"- {n['title']}" for n in news_items[:5]] 
+        # --- ROBUST EXTRACTION (Fix for KeyError) ---
+        headlines = []
+        for n in news_items[:5]:
+            # Try 'title', then 'headline', default to generic
+            title = n.get('title', n.get('headline', 'No Title Available'))
+            headlines.append(f"- {title}")
+            
         news_text = "\n".join(headlines)
         
         # 2. The Prompt
