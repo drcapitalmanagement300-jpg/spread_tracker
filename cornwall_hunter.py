@@ -2,13 +2,14 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from openai import OpenAI
+from datetime import datetime
+import google.generativeai as genai
+import json
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Cornwall Hunter")
 
-# --- UI HEADER (MATCHING DASHBOARD) ---
+# --- UI HEADER ---
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
     try: st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
@@ -17,15 +18,15 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini Powered)</p>
     </div>""", unsafe_allow_html=True)
 
-# --- SIDEBAR & DEV MODE ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("Hunter Settings")
     dev_mode = st.checkbox("🛠 Dev Mode (Test Logic)", value=False, help="Forces detection of 'Panic' to test AI and UI logic.")
 
-# --- CONSTANTS (MATCHING SPREAD FINDER) ---
+# --- CONSTANTS ---
 LIQUID_TICKERS = [
     "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX",
     "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS",
@@ -39,16 +40,20 @@ LIQUID_TICKERS = [
     "LLY", "UNH", "JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "MRNA"
 ]
 
-# --- OPENAI SETUP ---
-def get_openai_client():
-    # Try fetching from top level secrets first
-    key = st.secrets.get("OPENAI_API_KEY")
-    if not key:
-        st.error("Missing OPENAI_API_KEY in secrets.toml")
-        return None
-    return OpenAI(api_key=key)
+# --- GEMINI SETUP ---
+def configure_gemini():
+    api_key = st.secrets.get("GOOGLE_API_KEY")
+    if not api_key:
+        st.error("Missing GOOGLE_API_KEY in secrets.toml")
+        return False
+    try:
+        genai.configure(api_key=api_key)
+        return True
+    except Exception as e:
+        st.error(f"Gemini Config Error: {e}")
+        return False
 
-# --- PHASE 1: QUANT SCANNER (The Dragnet) ---
+# --- PHASE 1: QUANT SCANNER ---
 def scan_for_panic(ticker, dev=False):
     """
     Finds stocks that have dropped significantly.
@@ -57,28 +62,25 @@ def scan_for_panic(ticker, dev=False):
     """
     try:
         stock = yf.Ticker(ticker)
-        # Fetch 3mo to ensure we have enough data for 20d calc + buffer
         hist = stock.history(period="3mo")
         if hist.empty: return None
         
         current_price = hist['Close'].iloc[-1]
         
-        # 1. The Drop Check (Falling Knife)
+        # Drop Check
         last_30 = hist.tail(30)
         high_30d = last_30['High'].max()
-        
         if high_30d <= 0: return None
         
         drop_pct = ((current_price - high_30d) / high_30d) * 100
         
-        # 2. The Volatility Check
+        # Volatility Check
         hist['Returns'] = hist['Close'].pct_change()
         current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
         
         # --- DEV MODE OVERRIDE ---
         if dev:
             # If stock is "Healthy" (e.g. down less than 5%), FAKE IT.
-            # This ensures we always pass the filter to test Phase 2 & 3.
             if drop_pct > -5.0:
                 return {
                     "ticker": ticker,
@@ -89,9 +91,9 @@ def scan_for_panic(ticker, dev=False):
                     "stock_obj": stock
                 }
         
-        # --- NORMAL PRODUCTION LOGIC ---
-        if drop_pct > -15.0: return None # Must be down at least 15%
-        if current_hv < 30: return None  # Must be volatile
+        # --- PRODUCTION LOGIC ---
+        if drop_pct > -15.0: return None 
+        if current_hv < 30: return None 
 
         return {
             "ticker": ticker,
@@ -103,35 +105,32 @@ def scan_for_panic(ticker, dev=False):
         }
     except: return None
 
-# --- PHASE 2: AI CLASSIFIER (The Judge) ---
-def analyze_solvency(client, ticker, stock_obj, dev=False):
+# --- PHASE 2: AI CLASSIFIER (GEMINI) ---
+def analyze_solvency_gemini(ticker, stock_obj, dev=False):
     """
-    Fetches news and asks GPT-4o if the drop is terminal or solvable.
-    Robust against missing dictionary keys.
+    Uses Google Gemini Flash to classify the drop.
     """
     try:
-        # 1. Fetch News via yfinance
+        # 1. Fetch News
         news_items = stock_obj.news
         
-        # Fallback for no news in Dev Mode
         if not news_items:
-            if dev:
-                return {
-                    "category": "SOLVABLE", 
-                    "reason": "(DEV MODE) No news found, forcing Solvable verdict for testing."
-                }
+            if dev: return {"category": "SOLVABLE", "reason": "(DEV) No news, forced solvable."}
             return {"category": "UNKNOWN", "reason": "No news found."}
         
-        # --- ROBUST EXTRACTION (Fix for KeyError) ---
         headlines = []
         for n in news_items[:5]:
-            # Try 'title', then 'headline', default to generic
-            title = n.get('title', n.get('headline', 'No Title Available'))
+            title = n.get('title', n.get('headline', 'No Title'))
             headlines.append(f"- {title}")
-            
         news_text = "\n".join(headlines)
         
-        # 2. The Prompt
+        # 2. Configure Model
+        # Using gemini-1.5-flash for speed and low cost (free tier)
+        model = genai.GenerativeModel('gemini-1.5-flash',
+            generation_config={"response_mime_type": "application/json"}
+        )
+        
+        # 3. Prompt
         prompt = f"""
         Analyze the recent news for {ticker} causing the price drop. 
         Headlines:
@@ -139,68 +138,50 @@ def analyze_solvency(client, ticker, stock_obj, dev=False):
         
         Classify the crisis into one of two categories:
         1. TERMINAL: Fraud, Bankruptcy, Criminal Indictment, Accounting Scandal, Core Business Obsolete.
-        2. SOLVABLE: Earnings Miss, CEO Fired, Regulatory Fine, Lawsuit, Product Recall, Macro Fear, General Market Correction.
+        2. SOLVABLE: Earnings Miss, CEO Fired, Regulatory Fine, Lawsuit, Product Recall, Macro Fear.
         
         Return JSON format: {{"category": "TERMINAL" or "SOLVABLE", "reason": "Short summary (max 15 words)"}}
         """
         
-        response = client.chat.completions.create(
-            model="gpt-4o", 
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
-        )
+        response = model.generate_content(prompt)
+        return json.loads(response.text)
         
-        import json
-        return json.loads(response.choices[0].message.content)
     except Exception as e:
+        # Check for specific Gemini errors (like blocked content)
+        if "429" in str(e):
+            return {"category": "RATE_LIMIT", "reason": "Gemini Rate Limit Hit."}
         return {"category": "ERROR", "reason": str(e)}
 
-# --- PHASE 3: THE 10-BAGGER CALCULATOR (The Sniper) ---
+# --- PHASE 3: OPTION MATH ---
 def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
-    """
-    Finds a LEAP (1yr+) at the 'Normal Price' strike.
-    Checks if potential payout > 10x.
-    """
     try:
-        # 1. Get Expirations > 300 days
         exps = stock_obj.options
         if not exps: return None
         
         leaps = [e for e in exps if (datetime.strptime(e, "%Y-%m-%d") - datetime.now()).days > 300]
         if not leaps: return None
         
-        target_exp = leaps[0] # Closest LEAP
+        target_exp = leaps[0] 
         chain = stock_obj.option_chain(target_exp)
         calls = chain.calls
         
-        # 2. Find Strike closest to "Normal Price" (Recovery Target)
         target_strike = normal_price
-        
-        # Filter for strikes near target
         candidates = calls[(calls['strike'] >= target_strike * 0.95) & (calls['strike'] <= target_strike * 1.05)]
         
-        # If strict target missing, widen search in dev mode
         if candidates.empty and dev:
              candidates = calls[(calls['strike'] >= target_strike * 0.80) & (calls['strike'] <= target_strike * 1.20)]
 
         if candidates.empty: return None
         
-        # Pick the one with liquidity
         option = candidates.sort_values('volume', ascending=False).iloc[0]
-        
         ask_price = option['ask']
         
-        # Dev Mode: If ask is 0 (market closed/illiquid), fake a price for math
         if ask_price <= 0:
             if dev: ask_price = 0.50
             else: return None
         
-        # 3. The Cornwall Ratio
-        # If stock goes back to normal, Intrinsic Value = Normal - Strike
         projected_intrinsic = normal_price - option['strike']
         
-        # If Target is below Strike, intrinsic is 0. 
-        # In Dev Mode, we fake intrinsic to force a ratio
         if projected_intrinsic <= 0:
             if dev: projected_intrinsic = 5.0 
             else: return None 
@@ -219,36 +200,34 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
 # --- MAIN EXECUTION ---
 
 if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
-    client = get_openai_client()
-    if not client: st.stop()
+    if not configure_gemini(): st.stop()
     
     status = st.empty()
     bar = st.progress(0)
-    
     found_opportunities = []
     
-    # In Dev Mode, limit to first 10 tickers to save time/API calls
     scan_list = LIQUID_TICKERS[:10] if dev_mode else LIQUID_TICKERS
     
     for i, ticker in enumerate(scan_list):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        # 1. Quant Filter
+        # 1. Quant
         panic_data = scan_for_panic(ticker, dev=dev_mode)
         if not panic_data: continue
         
-        status.text(f"💥 Panic detected in {ticker} (-{abs(panic_data['drop_pct']):.1f}%). Analyzing news...")
+        status.text(f"💥 Panic: {ticker}. Asking Gemini...")
         
-        # 2. AI Judge
-        verdict = analyze_solvency(client, ticker, panic_data['stock_obj'], dev=dev_mode)
+        # 2. AI (Gemini)
+        verdict = analyze_solvency_gemini(ticker, panic_data['stock_obj'], dev=dev_mode)
         
-        # In Dev Mode, we accept everything just to show the UI
-        if verdict.get('category') == 'SOLVABLE' or dev_mode:
-            # 3. Option Math
-            # Assume "Normal" is the 30-day high (Pre-crash level)
-            recovery_target = panic_data['high_30d']
+        if verdict.get('category') == "RATE_LIMIT":
+            st.warning("Gemini Rate Limit reached. Pausing...")
+            break
             
+        if verdict.get('category') == 'SOLVABLE' or dev_mode:
+            # 3. Math
+            recovery_target = panic_data['high_30d']
             opportunity = find_cornwall_option(
                 panic_data['stock_obj'], 
                 panic_data['price'], 
@@ -256,9 +235,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                 dev=dev_mode
             )
             
-            # Filter Logic
             min_ratio = 2.0 if dev_mode else 8.0
-            
             if opportunity and opportunity['ratio'] > min_ratio:
                 found_opportunities.append({
                     "ticker": ticker,
@@ -271,7 +248,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     bar.empty()
     
     if not found_opportunities:
-        st.info("No asymmetric opportunities found in the current watchlist.")
+        st.info("No asymmetric opportunities found.")
     else:
         st.success(f"Found {len(found_opportunities)} Cornwall Setups")
         
@@ -282,21 +259,18 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
             o = opp['option']
             
             with st.container(border=True):
-                # Header
                 st.markdown(f"### {t} <span style='font-size:16px; color:#ff4b4b;'>{d['drop_pct']:.1f}% Drop</span>", unsafe_allow_html=True)
                 
                 c1, c2, c3 = st.columns([2, 4, 2])
-                
                 with c1:
-                    st.metric(label="Current Price", value=f"${d['price']:.2f}")
-                    st.caption(f"Recovery Target: ${d['high_30d']:.2f}")
-                
+                    st.metric("Price", f"${d['price']:.2f}")
+                    st.caption(f"Target: ${d['high_30d']:.2f}")
                 with c2:
-                    category_color = "#00C853" if v.get('category') == 'SOLVABLE' else "#FFA726"
-                    st.markdown(f"**AI Verdict:** <span style='color:{category_color}; font-weight:bold;'>{v.get('category', 'UNKNOWN')}</span>", unsafe_allow_html=True)
-                    st.write(f"_{v.get('reason', 'No reason provided')}_")
-                
+                    cat = v.get('category', 'UNKNOWN')
+                    color = "#00C853" if cat == 'SOLVABLE' else "#FFA726"
+                    st.markdown(f"**Gemini:** <span style='color:{color}; font-weight:bold;'>{cat}</span>", unsafe_allow_html=True)
+                    st.write(f"_{v.get('reason')}_")
                 with c3:
-                    st.metric(label="Potential Payout", value=f"{o['ratio']:.1f}x")
-                    st.markdown(f"**Buy:** {o['expiration']} **${o['strike']:.0f} Call**")
+                    st.metric("Payout", f"{o['ratio']:.1f}x")
+                    st.markdown(f"**{o['expiration']} ${o['strike']:.0f} C**")
                     st.markdown(f"**Cost:** ${o['ask']:.2f}")
