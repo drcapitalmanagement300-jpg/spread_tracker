@@ -23,7 +23,7 @@ with header_col2:
 # --- SIDEBAR & DEV MODE ---
 with st.sidebar:
     st.header("Hunter Settings")
-    dev_mode = st.checkbox("🛠 Dev Mode (Test Logic)", value=False, help="Lowers drop threshold from 15% to 1% to find test candidates.")
+    dev_mode = st.checkbox("🛠 Dev Mode (Test Logic)", value=False, help="Forces detection of 'Panic' to test AI and UI logic.")
 
 # --- CONSTANTS (MATCHING SPREAD FINDER) ---
 LIQUID_TICKERS = [
@@ -41,13 +41,11 @@ LIQUID_TICKERS = [
 
 # --- OPENAI SETUP ---
 def get_openai_client():
-    # Try fetching from top level secrets first, then google_oauth section fallback
+    # Try fetching from top level secrets first
     key = st.secrets.get("OPENAI_API_KEY")
-    
     if not key:
         st.error("Missing OPENAI_API_KEY in secrets.toml")
         return None
-        
     return OpenAI(api_key=key)
 
 # --- PHASE 1: QUANT SCANNER (The Dragnet) ---
@@ -55,7 +53,7 @@ def scan_for_panic(ticker, dev=False):
     """
     Finds stocks that have dropped significantly.
     Normal Mode: >15% drop in 20 days.
-    Dev Mode: >1% drop in 20 days (to find matches for testing).
+    Dev Mode: FORCE PASS by simulating panic data if real data is healthy.
     """
     try:
         stock = yf.Ticker(ticker)
@@ -66,7 +64,6 @@ def scan_for_panic(ticker, dev=False):
         current_price = hist['Close'].iloc[-1]
         
         # 1. The Drop Check (Falling Knife)
-        # Find the high in the last 30 days
         last_30 = hist.tail(30)
         high_30d = last_30['High'].max()
         
@@ -74,19 +71,27 @@ def scan_for_panic(ticker, dev=False):
         
         drop_pct = ((current_price - high_30d) / high_30d) * 100
         
-        # THRESHOLD LOGIC
-        threshold = -1.0 if dev else -15.0
-        
-        if drop_pct > threshold: return None 
-        
         # 2. The Volatility Check
-        # Simple Vol Rank approximation
         hist['Returns'] = hist['Close'].pct_change()
         current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
         
-        # We want HV to be elevated (indicating panic/activity)
-        hv_threshold = 10 if dev else 30
-        if current_hv < hv_threshold: return None
+        # --- DEV MODE OVERRIDE ---
+        if dev:
+            # If stock is "Healthy" (e.g. down less than 5%), FAKE IT.
+            # This ensures we always pass the filter to test Phase 2 & 3.
+            if drop_pct > -5.0:
+                return {
+                    "ticker": ticker,
+                    "price": current_price,
+                    "high_30d": current_price * 1.25, # Fake High (implying 20% drop)
+                    "drop_pct": -20.0, # Fake 20% Drop
+                    "hv": 85.0,        # Fake High Vol
+                    "stock_obj": stock
+                }
+        
+        # --- NORMAL PRODUCTION LOGIC ---
+        if drop_pct > -15.0: return None # Must be down at least 15%
+        if current_hv < 30: return None  # Must be volatile
 
         return {
             "ticker": ticker,
@@ -152,6 +157,8 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
     try:
         # 1. Get Expirations > 300 days
         exps = stock_obj.options
+        if not exps: return None
+        
         leaps = [e for e in exps if (datetime.strptime(e, "%Y-%m-%d") - datetime.now()).days > 300]
         if not leaps: return None
         
@@ -160,7 +167,6 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         calls = chain.calls
         
         # 2. Find Strike closest to "Normal Price" (Recovery Target)
-        # The Cornwall logic: Buy the strike where the stock SHOULD be.
         target_strike = normal_price
         
         # Filter for strikes near target
@@ -176,17 +182,20 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         option = candidates.sort_values('volume', ascending=False).iloc[0]
         
         ask_price = option['ask']
-        if ask_price <= 0: return None
+        
+        # Dev Mode: If ask is 0 (market closed/illiquid), fake a price for math
+        if ask_price <= 0:
+            if dev: ask_price = 0.50
+            else: return None
         
         # 3. The Cornwall Ratio
         # If stock goes back to normal, Intrinsic Value = Normal - Strike
-        # Payout = Intrinsic / Cost
         projected_intrinsic = normal_price - option['strike']
         
         # If Target is below Strike, intrinsic is 0. 
-        # In Dev Mode, we allow this just to show the card.
+        # In Dev Mode, we fake intrinsic to force a ratio
         if projected_intrinsic <= 0:
-            if dev: projected_intrinsic = 0.5 # Fake intrinsic for math
+            if dev: projected_intrinsic = 5.0 
             else: return None 
         
         payout_ratio = projected_intrinsic / ask_price
@@ -212,7 +221,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     found_opportunities = []
     
     # In Dev Mode, limit to first 10 tickers to save time/API calls
-    scan_list = LIQUID_TICKERS[:15] if dev_mode else LIQUID_TICKERS
+    scan_list = LIQUID_TICKERS[:10] if dev_mode else LIQUID_TICKERS
     
     for i, ticker in enumerate(scan_list):
         status.text(f"Scanning {ticker}...")
