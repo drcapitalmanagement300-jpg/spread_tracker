@@ -86,28 +86,30 @@ def scan_for_panic(ticker, dev=False):
         if hist.empty: return None
         
         current_price = hist['Close'].iloc[-1]
+        
+        # --- CRITICAL FIX: FORCE PASS IN DEV MODE ---
+        if dev:
+            # We ignore real data and fabricate a "Perfect Setup"
+            # This guarantees it passes the -15% filter below
+            return {
+                "ticker": ticker,
+                "price": current_price,
+                "high_30d": current_price * 1.40, # Fake High (Implies 30% drop)
+                "drop_pct": -30.0, # Fake Drop
+                "hv": 85.0,        # Fake Volatility
+                "stock_obj": stock
+            }
+
+        # --- NORMAL PRODUCTION LOGIC ---
         last_30 = hist.tail(30)
         high_30d = last_30['High'].max()
         if high_30d <= 0: return None
         
         drop_pct = ((current_price - high_30d) / high_30d) * 100
-        
         hist['Returns'] = hist['Close'].pct_change()
         current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
         
-        # DEV OVERRIDE
-        if dev:
-            if drop_pct > -5.0:
-                return {
-                    "ticker": ticker,
-                    "price": current_price,
-                    "high_30d": current_price * 1.25, 
-                    "drop_pct": -20.0, 
-                    "hv": 85.0,        
-                    "stock_obj": stock
-                }
-        
-        # PRODUCTION LOGIC: >15% drop, >35 HV
+        # Production Filters: >15% drop, >35 HV
         if drop_pct > -15.0: return None 
         if current_hv < 35: return None 
 
@@ -173,21 +175,26 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         calls = chain.calls
         
         target_strike = normal_price
+        
+        # Search Range: Production (5%), Dev (Huge 50% range to force a hit)
         candidates = calls[(calls['strike'] >= target_strike * 0.95) & (calls['strike'] <= target_strike * 1.05)]
         
         if candidates.empty and dev:
-             candidates = calls[(calls['strike'] >= target_strike * 0.80) & (calls['strike'] <= target_strike * 1.20)]
+             candidates = calls[(calls['strike'] >= target_strike * 0.50) & (calls['strike'] <= target_strike * 1.50)]
 
         if candidates.empty: return None
         
         option = candidates.sort_values('volume', ascending=False).iloc[0]
         ask_price = option['ask']
         
+        # Fix Bad Data in Dev
         if ask_price <= 0:
             if dev: ask_price = 0.50
             else: return None
         
         projected_intrinsic = normal_price - option['strike']
+        
+        # Fix Negative Math in Dev
         if projected_intrinsic <= 0:
             if dev: projected_intrinsic = 5.0 
             else: return None 
@@ -212,60 +219,53 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     bar = st.progress(0)
     found_opportunities = []
     
-    # 1. Dev Mode: Use tiny list.
     scan_list = LIQUID_TICKERS[:3] if dev_mode else LIQUID_TICKERS
     
-    # 2. Initialize Session State Throttle
     if "last_gemini_call" not in st.session_state:
         st.session_state.last_gemini_call = 0
     
-    RATE_LIMIT_DELAY = 5.0 # Seconds (Safe buffer)
+    RATE_LIMIT_DELAY = 5.0 
 
     for i, ticker in enumerate(scan_list):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        # --- QUANT (Local) ---
+        # --- QUANT (Force Pass in Dev) ---
         panic_data = scan_for_panic(ticker, dev=dev_mode)
         if not panic_data: continue
         
         status.text(f"💥 Panic: {ticker}. Analyzing news...")
         
-        # --- ROBUST AI LOOP (Retry until success) ---
+        # --- AI LOOP ---
         verdict = None
         retries = 0
-        
         while retries < 3:
-            # A. Gatekeeper: Check Throttle BEFORE Call
+            # 1. Gatekeeper
             elapsed = time.time() - st.session_state.last_gemini_call
             if elapsed < RATE_LIMIT_DELAY:
                 sleep_time = RATE_LIMIT_DELAY - elapsed
-                # Only show status if it's a significant wait
                 if sleep_time > 1.0:
                     status.text(f"⏳ Gatekeeper: Pausing {sleep_time:.1f}s for API limit...")
                 time.sleep(sleep_time)
 
-            # B. Attempt Call
+            # 2. Call
             result = analyze_solvency_gemini(ticker, panic_data['stock_obj'], dev=dev_mode)
-            st.session_state.last_gemini_call = time.time() # Update timer immediately
+            st.session_state.last_gemini_call = time.time()
             
-            # C. Check Result
+            # 3. Check
             if result.get('category') == "RATE_LIMIT":
-                status.warning(f"⚠️ Rate Limit Hit (429). Auto-cooling 60s... (Attempt {retries+1}/3)")
-                time.sleep(60) # Force long cooldown
+                status.warning(f"⚠️ Rate Limit (429). Auto-cooling 60s... ({retries+1}/3)")
+                time.sleep(60)
                 retries += 1
             else:
                 verdict = result
-                break # Valid result found, exit loop
+                break
         
-        # If we failed 3 times, skip this ticker
         if not verdict or verdict.get('category') == "RATE_LIMIT":
             status.error(f"Skipping {ticker} due to API limits.")
             continue
 
         # --- RESULTS ---
-        # Only proceed if we have a valid category (SOLVABLE or TERMINAL)
-        # Note: In Dev Mode, we accept anything that isn't an error
         if verdict.get('category') == 'SOLVABLE' or (dev_mode and verdict.get('category') != 'ERROR'):
             recovery_target = panic_data['high_30d']
             opportunity = find_cornwall_option(
@@ -284,7 +284,6 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                     "option": opportunity
                 })
                 
-                # DEV MODE SHORTCUT: Stop immediately after first finding
                 if dev_mode:
                     status.text("✅ Dev Mode: Opportunity found. Stopping scan.")
                     break
