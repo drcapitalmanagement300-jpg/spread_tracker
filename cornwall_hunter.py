@@ -26,7 +26,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini 2.0 Lite)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini 2.0)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -137,10 +137,9 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
             headlines.append(f"- {title}")
         news_text = "\n".join(headlines)
         
-        # --- SWITCH TO FLASH-LITE ---
-        # "Lite" models are optimized for high throughput and less likely to hit
-        # the strict limits of the main "Flash" or experimental models.
-        model = genai.GenerativeModel('gemini-2.0-flash-lite',
+        # --- SWITCH TO STANDARD FLASH ---
+        # "Lite" was giving 'limit: 0'. Standard Flash usually has a real free tier.
+        model = genai.GenerativeModel('gemini-2.0-flash',
             generation_config={"response_mime_type": "application/json"}
         )
         
@@ -259,13 +258,13 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     st.session_state.debug_logs = [] 
     found_opportunities = []
     
-    # 1. Dev Mode: Use tiny list.
     scan_list = LIQUID_TICKERS[:3] if dev_mode else LIQUID_TICKERS
     
-    # 2. Rate Limit Logic (PERSISTENT)
-    RATE_LIMIT_DELAY = 5.0 
     if "last_gemini_call" not in st.session_state:
         st.session_state.last_gemini_call = 0
+    
+    # 5 Seconds Delay is SAFE for the Standard Model
+    RATE_LIMIT_DELAY = 5.0 
 
     for i, ticker in enumerate(scan_list):
         status.text(f"Scanning {ticker}...")
