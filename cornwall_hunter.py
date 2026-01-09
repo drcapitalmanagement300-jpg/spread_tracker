@@ -13,9 +13,6 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# --- OPENAI STANDARD LIBRARY ---
-from openai import OpenAI
-
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Cornwall Hunter")
 
@@ -28,7 +25,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Google News Intel)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Hugging Face Free)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -39,22 +36,17 @@ with st.sidebar:
     st.divider()
     st.write("### 🔌 Connection Debugger")
     
-    if st.button("Test OpenRouter Connection"):
-        api_key = st.secrets.get("OPENROUTER_API_KEY")
+    if st.button("Test Hugging Face Connection"):
+        api_key = st.secrets.get("HUGGINGFACE_API_KEY")
         if not api_key:
-            st.error("Missing OPENROUTER_API_KEY")
+            st.error("Missing HUGGINGFACE_API_KEY")
         else:
             try:
-                client = OpenAI(
-                    base_url="https://openrouter.ai/api/v1",
-                    api_key=api_key,
-                )
-                with st.spinner("Pinging Free Model..."):
-                    completion = client.chat.completions.create(
-                        model="google/gemini-2.0-flash-lite-preview-02-05:free",
-                        messages=[{"role": "user", "content": "Reply with one word: Connected"}]
-                    )
-                st.success(f"✅ Success: {completion.choices[0].message.content}")
+                API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+                headers = {"Authorization": f"Bearer {api_key}"}
+                payload = {"inputs": "Reply with one word: Connected"}
+                response = requests.post(API_URL, headers=headers, json=payload)
+                st.success(f"✅ Success: {response.json()[0]['generated_text']}")
             except Exception as e:
                 st.error(f"❌ Connection Failed: {e}")
 
@@ -76,16 +68,6 @@ LIQUID_TICKERS = list(set([
     "TQQQ", "SQQQ", "SOXL", "SOXS", "ARKK", "KRE", "XOP", "TAN"
 ]))
 
-# --- SETUP CLIENT ---
-def get_ai_client():
-    api_key = st.secrets.get("OPENROUTER_API_KEY")
-    if not api_key:
-        return None
-    return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
-
 # --- DEBUG LOGGER ---
 def log_debug(msg):
     if "debug_logs" not in st.session_state:
@@ -94,25 +76,17 @@ def log_debug(msg):
 
 # --- HELPER: GOOGLE NEWS RSS FETCHER ---
 def get_google_news(ticker):
-    """Fetches real news from Google News RSS when Yahoo fails."""
+    """Fetches real news from Google News RSS."""
     try:
-        # Search for Ticker + Stock to avoid generic results
         query = f"{ticker} stock news"
         url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-        
         response = requests.get(url, timeout=5)
-        if response.status_code != 200:
-            return ""
-            
+        if response.status_code != 200: return ""
         root = ET.fromstring(response.content)
         headlines = []
-        
-        # Parse XML for titles
         for item in root.findall('./channel/item')[:5]:
             title = item.find('title').text
-            pubDate = item.find('pubDate').text
-            headlines.append(f"- {title} ({pubDate})")
-            
+            headlines.append(f"- {title}")
         return "\n".join(headlines)
     except Exception as e:
         log_debug(f"Google News Fetch Failed for {ticker}: {e}")
@@ -162,106 +136,80 @@ def scan_for_panic(ticker, dev=False):
         log_debug(f"{ticker}: Quant Error {str(e)}")
         return None
 
-# --- PHASE 2: AI CLASSIFIER (GOOGLE NEWS BACKED) ---
-def analyze_solvency_openrouter(ticker, stock_obj, client, dev=False):
+# --- PHASE 2: AI CLASSIFIER (HUGGING FACE) ---
+def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
     try:
         news_text = ""
         source_used = "None"
         
-        # 1. Try yfinance News First
+        # 1. Try yfinance News
         try:
             news_items = stock_obj.news
             if news_items:
                 headlines = []
                 for n in news_items[:5]:
                     t = n.get('title')
-                    if t and len(t) > 10:
-                        headlines.append(f"- {t}")
+                    if t and len(t) > 10: headlines.append(f"- {t}")
                 if headlines:
                     news_text = "\n".join(headlines)
                     source_used = "Yahoo Finance"
         except: pass
             
-        # 2. Fallback: Google News RSS (Reliable)
+        # 2. Fallback: Google News RSS
         if not news_text:
             log_debug(f"{ticker}: Yahoo empty. Fetching Google News RSS...")
             news_text = get_google_news(ticker)
-            if news_text:
-                source_used = "Google News RSS"
+            if news_text: source_used = "Google News RSS"
             
         # 3. If STILL no news
         if not news_text:
             if dev: 
-                # DEV MODE: Inject fake bad news if we can't find real news
-                news_text = "- Stock crashes 20% on earnings miss due to temporary supply chain issue.\n- Analyst downgrades but maintains long term buy.\n- CEO says headwinds are transient."
-                source_used = "Dev Mode Simulation"
+                news_text = "Stock down on macro fears."
+                source_used = "Dev Mock"
             else:
-                return {
-                    "category": "UNKNOWN", 
-                    "reason": "No news found via Yahoo or Google News.",
-                    "sources": "No articles found."
-                }
+                return {"category": "UNKNOWN", "reason": "No news found."}
         
-        FREE_MODELS = [
-            "google/gemini-2.0-flash-lite-preview-02-05:free",
-            "deepseek/deepseek-r1:free",
-            "meta-llama/llama-3.2-3b-instruct:free",
-            "mistralai/mistral-7b-instruct:free"
-        ]
+        # --- HUGGING FACE INFERENCE ---
+        API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+        headers = {"Authorization": f"Bearer {api_key}"}
         
-        prompt = f"""
-        Analyze the recent news for {ticker} causing the price drop. 
-        Headlines:
+        # Mistral needs a specific prompt format
+        prompt = f"""[INST] You are a financial risk analyst.
+        Analyze these headlines for {ticker}:
         {news_text}
         
-        Classify the crisis into one of two categories:
-        1. TERMINAL: Fraud, Bankruptcy, Criminal Indictment, Accounting Scandal, Core Business Obsolete.
-        2. SOLVABLE: Earnings Miss, CEO Fired, Regulatory Fine, Lawsuit, Product Recall, Macro Fear.
+        Is this a TERMINAL problem (Fraud, Bankruptcy) or SOLVABLE (Earnings Miss, Macro)?
         
-        If the information is vague, assume SOLVABLE (Macro Volatility).
+        Respond with valid JSON only: {{"category": "TERMINAL" or "SOLVABLE", "reason": "summary"}}
+        [/INST]"""
         
-        Return JSON format: {{"category": "TERMINAL" or "SOLVABLE", "reason": "Short summary (max 15 words)"}}
-        """
+        payload = {
+            "inputs": prompt,
+            "parameters": {"max_new_tokens": 100, "return_full_text": False}
+        }
         
-        last_error = ""
+        response = requests.post(API_URL, headers=headers, json=payload)
         
-        for model_id in FREE_MODELS:
-            try:
-                completion = client.chat.completions.create(
-                    model=model_id,
-                    messages=[
-                        {"role": "system", "content": "You are a financial risk analyst. Output only JSON."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    extra_headers={
-                        "HTTP-Referer": "https://streamlit.app",
-                        "X-Title": "CornwallHunter"
-                    }
-                )
-                
-                content = completion.choices[0].message.content
-                if "<think>" in content: 
-                    content = content.split("</think>")[-1].strip()
-                    
-                content = content.replace("```json", "").replace("```", "").strip()
-                
-                parsed = json.loads(content)
-                if isinstance(parsed, list): parsed = parsed[0] if parsed else {}
-                if not isinstance(parsed, dict): continue
-                
-                parsed['sources'] = f"**Source: {source_used}**\n\n{news_text}"
-                return parsed
-                
-            except Exception as e:
-                last_error = str(e)
-                continue
+        if response.status_code != 200:
+            log_debug(f"HF Error {response.status_code}: {response.text}")
+            return {"category": "ERROR", "reason": "HF API Limit"}
+            
+        result_text = response.json()[0]['generated_text']
         
-        log_debug(f"All AI models failed. Last error: {last_error}")
-        return {"category": "ERROR", "reason": "AI Models Offline", "sources": "AI Connection Failed"}
-        
+        # Cleanup JSON (HF sometimes adds extra text)
+        start_idx = result_text.find('{')
+        end_idx = result_text.rfind('}') + 1
+        if start_idx != -1 and end_idx != -1:
+            json_str = result_text[start_idx:end_idx]
+            parsed = json.loads(json_str)
+            parsed['sources'] = f"**Source: {source_used}**\n\n{news_text}"
+            return parsed
+        else:
+            return {"category": "ERROR", "reason": "Bad JSON from AI"}
+            
     except Exception as e:
         log_debug(f"AI Critical Error: {str(e)}")
-        return {"category": "ERROR", "reason": "AI Critical Failure", "sources": str(e)}
+        return {"category": "ERROR", "reason": "AI Critical Failure"}
 
 # --- PHASE 3: OPTION MATH (TRUE LEAPS) ---
 def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
@@ -274,52 +222,39 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
                 "strike": round(normal_price, 0),
                 "ask": 0.50,
                 "ratio": 20.0,
-                "contract": {"strike": normal_price, "ask": 0.50, "volume": 1000}
+                "contract": {"strike": normal_price, "ask": 0.50}
             }
             
         if not exps: return None
         
-        # --- STRICT LEAPS: Must be > 360 Days ---
         leaps = [e for e in exps if (datetime.strptime(e, "%Y-%m-%d") - datetime.now()).days > 360]
-        
-        if not leaps: 
-            log_debug("No LEAPS > 360d found.")
-            return None
+        if not leaps: return None
         
         target_exp = leaps[-1] 
         chain = stock_obj.option_chain(target_exp)
         calls = chain.calls
-        
         target_strike = normal_price
         
         candidates = calls[(calls['strike'] >= target_strike * 0.80) & (calls['strike'] <= target_strike * 1.20)].copy()
         
-        if candidates.empty: 
-            log_debug("No strikes near target.")
-            return None
-
         def get_valid_price(row):
             ask = row.get('ask', 0)
             bid = row.get('bid', 0)
             last = row.get('lastPrice', 0)
             if ask > 0: return ask
             if bid > 0 and last > 0: return (bid + last) / 2
-            if last > 0: return last
-            return 0
+            return last
 
         candidates['valid_price'] = candidates.apply(get_valid_price, axis=1)
-        candidates['liquidity'] = candidates['volume'].fillna(0) + candidates['openInterest'].fillna(0)
         candidates = candidates[candidates['valid_price'] > 0]
         
         if candidates.empty: return None
             
-        option = candidates.sort_values('liquidity', ascending=False).iloc[0]
-        
+        option = candidates.sort_values('volume', ascending=False).iloc[0]
         ask_price = option['valid_price']
         projected_intrinsic = normal_price - option['strike']
         
         if projected_intrinsic <= 0: return None
-        
         payout_ratio = projected_intrinsic / ask_price
         
         return {
@@ -329,16 +264,14 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
             "ratio": payout_ratio,
             "contract": option
         }
-    except Exception as e:
-        log_debug(f"Option Error: {str(e)}")
-        return None
+    except: return None
 
 # --- MAIN EXECUTION ---
 
 if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
-    client = get_ai_client()
-    if not client:
-        st.error("Missing OPENROUTER_API_KEY in secrets.toml")
+    api_key = st.secrets.get("HUGGINGFACE_API_KEY")
+    if not api_key:
+        st.error("Missing HUGGINGFACE_API_KEY in secrets.toml")
         st.stop()
     
     status = st.empty()
@@ -358,14 +291,12 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         
         status.text(f"💥 Panic: {ticker}. Intel gathering...")
         
-        # 2. AI (MULTI-SOURCE)
-        time.sleep(0.5) 
-        verdict = analyze_solvency_openrouter(ticker, panic_data['stock_obj'], client, dev=dev_mode)
+        # 2. AI (Hugging Face)
+        # We need a small sleep to avoid HF rate limits (simpler than OR but still exist)
+        time.sleep(1.0) 
+        verdict = analyze_solvency_hf(ticker, panic_data['stock_obj'], api_key, dev=dev_mode)
         
-        if not verdict or not isinstance(verdict, dict):
-            continue
-            
-        if verdict.get('category') == "ERROR":
+        if not verdict or verdict.get('category') == "ERROR":
             continue
 
         # 3. MATH
@@ -431,7 +362,6 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                     st.markdown(f"**AI:** <span style='color:{color}; font-weight:bold;'>{cat}</span>", unsafe_allow_html=True)
                     st.write(f"_{v.get('reason')}_")
                 with c3:
-                    # Clean UI, no green, no bold
                     st.markdown(f"""
                     <div style='font-size: 14px;'>
                     <b>{o['strike']:.2f} Strike Call</b><br>
