@@ -33,7 +33,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Wide Net + Source Verification)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Long-Range LEAPS)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -63,34 +63,33 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"❌ Connection Failed: {e}")
 
-# --- EXPANDED UNIVERSE (100+ High Beta Tickers) ---
-LIQUID_TICKERS = [
+# --- EXPANDED UNIVERSE (Cleaned & De-Duplicated) ---
+LIQUID_TICKERS = list(set([
     # --- MEGA CAP VOLATILITY ---
     "TSLA", "NVDA", "AMD", "AMZN", "GOOGL", "META", "MSFT", "NFLX",
     # --- HIGH GROWTH / SAAS ---
     "PLTR", "SOFI", "HOOD", "DKNG", "ROKU", "SHOP", "SQ", "AFRM", "UPST", "CVNA",
     "NET", "DDOG", "SNOW", "U", "RBLX", "COIN", "CRWD", "ZS", "PANW", "TTD",
     "APP", "MDB", "TEAM", "HUBS", "BILL", "DOCU", "TWLO", "OKTA", "ZM",
-    # --- CRYPTO & FINTECH ---
+    # --- CRYPTO MINERS ---
     "MSTR", "MARA", "RIOT", "CLSK", "CIFR", "IREN", "WULF", "HUT", "BITF",
-    "PYPL", "GME", "AMC", "HOOD", "COIN",
-    # --- SEMIS & AI HARDWARE ---
+    # --- SEMIS & HARDWARE ---
     "SMCI", "ARM", "MU", "INTC", "QCOM", "AVGO", "MRVL", "ANET", "VRT",
-    # --- DISASTER RECOVERY / TURNAROUNDS ---
-    "BA", "WBA", "PARA", "DIS", "NKE", "SBUX", "LULU", "EL", "ULTA", "DG", "DLTR",
+    # --- TURNAROUNDS & RETAIL ---
+    "BA", "WBA", "DIS", "NKE", "SBUX", "LULU", "EL", "ULTA", "DG", "DLTR",
     "MMM", "T", "VZ", "PFE", "BMY", "CVS",
-    # --- BIOTECH (High Risk/Reward) ---
-    "XBI", "LABU", "MRNA", "BNTX", "CRSP", "NTLA", "EDIT", "BEAM", "SAVA", "ITCI",
-    # --- TRAVEL & LEISURE (Cyclical) ---
+    # --- BIOTECH ---
+    "XBI", "LABU", "MRNA", "BNTX", "CRSP", "NTLA", "EDIT", "BEAM", "SAVA",
+    # --- TRAVEL ---
     "CCL", "RCL", "NCLH", "UAL", "AAL", "DAL", "LUV", "EXPE", "ABNB", "BKNG",
     "LVS", "WYNN", "MGM", "CZR", "PENN",
-    # --- ENERGY & COMMODITIES ---
-    "URA", "CCJ", "FCX", "SCCO", "CLF", "X", "AA",
-    # --- MEME / RETAIL ---
+    # --- COMMODITIES ---
+    "URA", "CCJ", "FCX", "SCCO", "CLF", "AA",
+    # --- SPECULATIVE ---
     "CHWY", "RDDT", "DJT", "SPCE", "ASTS", "LUNR", "RKLB", "JOBY", "ACHR",
-    # --- VOLATILE ETFS ---
+    # --- LEVERAGED ETFs ---
     "TQQQ", "SQQQ", "SOXL", "SOXS", "ARKK", "KRE", "XOP", "TAN"
-]
+]))
 
 # --- SETUP CLIENT ---
 def get_ai_client():
@@ -158,10 +157,7 @@ def scan_for_panic(ticker, dev=False):
         hist['Returns'] = hist['Close'].pct_change()
         current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
         
-        # --- FILTERS ---
-        # 1. Must be down at least 15% from 30-day high
         if drop_pct > -15.0: return None 
-        # 2. Must be volatile (HV > 35)
         if current_hv < 35: return None 
 
         return {
@@ -176,31 +172,36 @@ def scan_for_panic(ticker, dev=False):
         log_debug(f"{ticker}: Quant Error {str(e)}")
         return None
 
-# --- PHASE 2: AI CLASSIFIER (SOURCE AWARE) ---
+# --- PHASE 2: AI CLASSIFIER (INTELLIGENT PARSING) ---
 def analyze_solvency_openrouter(ticker, stock_obj, client, dev=False):
     try:
         # 1. Try yfinance News
         news_items = stock_obj.news
-        news_text = ""
+        headlines = []
         source_used = "None"
         
         if news_items:
-            headlines = []
             for n in news_items[:5]:
-                title = n.get('title', n.get('headline', 'No Title'))
-                pub_time = n.get('providerPublishTime', 0)
-                # Convert timestamp if available for context
-                headlines.append(f"- {title}")
+                # ROBUST TITLE CHECK:
+                # yfinance sometimes returns 'title': None or 'title': '' or missing keys
+                t = n.get('title')
+                if not t:
+                    t = n.get('headline')
+                
+                # Only add if we found a valid string
+                if t and len(t) > 5:
+                    headlines.append(f"- {t}")
+        
+        # If Yahoo gave us meaningful headlines, use them.
+        if headlines:
             news_text = "\n".join(headlines)
             source_used = "Yahoo Finance"
-            log_debug(f"{ticker}: Found news via Yahoo.")
-            
-        # 2. Fallback: DuckDuckGo Search
-        if not news_text or len(news_text) < 50:
-            log_debug(f"{ticker}: Yahoo empty. Searching Web...")
-            web_news = get_web_news(ticker)
-            if web_news:
-                news_text = web_news
+            log_debug(f"{ticker}: Found {len(headlines)} valid headlines via Yahoo.")
+        else:
+            # 2. Fallback: DuckDuckGo Search
+            log_debug(f"{ticker}: Yahoo news empty/invalid. Searching Web...")
+            news_text = get_web_news(ticker)
+            if news_text:
                 source_used = "DuckDuckGo Web Search"
             
         # 3. If STILL no news
@@ -260,7 +261,6 @@ def analyze_solvency_openrouter(ticker, stock_obj, client, dev=False):
                 if isinstance(parsed, list): parsed = parsed[0] if parsed else {}
                 if not isinstance(parsed, dict): continue
                 
-                # INJECT SOURCES INTO VERDICT FOR UI
                 parsed['sources'] = f"**Source: {source_used}**\n\n{news_text}"
                 return parsed
                 
@@ -275,14 +275,15 @@ def analyze_solvency_openrouter(ticker, stock_obj, client, dev=False):
         log_debug(f"AI Critical Error: {str(e)}")
         return {"category": "ERROR", "reason": "AI Critical Failure", "sources": str(e)}
 
-# --- PHASE 3: OPTION MATH ---
+# --- PHASE 3: OPTION MATH (TRUE LEAPS) ---
 def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
     try:
         exps = stock_obj.options
         
         if dev:
+            # DEV MODE MOCK (Now uses Long Date)
             return {
-                "expiration": "2025-06-20",
+                "expiration": "2026-06-18", # Long date for mock
                 "strike": round(normal_price, 0),
                 "ask": 0.50,
                 "ratio": 20.0,
@@ -291,12 +292,16 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
             
         if not exps: return None
         
-        leaps = [e for e in exps if (datetime.strptime(e, "%Y-%m-%d") - datetime.now()).days > 250]
+        # --- STRICT LEAPS: Must be > 360 Days ---
+        leaps = [e for e in exps if (datetime.strptime(e, "%Y-%m-%d") - datetime.now()).days > 360]
+        
         if not leaps: 
-            log_debug("No LEAPS > 250d.")
+            log_debug("No LEAPS > 360d found.")
             return None
         
-        target_exp = leaps[0] 
+        # Prefer the FURTHEST date available (True Cornwall Style)
+        target_exp = leaps[-1] 
+        
         chain = stock_obj.option_chain(target_exp)
         calls = chain.calls
         
@@ -356,7 +361,6 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     st.session_state.debug_logs = [] 
     found_opportunities = []
     
-    # DEV MODE SPEED
     scan_list = LIQUID_TICKERS[:1] if dev_mode else LIQUID_TICKERS
     
     for i, ticker in enumerate(scan_list):
@@ -370,7 +374,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"💥 Panic: {ticker}. Intel gathering...")
         
         # 2. AI (MULTI-SOURCE)
-        time.sleep(0.5) # Polite delay
+        time.sleep(0.5) 
         verdict = analyze_solvency_openrouter(ticker, panic_data['stock_obj'], client, dev=dev_mode)
         
         if not verdict or not isinstance(verdict, dict):
@@ -424,6 +428,13 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
             v = opp['verdict']
             o = opp['option']
             
+            # FORMAT DATE PRETTILY (e.g., June 20 2026)
+            try:
+                raw_date = o['expiration']
+                fmt_date = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%B %d %Y")
+            except:
+                fmt_date = o['expiration']
+
             with st.container(border=True):
                 st.markdown(f"### {t} <span style='font-size:16px; color:#ff4b4b;'>{d['drop_pct']:.1f}% Drop</span>", unsafe_allow_html=True)
                 
@@ -437,10 +448,11 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                     st.markdown(f"**AI:** <span style='color:{color}; font-weight:bold;'>{cat}</span>", unsafe_allow_html=True)
                     st.write(f"_{v.get('reason')}_")
                 with c3:
-                    st.metric("Payout", f"{o['ratio']:.1f}x")
-                    st.markdown(f"**{o['expiration']} ${o['strike']:.0f} C**")
-                    st.markdown(f"**Cost:** ${o['ask']:.2f}")
+                    st.markdown(f"""
+                    **${o['strike']:.2f} Strike Call** Expiration: {fmt_date}  
+                    Estimated Cost: ${o['ask']:.2f}
+                    """)
+                    st.caption(f"Payout Ratio: {o['ratio']:.1f}x")
                 
-                # --- SOURCE VERIFICATION ---
                 with st.expander("📚 Analyzed Intelligence (Click to verify)"):
                     st.markdown(v.get('sources', 'No sources available.'))
