@@ -25,7 +25,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Hugging Face Free)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Anti-Block V23)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -92,49 +92,67 @@ def get_google_news(ticker):
         log_debug(f"Google News Fetch Failed for {ticker}: {e}")
         return ""
 
-# --- PHASE 1: QUANT SCANNER ---
+# --- PHASE 1: QUANT SCANNER (ROBUST) ---
 def scan_for_panic(ticker, dev=False):
-    try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="3mo")
-        if hist.empty: 
-            log_debug(f"{ticker}: No history found.")
-            return None
-        
-        current_price = hist['Close'].iloc[-1]
-        
-        if dev:
+    # Retry Loop for Yahoo Rate Limits
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            stock = yf.Ticker(ticker)
+            
+            # --- DEV MODE MOCK ---
+            if dev:
+                return {
+                    "ticker": ticker,
+                    "price": 100.0,
+                    "high_30d": 145.0, 
+                    "drop_pct": -30.0,
+                    "hv": 85.0,
+                    "stock_obj": stock
+                }
+
+            # Attempt download
+            hist = stock.history(period="3mo")
+            
+            if hist.empty: 
+                log_debug(f"{ticker}: No history found.")
+                return None
+            
+            current_price = hist['Close'].iloc[-1]
+            last_30 = hist.tail(30)
+            high_30d = last_30['High'].max()
+            if high_30d <= 0: return None
+            
+            drop_pct = ((current_price - high_30d) / high_30d) * 100
+            hist['Returns'] = hist['Close'].pct_change()
+            current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
+            
+            if drop_pct > -15.0: return None 
+            if current_hv < 35: return None 
+
             return {
                 "ticker": ticker,
                 "price": current_price,
-                "high_30d": current_price * 1.40, 
-                "drop_pct": -30.0,
-                "hv": 85.0,
+                "high_30d": high_30d,
+                "drop_pct": drop_pct,
+                "hv": current_hv,
                 "stock_obj": stock
             }
 
-        last_30 = hist.tail(30)
-        high_30d = last_30['High'].max()
-        if high_30d <= 0: return None
-        
-        drop_pct = ((current_price - high_30d) / high_30d) * 100
-        hist['Returns'] = hist['Close'].pct_change()
-        current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
-        
-        if drop_pct > -15.0: return None 
-        if current_hv < 35: return None 
-
-        return {
-            "ticker": ticker,
-            "price": current_price,
-            "high_30d": high_30d,
-            "drop_pct": drop_pct,
-            "hv": current_hv,
-            "stock_obj": stock
-        }
-    except Exception as e:
-        log_debug(f"{ticker}: Quant Error {str(e)}")
-        return None
+        except Exception as e:
+            err_msg = str(e)
+            if "Too Many Requests" in err_msg or "Rate limited" in err_msg:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 10  # Backoff: 10s, 20s, 30s
+                    log_debug(f"⚠️ Yahoo Rate Limit on {ticker}. Cooling down {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    log_debug(f"{ticker}: Skipped (Yahoo Rate Limit Persistent)")
+                    return None
+            else:
+                log_debug(f"{ticker}: Quant Error {err_msg}")
+                return None
 
 # --- PHASE 2: AI CLASSIFIER (HUGGING FACE) ---
 def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
@@ -173,7 +191,6 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
         API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
         headers = {"Authorization": f"Bearer {api_key}"}
         
-        # Mistral needs a specific prompt format
         prompt = f"""[INST] You are a financial risk analyst.
         Analyze these headlines for {ticker}:
         {news_text}
@@ -196,7 +213,6 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
             
         result_text = response.json()[0]['generated_text']
         
-        # Cleanup JSON (HF sometimes adds extra text)
         start_idx = result_text.find('{')
         end_idx = result_text.rfind('}') + 1
         if start_idx != -1 and end_idx != -1:
@@ -285,6 +301,9 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
+        # RATE LIMIT PAUSE (Crucial for Yahoo)
+        time.sleep(1.5) 
+        
         # 1. QUANT
         panic_data = scan_for_panic(ticker, dev=dev_mode)
         if not panic_data: continue
@@ -292,8 +311,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"💥 Panic: {ticker}. Intel gathering...")
         
         # 2. AI (Hugging Face)
-        # We need a small sleep to avoid HF rate limits (simpler than OR but still exist)
-        time.sleep(1.0) 
+        time.sleep(1.0) # Hugging Face Throttle
         verdict = analyze_solvency_hf(ticker, panic_data['stock_obj'], api_key, dev=dev_mode)
         
         if not verdict or verdict.get('category') == "ERROR":
