@@ -16,3 +16,4 @@ matplotlib
 google-generativeai>=0.8.3
 pyarrow
 openai
+duckduckgo-search
