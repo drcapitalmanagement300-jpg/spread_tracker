@@ -25,7 +25,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Anti-Block V23)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Bulldog V24)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -92,11 +92,13 @@ def get_google_news(ticker):
         log_debug(f"Google News Fetch Failed for {ticker}: {e}")
         return ""
 
-# --- PHASE 1: QUANT SCANNER (ROBUST) ---
+# --- PHASE 1: QUANT SCANNER (BULLDOG MODE) ---
 def scan_for_panic(ticker, dev=False):
-    # Retry Loop for Yahoo Rate Limits
-    max_retries = 3
-    for attempt in range(max_retries):
+    # BULLDOG LOOP: Never quit on a connection error.
+    # Exponential backoff: 10s -> 20s -> 40s -> 60s
+    wait_time = 10 
+    
+    while True:
         try:
             stock = yf.Ticker(ticker)
             
@@ -115,8 +117,8 @@ def scan_for_panic(ticker, dev=False):
             hist = stock.history(period="3mo")
             
             if hist.empty: 
-                log_debug(f"{ticker}: No history found.")
-                return None
+                log_debug(f"{ticker}: No history found (Invalid Ticker?).")
+                return None # Only return None if data is empty (not a connection error)
             
             current_price = hist['Close'].iloc[-1]
             last_30 = hist.tail(30)
@@ -127,6 +129,7 @@ def scan_for_panic(ticker, dev=False):
             hist['Returns'] = hist['Close'].pct_change()
             current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
             
+            # --- SUCCESS! Return Data ---
             if drop_pct > -15.0: return None 
             if current_hv < 35: return None 
 
@@ -141,16 +144,15 @@ def scan_for_panic(ticker, dev=False):
 
         except Exception as e:
             err_msg = str(e)
-            if "Too Many Requests" in err_msg or "Rate limited" in err_msg:
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 10  # Backoff: 10s, 20s, 30s
-                    log_debug(f"⚠️ Yahoo Rate Limit on {ticker}. Cooling down {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    log_debug(f"{ticker}: Skipped (Yahoo Rate Limit Persistent)")
-                    return None
+            # Detect Rate Limits
+            if "Too Many Requests" in err_msg or "Rate limited" in err_msg or "429" in err_msg:
+                st.warning(f"⚠️ Rate Limit on {ticker}. Pausing {wait_time}s to cool down...")
+                time.sleep(wait_time)
+                # Exponential Backoff (Cap at 60s)
+                wait_time = min(wait_time * 2, 60)
+                continue # TRY AGAIN. Do not skip.
             else:
+                # If it's a real crash (e.g. math error), log it and skip.
                 log_debug(f"{ticker}: Quant Error {err_msg}")
                 return None
 
@@ -205,7 +207,12 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
             "parameters": {"max_new_tokens": 100, "return_full_text": False}
         }
         
-        response = requests.post(API_URL, headers=headers, json=payload)
+        # Retry logic for AI as well
+        for _ in range(3):
+            response = requests.post(API_URL, headers=headers, json=payload)
+            if response.status_code == 200:
+                break
+            time.sleep(2) # Short pause for AI retry
         
         if response.status_code != 200:
             log_debug(f"HF Error {response.status_code}: {response.text}")
@@ -301,8 +308,8 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        # RATE LIMIT PAUSE (Crucial for Yahoo)
-        time.sleep(1.5) 
+        # POLITE SCANNING: Always wait 2 seconds between stocks
+        time.sleep(2.0) 
         
         # 1. QUANT
         panic_data = scan_for_panic(ticker, dev=dev_mode)
