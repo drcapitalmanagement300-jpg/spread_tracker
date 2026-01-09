@@ -25,7 +25,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (New Router V25)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Universal Router V26)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -36,19 +36,26 @@ with st.sidebar:
     st.divider()
     st.write("### 🔌 Connection Debugger")
     
-    if st.button("Test Hugging Face Connection"):
+    if st.button("Test Hugging Face Router"):
         api_key = st.secrets.get("HUGGINGFACE_API_KEY")
         if not api_key:
             st.error("Missing HUGGINGFACE_API_KEY")
         else:
             try:
-                # NEW ROUTER URL
-                API_URL = "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3"
+                # NEW UNIVERSAL ROUTER ENDPOINT (OpenAI Compatible)
+                API_URL = "https://router.huggingface.co/v1/chat/completions"
                 headers = {"Authorization": f"Bearer {api_key}"}
-                payload = {"inputs": "Reply with one word: Connected"}
+                payload = {
+                    "model": "mistralai/Mistral-7B-Instruct-v0.3",
+                    "messages": [{"role": "user", "content": "Reply with one word: Connected"}],
+                    "max_tokens": 10
+                }
                 response = requests.post(API_URL, headers=headers, json=payload)
                 if response.status_code == 200:
-                    st.success(f"✅ Success: {response.json()[0]['generated_text']}")
+                    data = response.json()
+                    # Parse OpenAI-style response
+                    msg = data['choices'][0]['message']['content']
+                    st.success(f"✅ Success: {msg}")
                 else:
                     st.error(f"❌ Error {response.status_code}: {response.text}")
             except Exception as e:
@@ -152,7 +159,7 @@ def scan_for_panic(ticker, dev=False):
                 log_debug(f"{ticker}: Quant Error {err_msg}")
                 return None
 
-# --- PHASE 2: AI CLASSIFIER (NEW ROUTER) ---
+# --- PHASE 2: AI CLASSIFIER (UNIVERSAL ROUTER) ---
 def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
     try:
         news_text = ""
@@ -184,47 +191,73 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
             else:
                 return {"category": "UNKNOWN", "reason": "No news found."}
         
-        # --- NEW URL STRUCTURE ---
-        # Note the "/hf-inference/" part which is critical now
-        API_URL = "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3"
-        headers = {"Authorization": f"Bearer {api_key}"}
+        # --- NEW UNIVERSAL ROUTER ---
+        # This is the "OpenAI-Compatible" endpoint from Hugging Face
+        API_URL = "https://router.huggingface.co/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
         
-        prompt = f"""[INST] You are a financial risk analyst.
+        prompt = f"""You are a financial risk analyst.
         Analyze these headlines for {ticker}:
         {news_text}
         
         Is this a TERMINAL problem (Fraud, Bankruptcy) or SOLVABLE (Earnings Miss, Macro)?
         
-        Respond with valid JSON only: {{"category": "TERMINAL" or "SOLVABLE", "reason": "summary"}}
-        [/INST]"""
+        Respond with valid JSON only: {{"category": "TERMINAL" or "SOLVABLE", "reason": "summary"}}"""
         
-        payload = {
-            "inputs": prompt,
-            "parameters": {"max_new_tokens": 100, "return_full_text": False}
-        }
+        # Model Fallback List (If one 404s, try the next)
+        MODELS_TO_TRY = [
+            "mistralai/Mistral-7B-Instruct-v0.3",
+            "meta-llama/Llama-3.2-3B-Instruct", 
+            "microsoft/Phi-3.5-mini-instruct"
+        ]
         
-        # Retry logic for AI
-        for _ in range(3):
-            response = requests.post(API_URL, headers=headers, json=payload)
-            if response.status_code == 200:
-                break
-            time.sleep(2)
+        last_error = ""
         
-        if response.status_code != 200:
-            log_debug(f"HF Error {response.status_code}: {response.text}")
-            return {"category": "ERROR", "reason": "HF API Limit"}
+        for model_id in MODELS_TO_TRY:
+            try:
+                payload = {
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 150,
+                    "temperature": 0.1
+                }
+                
+                # Retry logic for connection glitches
+                for _ in range(2):
+                    response = requests.post(API_URL, headers=headers, json=payload)
+                    if response.status_code == 200:
+                        break
+                    time.sleep(2)
+                
+                if response.status_code != 200:
+                    last_error = f"{model_id}: {response.status_code}"
+                    continue # Try next model
+                
+                # Parse OpenAI-Style Response
+                result = response.json()
+                content = result['choices'][0]['message']['content']
+                
+                # Clean JSON
+                content = content.replace("```json", "").replace("```", "").strip()
+                
+                # Attempt Parse
+                start_idx = content.find('{')
+                end_idx = content.rfind('}') + 1
+                if start_idx != -1 and end_idx != -1:
+                    json_str = content[start_idx:end_idx]
+                    parsed = json.loads(json_str)
+                    parsed['sources'] = f"**Source: {source_used}**\n\n{news_text}"
+                    return parsed
             
-        result_text = response.json()[0]['generated_text']
-        
-        start_idx = result_text.find('{')
-        end_idx = result_text.rfind('}') + 1
-        if start_idx != -1 and end_idx != -1:
-            json_str = result_text[start_idx:end_idx]
-            parsed = json.loads(json_str)
-            parsed['sources'] = f"**Source: {source_used}**\n\n{news_text}"
-            return parsed
-        else:
-            return {"category": "ERROR", "reason": "Bad JSON from AI"}
+            except Exception as e:
+                last_error = str(e)
+                continue
+                
+        log_debug(f"All Models Failed. Last error: {last_error}")
+        return {"category": "ERROR", "reason": "AI Models Unavailable"}
             
     except Exception as e:
         log_debug(f"AI Critical Error: {str(e)}")
@@ -304,7 +337,6 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        # POLITE SCANNING
         time.sleep(2.0) 
         
         # 1. QUANT
@@ -313,7 +345,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         
         status.text(f"💥 Panic: {ticker}. Intel gathering...")
         
-        # 2. AI (Hugging Face)
+        # 2. AI (Universal Router)
         time.sleep(1.0) 
         verdict = analyze_solvency_hf(ticker, panic_data['stock_obj'], api_key, dev=dev_mode)
         
