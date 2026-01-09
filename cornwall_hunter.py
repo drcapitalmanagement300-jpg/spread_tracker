@@ -49,25 +49,19 @@ with st.sidebar:
             st.error(f"Error checking models: {e}")
 
 # --- EXPANDED UNIVERSE (Mid-Caps, High-Beta, Crypto, Bio) ---
-# These are stocks that actually crash 30-50% and recover.
 LIQUID_TICKERS = [
     # --- HIGH BETA / GROWTH ---
     "PLTR", "SOFI", "HOOD", "DKNG", "ROKU", "SHOP", "SQ", "AFRM", "UPST", "CVNA",
     "NET", "DDOG", "SNOW", "U", "RBLX", "COIN", "MSTR", "MARA", "RIOT", "CLSK",
-    
     # --- VOLATILE TECH & AI ---
     "AI", "IONQ", "PLUG", "FCEL", "JOBY", "ACHR", "SPCE", "ASTS", "LUNR",
-    
-    # --- BIOTECH (The Kings of Binary Events) ---
+    # --- BIOTECH (Binary Events) ---
     "XBI", "LABU", "MRNA", "BNTX", "CRSP", "NTLA", "EDIT", "BEAM",
-    
-    # --- MEME / RETAIL FAVORITES ---
+    # --- MEME / RETAIL ---
     "GME", "AMC", "CHWY", "RDDT", "DJT",
-    
     # --- DISASTER RECOVERY (Legacy) ---
     "BA", "INTC", "WBA", "PARA", "LULU", "NKE", "SBUX", "PYPL",
-    
-    # --- INDEXES (For Reference) ---
+    # --- INDEXES ---
     "SPY", "QQQ", "IWM", "ARKK", "KRE"
 ]
 
@@ -88,19 +82,16 @@ def configure_gemini():
 def scan_for_panic(ticker, dev=False):
     try:
         stock = yf.Ticker(ticker)
-        # Fetch 3mo to ensure we have enough data
         hist = stock.history(period="3mo")
         if hist.empty: return None
         
         current_price = hist['Close'].iloc[-1]
         last_30 = hist.tail(30)
         high_30d = last_30['High'].max()
-        
         if high_30d <= 0: return None
         
         drop_pct = ((current_price - high_30d) / high_30d) * 100
         
-        # Calculate Volatility
         hist['Returns'] = hist['Close'].pct_change()
         current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
         
@@ -116,8 +107,7 @@ def scan_for_panic(ticker, dev=False):
                     "stock_obj": stock
                 }
         
-        # PRODUCTION LOGIC
-        # We want >15% drop and >40 HV (Mid-caps need higher vol to be interesting)
+        # PRODUCTION LOGIC: >15% drop, >35 HV
         if drop_pct > -15.0: return None 
         if current_hv < 35: return None 
 
@@ -174,7 +164,7 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         exps = stock_obj.options
         if not exps: return None
         
-        # Find LEAPS (options > 250 days out)
+        # LEAPS > 250 days
         leaps = [e for e in exps if (datetime.strptime(e, "%Y-%m-%d") - datetime.now()).days > 250]
         if not leaps: return None
         
@@ -182,19 +172,14 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         chain = stock_obj.option_chain(target_exp)
         calls = chain.calls
         
-        # Target Strike = The "Normal" Price
         target_strike = normal_price
-        
-        # Find strikes within 5% of the target
         candidates = calls[(calls['strike'] >= target_strike * 0.95) & (calls['strike'] <= target_strike * 1.05)]
         
         if candidates.empty and dev:
-             # Widen search for dev mode
              candidates = calls[(calls['strike'] >= target_strike * 0.80) & (calls['strike'] <= target_strike * 1.20)]
 
         if candidates.empty: return None
         
-        # Pick the most liquid one
         option = candidates.sort_values('volume', ascending=False).iloc[0]
         ask_price = option['ask']
         
@@ -202,23 +187,8 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
             if dev: ask_price = 0.50
             else: return None
         
-        # Cornwall Ratio: (Normal Price - Strike) / Premium
-        # Since Strike ~= Normal Price, we are basically buying ATM relative to "Normal"
-        # But relative to "Current", it is Deep OTM.
-        
-        # For simplicity in this scanner, we look for asymmetric payout potential
-        # If stock returns to normal, the option is worth (Normal - Strike).
-        # Wait, if Strike = Normal, Intrinsic is 0. 
-        # CORRECTION: We want Strike to be slightly BELOW Normal, or we calculate payoff based on OVERSHOOT.
-        
-        # Cornwall Strategy often buys OTM relative to CURRENT, but ITM relative to RECOVERY.
-        # Let's adjust: We buy the strike at the HALFWAY point between Current and Normal.
-        # Or we stick to the user's prompt: "find mispriced OTMs"
-        
         projected_intrinsic = normal_price - option['strike']
-        
         if projected_intrinsic <= 0:
-            # If strike is above normal, we need it to go HIGHER than normal to profit
             if dev: projected_intrinsic = 5.0 
             else: return None 
         
@@ -242,49 +212,61 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     bar = st.progress(0)
     found_opportunities = []
     
-    # 1. Dev Mode: Use tiny list. Production: Use full list.
+    # 1. Dev Mode: Use tiny list.
     scan_list = LIQUID_TICKERS[:3] if dev_mode else LIQUID_TICKERS
     
-    # 2. Rate Limit Logic (PERSISTENT)
-    RATE_LIMIT_DELAY = 4.1 
-    
-    # Initialize session state for rate limiting if not present
+    # 2. Initialize Session State Throttle
     if "last_gemini_call" not in st.session_state:
         st.session_state.last_gemini_call = 0
+    
+    RATE_LIMIT_DELAY = 5.0 # Seconds (Safe buffer)
 
     for i, ticker in enumerate(scan_list):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        # --- QUANT (Fast, Local) ---
+        # --- QUANT (Local) ---
         panic_data = scan_for_panic(ticker, dev=dev_mode)
         if not panic_data: continue
         
-        status.text(f"💥 Panic: {ticker}. Asking Gemini...")
+        status.text(f"💥 Panic: {ticker}. Analyzing news...")
         
-        # --- SMART THROTTLE (PERSISTENT) ---
-        # Calculate time since the GLOBAL last call
-        elapsed = time.time() - st.session_state.last_gemini_call
-        if elapsed < RATE_LIMIT_DELAY:
-            sleep_time = RATE_LIMIT_DELAY - elapsed
-            status.text(f"⏳ Throttling for {sleep_time:.1f}s (Gemini Free Tier)...")
-            time.sleep(sleep_time)
+        # --- ROBUST AI LOOP (Retry until success) ---
+        verdict = None
+        retries = 0
         
-        # --- AI CALL ---
-        verdict = analyze_solvency_gemini(ticker, panic_data['stock_obj'], dev=dev_mode)
+        while retries < 3:
+            # A. Gatekeeper: Check Throttle BEFORE Call
+            elapsed = time.time() - st.session_state.last_gemini_call
+            if elapsed < RATE_LIMIT_DELAY:
+                sleep_time = RATE_LIMIT_DELAY - elapsed
+                # Only show status if it's a significant wait
+                if sleep_time > 1.0:
+                    status.text(f"⏳ Gatekeeper: Pausing {sleep_time:.1f}s for API limit...")
+                time.sleep(sleep_time)
+
+            # B. Attempt Call
+            result = analyze_solvency_gemini(ticker, panic_data['stock_obj'], dev=dev_mode)
+            st.session_state.last_gemini_call = time.time() # Update timer immediately
+            
+            # C. Check Result
+            if result.get('category') == "RATE_LIMIT":
+                status.warning(f"⚠️ Rate Limit Hit (429). Auto-cooling 60s... (Attempt {retries+1}/3)")
+                time.sleep(60) # Force long cooldown
+                retries += 1
+            else:
+                verdict = result
+                break # Valid result found, exit loop
         
-        # Update Global Timer
-        st.session_state.last_gemini_call = time.time()
-        
-        # Fail safe
-        if verdict.get('category') == "RATE_LIMIT":
-            st.warning("Rate limit hit. Cooling down 60s...")
-            time.sleep(60)
-            verdict = analyze_solvency_gemini(ticker, panic_data['stock_obj'], dev=dev_mode)
-            st.session_state.last_gemini_call = time.time()
+        # If we failed 3 times, skip this ticker
+        if not verdict or verdict.get('category') == "RATE_LIMIT":
+            status.error(f"Skipping {ticker} due to API limits.")
+            continue
 
         # --- RESULTS ---
-        if verdict.get('category') == 'SOLVABLE' or dev_mode:
+        # Only proceed if we have a valid category (SOLVABLE or TERMINAL)
+        # Note: In Dev Mode, we accept anything that isn't an error
+        if verdict.get('category') == 'SOLVABLE' or (dev_mode and verdict.get('category') != 'ERROR'):
             recovery_target = panic_data['high_30d']
             opportunity = find_cornwall_option(
                 panic_data['stock_obj'], 
@@ -302,9 +284,9 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                     "option": opportunity
                 })
                 
-                # DEV MODE STOPPER
+                # DEV MODE SHORTCUT: Stop immediately after first finding
                 if dev_mode:
-                    status.text("Dev Mode: Result found. Stopping early.")
+                    status.text("✅ Dev Mode: Opportunity found. Stopping scan.")
                     break
     
     status.empty()
