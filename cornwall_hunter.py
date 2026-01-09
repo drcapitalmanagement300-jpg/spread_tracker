@@ -48,20 +48,14 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Error checking models: {e}")
 
-# --- EXPANDED UNIVERSE (Mid-Caps, High-Beta, Crypto, Bio) ---
+# --- EXPANDED UNIVERSE ---
 LIQUID_TICKERS = [
-    # --- HIGH BETA / GROWTH ---
     "PLTR", "SOFI", "HOOD", "DKNG", "ROKU", "SHOP", "SQ", "AFRM", "UPST", "CVNA",
     "NET", "DDOG", "SNOW", "U", "RBLX", "COIN", "MSTR", "MARA", "RIOT", "CLSK",
-    # --- VOLATILE TECH & AI ---
     "AI", "IONQ", "PLUG", "FCEL", "JOBY", "ACHR", "SPCE", "ASTS", "LUNR",
-    # --- BIOTECH (Binary Events) ---
     "XBI", "LABU", "MRNA", "BNTX", "CRSP", "NTLA", "EDIT", "BEAM",
-    # --- MEME / RETAIL ---
     "GME", "AMC", "CHWY", "RDDT", "DJT",
-    # --- DISASTER RECOVERY (Legacy) ---
     "BA", "INTC", "WBA", "PARA", "LULU", "NKE", "SBUX", "PYPL",
-    # --- INDEXES ---
     "SPY", "QQQ", "IWM", "ARKK", "KRE"
 ]
 
@@ -78,29 +72,34 @@ def configure_gemini():
         st.error(f"Gemini Config Error: {e}")
         return False
 
+# --- DEBUG LOGGER ---
+def log_debug(msg):
+    if "debug_logs" not in st.session_state:
+        st.session_state.debug_logs = []
+    st.session_state.debug_logs.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
+
 # --- PHASE 1: QUANT SCANNER ---
 def scan_for_panic(ticker, dev=False):
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="3mo")
-        if hist.empty: return None
+        if hist.empty: 
+            log_debug(f"{ticker}: No history found.")
+            return None
         
         current_price = hist['Close'].iloc[-1]
         
-        # --- CRITICAL FIX: FORCE PASS IN DEV MODE ---
+        # --- DEV MODE FORCE PASS ---
         if dev:
-            # We ignore real data and fabricate a "Perfect Setup"
-            # This guarantees it passes the -15% filter below
             return {
                 "ticker": ticker,
                 "price": current_price,
-                "high_30d": current_price * 1.40, # Fake High (Implies 30% drop)
-                "drop_pct": -30.0, # Fake Drop
-                "hv": 85.0,        # Fake Volatility
+                "high_30d": current_price * 1.40, 
+                "drop_pct": -30.0,
+                "hv": 85.0,
                 "stock_obj": stock
             }
 
-        # --- NORMAL PRODUCTION LOGIC ---
         last_30 = hist.tail(30)
         high_30d = last_30['High'].max()
         if high_30d <= 0: return None
@@ -109,7 +108,6 @@ def scan_for_panic(ticker, dev=False):
         hist['Returns'] = hist['Close'].pct_change()
         current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
         
-        # Production Filters: >15% drop, >35 HV
         if drop_pct > -15.0: return None 
         if current_hv < 35: return None 
 
@@ -121,7 +119,9 @@ def scan_for_panic(ticker, dev=False):
             "hv": current_hv,
             "stock_obj": stock
         }
-    except: return None
+    except Exception as e:
+        log_debug(f"{ticker}: Quant Error {str(e)}")
+        return None
 
 # --- PHASE 2: AI CLASSIFIER ---
 def analyze_solvency_gemini(ticker, stock_obj, dev=False):
@@ -147,8 +147,8 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
         {news_text}
         
         Classify the crisis into one of two categories:
-        1. TERMINAL: Fraud, Bankruptcy, Criminal Indictment, Accounting Scandal, Core Business Obsolete, Dilution Spiral.
-        2. SOLVABLE: Earnings Miss, CEO Fired, Regulatory Fine, Lawsuit, Product Recall, Macro Fear, Short Report.
+        1. TERMINAL: Fraud, Bankruptcy, Criminal Indictment, Accounting Scandal, Core Business Obsolete.
+        2. SOLVABLE: Earnings Miss, CEO Fired, Regulatory Fine, Lawsuit, Product Recall, Macro Fear.
         
         Return JSON format: {{"category": "TERMINAL" or "SOLVABLE", "reason": "Short summary (max 15 words)"}}
         """
@@ -160,15 +160,29 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
         if "429" in str(e): return {"category": "RATE_LIMIT", "reason": "Gemini Rate Limit Hit."}
         return {"category": "ERROR", "reason": str(e)}
 
-# --- PHASE 3: OPTION MATH ---
+# --- PHASE 3: OPTION MATH (ROBUST) ---
 def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
     try:
         exps = stock_obj.options
+        
+        # --- DEV MODE MOCK ---
+        if (not exps or len(exps) == 0) and dev:
+            log_debug("Dev Mode: mocking missing option chain.")
+            return {
+                "expiration": "2025-06-20",
+                "strike": round(normal_price, 0),
+                "ask": 0.50,
+                "ratio": 20.0,
+                "contract": {"strike": normal_price, "ask": 0.50, "volume": 1000}
+            }
+            
         if not exps: return None
         
         # LEAPS > 250 days
         leaps = [e for e in exps if (datetime.strptime(e, "%Y-%m-%d") - datetime.now()).days > 250]
-        if not leaps: return None
+        if not leaps: 
+            log_debug("No LEAPS > 250d.")
+            return None
         
         target_exp = leaps[0] 
         chain = stock_obj.option_chain(target_exp)
@@ -176,28 +190,60 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         
         target_strike = normal_price
         
-        # Search Range: Production (5%), Dev (Huge 50% range to force a hit)
-        candidates = calls[(calls['strike'] >= target_strike * 0.95) & (calls['strike'] <= target_strike * 1.05)]
+        # 1. Broad Search (Range: 80% to 120% of target)
+        candidates = calls[(calls['strike'] >= target_strike * 0.80) & (calls['strike'] <= target_strike * 1.20)].copy()
         
-        if candidates.empty and dev:
-             candidates = calls[(calls['strike'] >= target_strike * 0.50) & (calls['strike'] <= target_strike * 1.50)]
+        if candidates.empty: 
+            if dev: # Widen massively for dev
+                candidates = calls[(calls['strike'] >= target_strike * 0.50) & (calls['strike'] <= target_strike * 1.50)].copy()
+            else:
+                log_debug("No strikes near target.")
+                return None
 
-        if candidates.empty: return None
+        # 2. Smart Price Calculation
+        # yfinance often has Ask=0 for illiquid options. We must clean this.
+        def get_valid_price(row):
+            ask = row.get('ask', 0)
+            bid = row.get('bid', 0)
+            last = row.get('lastPrice', 0)
+            
+            # Trust Ask if it exists and looks real
+            if ask > 0: return ask
+            
+            # If Ask is 0 (market closed/wide), try Midpoint
+            if bid > 0 and last > 0: return (bid + last) / 2
+            
+            # Last resort
+            if last > 0: return last
+            return 0
+
+        candidates['valid_price'] = candidates.apply(get_valid_price, axis=1)
         
-        option = candidates.sort_values('volume', ascending=False).iloc[0]
-        ask_price = option['ask']
+        # 3. Liquidity Sort (Prioritize Volume + Open Interest)
+        # Avoids "Ghost" options with good prices but no liquidity
+        candidates['liquidity'] = candidates['volume'].fillna(0) + candidates['openInterest'].fillna(0)
         
-        # Fix Bad Data in Dev
-        if ask_price <= 0:
-            if dev: ask_price = 0.50
-            else: return None
+        # Filter out junk (Price=0)
+        candidates = candidates[candidates['valid_price'] > 0]
         
+        if candidates.empty: 
+            if dev: # Create dummy row if Dev
+                candidates = pd.DataFrame([{'strike': target_strike, 'valid_price': 0.50, 'liquidity': 100}])
+            else:
+                return None
+            
+        # Pick the most liquid option
+        option = candidates.sort_values('liquidity', ascending=False).iloc[0]
+        
+        ask_price = option['valid_price']
         projected_intrinsic = normal_price - option['strike']
         
-        # Fix Negative Math in Dev
-        if projected_intrinsic <= 0:
-            if dev: projected_intrinsic = 5.0 
-            else: return None 
+        # Dev Mode Override
+        if dev:
+            ask_price = 0.50
+            projected_intrinsic = 10.0
+            
+        if projected_intrinsic <= 0: return None
         
         payout_ratio = projected_intrinsic / ask_price
         
@@ -208,7 +254,9 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
             "ratio": payout_ratio,
             "contract": option
         }
-    except: return None
+    except Exception as e:
+        log_debug(f"Option Error: {str(e)}")
+        return None
 
 # --- MAIN EXECUTION ---
 
@@ -217,6 +265,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     
     status = st.empty()
     bar = st.progress(0)
+    st.session_state.debug_logs = [] 
     found_opportunities = []
     
     scan_list = LIQUID_TICKERS[:3] if dev_mode else LIQUID_TICKERS
@@ -230,31 +279,25 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        # --- QUANT (Force Pass in Dev) ---
+        # 1. QUANT
         panic_data = scan_for_panic(ticker, dev=dev_mode)
         if not panic_data: continue
         
         status.text(f"💥 Panic: {ticker}. Analyzing news...")
         
-        # --- AI LOOP ---
+        # 2. AI LOOP
         verdict = None
         retries = 0
         while retries < 3:
-            # 1. Gatekeeper
             elapsed = time.time() - st.session_state.last_gemini_call
             if elapsed < RATE_LIMIT_DELAY:
-                sleep_time = RATE_LIMIT_DELAY - elapsed
-                if sleep_time > 1.0:
-                    status.text(f"⏳ Gatekeeper: Pausing {sleep_time:.1f}s for API limit...")
-                time.sleep(sleep_time)
+                time.sleep(RATE_LIMIT_DELAY - elapsed)
 
-            # 2. Call
             result = analyze_solvency_gemini(ticker, panic_data['stock_obj'], dev=dev_mode)
             st.session_state.last_gemini_call = time.time()
             
-            # 3. Check
             if result.get('category') == "RATE_LIMIT":
-                status.warning(f"⚠️ Rate Limit (429). Auto-cooling 60s... ({retries+1}/3)")
+                status.warning(f"⚠️ Rate Limit (429). Cooling... ({retries+1}/3)")
                 time.sleep(60)
                 retries += 1
             else:
@@ -262,10 +305,10 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                 break
         
         if not verdict or verdict.get('category') == "RATE_LIMIT":
-            status.error(f"Skipping {ticker} due to API limits.")
+            log_debug(f"{ticker}: Skipped (Rate Limit)")
             continue
 
-        # --- RESULTS ---
+        # 3. MATH
         if verdict.get('category') == 'SOLVABLE' or (dev_mode and verdict.get('category') != 'ERROR'):
             recovery_target = panic_data['high_30d']
             opportunity = find_cornwall_option(
@@ -276,6 +319,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
             )
             
             min_ratio = 2.0 if dev_mode else 8.0
+            
             if opportunity and opportunity['ratio'] > min_ratio:
                 found_opportunities.append({
                     "ticker": ticker,
@@ -285,11 +329,15 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                 })
                 
                 if dev_mode:
-                    status.text("✅ Dev Mode: Opportunity found. Stopping scan.")
+                    status.text("✅ Dev Mode: Opportunity found.")
                     break
     
     status.empty()
     bar.empty()
+    
+    with st.expander("🔍 View Scan Debug Logs"):
+        for log in st.session_state.debug_logs:
+            st.text(log)
     
     if not found_opportunities:
         st.info("No asymmetric opportunities found.")
