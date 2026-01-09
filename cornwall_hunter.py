@@ -15,7 +15,11 @@ warnings.simplefilter(action='ignore', category=UserWarning)
 from openai import OpenAI
 
 # --- DUCKDUCKGO SEARCH (Fallback) ---
-from duckduckgo_search import DDGS
+try:
+    from duckduckgo_search import DDGS
+    HAS_DDG = True
+except ImportError:
+    HAS_DDG = False
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Cornwall Hunter")
@@ -29,7 +33,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (OpenRouter + Web Search)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Wide Net + Source Verification)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -59,15 +63,33 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"❌ Connection Failed: {e}")
 
-# --- EXPANDED UNIVERSE ---
+# --- EXPANDED UNIVERSE (100+ High Beta Tickers) ---
 LIQUID_TICKERS = [
+    # --- MEGA CAP VOLATILITY ---
+    "TSLA", "NVDA", "AMD", "AMZN", "GOOGL", "META", "MSFT", "NFLX",
+    # --- HIGH GROWTH / SAAS ---
     "PLTR", "SOFI", "HOOD", "DKNG", "ROKU", "SHOP", "SQ", "AFRM", "UPST", "CVNA",
-    "NET", "DDOG", "SNOW", "U", "RBLX", "COIN", "MSTR", "MARA", "RIOT", "CLSK",
-    "AI", "IONQ", "PLUG", "FCEL", "JOBY", "ACHR", "SPCE", "ASTS", "LUNR",
-    "XBI", "LABU", "MRNA", "BNTX", "CRSP", "NTLA", "EDIT", "BEAM",
-    "GME", "AMC", "CHWY", "RDDT", "DJT",
-    "BA", "INTC", "WBA", "PARA", "LULU", "NKE", "SBUX", "PYPL",
-    "SPY", "QQQ", "IWM", "ARKK", "KRE"
+    "NET", "DDOG", "SNOW", "U", "RBLX", "COIN", "CRWD", "ZS", "PANW", "TTD",
+    "APP", "MDB", "TEAM", "HUBS", "BILL", "DOCU", "TWLO", "OKTA", "ZM",
+    # --- CRYPTO & FINTECH ---
+    "MSTR", "MARA", "RIOT", "CLSK", "CIFR", "IREN", "WULF", "HUT", "BITF",
+    "PYPL", "GME", "AMC", "HOOD", "COIN",
+    # --- SEMIS & AI HARDWARE ---
+    "SMCI", "ARM", "MU", "INTC", "QCOM", "AVGO", "MRVL", "ANET", "VRT",
+    # --- DISASTER RECOVERY / TURNAROUNDS ---
+    "BA", "WBA", "PARA", "DIS", "NKE", "SBUX", "LULU", "EL", "ULTA", "DG", "DLTR",
+    "MMM", "T", "VZ", "PFE", "BMY", "CVS",
+    # --- BIOTECH (High Risk/Reward) ---
+    "XBI", "LABU", "MRNA", "BNTX", "CRSP", "NTLA", "EDIT", "BEAM", "SAVA", "ITCI",
+    # --- TRAVEL & LEISURE (Cyclical) ---
+    "CCL", "RCL", "NCLH", "UAL", "AAL", "DAL", "LUV", "EXPE", "ABNB", "BKNG",
+    "LVS", "WYNN", "MGM", "CZR", "PENN",
+    # --- ENERGY & COMMODITIES ---
+    "URA", "CCJ", "FCX", "SCCO", "CLF", "X", "AA",
+    # --- MEME / RETAIL ---
+    "CHWY", "RDDT", "DJT", "SPCE", "ASTS", "LUNR", "RKLB", "JOBY", "ACHR",
+    # --- VOLATILE ETFS ---
+    "TQQQ", "SQQQ", "SOXL", "SOXS", "ARKK", "KRE", "XOP", "TAN"
 ]
 
 # --- SETUP CLIENT ---
@@ -89,13 +111,18 @@ def log_debug(msg):
 # --- HELPER: WEB SEARCH ---
 def get_web_news(ticker):
     """Fallback: Search DuckDuckGo if yfinance has no news."""
+    if not HAS_DDG:
+        log_debug("DuckDuckGo library not installed.")
+        return ""
     try:
         query = f"{ticker} stock price drop reason news"
-        results = DDGS().text(query, max_results=5)
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=3))
+            
         if not results:
             return ""
         
-        headlines = [f"- {r['title']}: {r['body']}" for r in results]
+        headlines = [f"DDG: {r['title']} - {r['body']}" for r in results]
         return "\n".join(headlines)
     except Exception as e:
         log_debug(f"Web Search Failed for {ticker}: {e}")
@@ -131,7 +158,10 @@ def scan_for_panic(ticker, dev=False):
         hist['Returns'] = hist['Close'].pct_change()
         current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
         
+        # --- FILTERS ---
+        # 1. Must be down at least 15% from 30-day high
         if drop_pct > -15.0: return None 
+        # 2. Must be volatile (HV > 35)
         if current_hv < 35: return None 
 
         return {
@@ -146,32 +176,40 @@ def scan_for_panic(ticker, dev=False):
         log_debug(f"{ticker}: Quant Error {str(e)}")
         return None
 
-# --- PHASE 2: AI CLASSIFIER (MULTI-SOURCE + MULTI-MODEL) ---
+# --- PHASE 2: AI CLASSIFIER (SOURCE AWARE) ---
 def analyze_solvency_openrouter(ticker, stock_obj, client, dev=False):
     try:
         # 1. Try yfinance News
         news_items = stock_obj.news
         news_text = ""
+        source_used = "None"
         
         if news_items:
             headlines = []
             for n in news_items[:5]:
                 title = n.get('title', n.get('headline', 'No Title'))
+                pub_time = n.get('providerPublishTime', 0)
+                # Convert timestamp if available for context
                 headlines.append(f"- {title}")
             news_text = "\n".join(headlines)
-            log_debug(f"{ticker}: Found {len(news_items)} news items via Yahoo.")
+            source_used = "Yahoo Finance"
+            log_debug(f"{ticker}: Found news via Yahoo.")
             
         # 2. Fallback: DuckDuckGo Search
         if not news_text or len(news_text) < 50:
-            log_debug(f"{ticker}: Yahoo news empty. Searching Web (DuckDuckGo)...")
-            news_text = get_web_news(ticker)
+            log_debug(f"{ticker}: Yahoo empty. Searching Web...")
+            web_news = get_web_news(ticker)
+            if web_news:
+                news_text = web_news
+                source_used = "DuckDuckGo Web Search"
             
-        # 3. If STILL no news, we can't judge.
+        # 3. If STILL no news
         if not news_text:
-            if dev: return {"category": "SOLVABLE", "reason": "(DEV) No news found anywhere."}
+            if dev: return {"category": "SOLVABLE", "reason": "(DEV) No news.", "sources": "Dev Mode Mock"}
             return {
                 "category": "UNKNOWN", 
-                "reason": "No news found via Yahoo or Web Search. Cannot judge."
+                "reason": "No news found via Yahoo or Web Search.",
+                "sources": "No articles found."
             }
         
         # --- ROBUST FREE MODEL LIST ---
@@ -217,18 +255,25 @@ def analyze_solvency_openrouter(ticker, stock_obj, client, dev=False):
                     content = content.split("</think>")[-1].strip()
                     
                 content = content.replace("```json", "").replace("```", "").strip()
-                return json.loads(content)
+                
+                parsed = json.loads(content)
+                if isinstance(parsed, list): parsed = parsed[0] if parsed else {}
+                if not isinstance(parsed, dict): continue
+                
+                # INJECT SOURCES INTO VERDICT FOR UI
+                parsed['sources'] = f"**Source: {source_used}**\n\n{news_text}"
+                return parsed
                 
             except Exception as e:
                 last_error = str(e)
                 continue
         
         log_debug(f"All AI models failed. Last error: {last_error}")
-        return {"category": "ERROR", "reason": "AI Models Offline"}
+        return {"category": "ERROR", "reason": "AI Models Offline", "sources": "AI Connection Failed"}
         
     except Exception as e:
         log_debug(f"AI Critical Error: {str(e)}")
-        return {"category": "ERROR", "reason": "AI Critical Failure"}
+        return {"category": "ERROR", "reason": "AI Critical Failure", "sources": str(e)}
 
 # --- PHASE 3: OPTION MATH ---
 def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
@@ -311,6 +356,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     st.session_state.debug_logs = [] 
     found_opportunities = []
     
+    # DEV MODE SPEED
     scan_list = LIQUID_TICKERS[:1] if dev_mode else LIQUID_TICKERS
     
     for i, ticker in enumerate(scan_list):
@@ -324,9 +370,13 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"💥 Panic: {ticker}. Intel gathering...")
         
         # 2. AI (MULTI-SOURCE)
-        time.sleep(1) 
+        time.sleep(0.5) # Polite delay
         verdict = analyze_solvency_openrouter(ticker, panic_data['stock_obj'], client, dev=dev_mode)
         
+        if not verdict or not isinstance(verdict, dict):
+            log_debug(f"{ticker}: AI output invalid.")
+            continue
+            
         if verdict.get('category') == "ERROR":
             log_debug(f"{ticker}: Skipped (AI Error)")
             continue
@@ -390,3 +440,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                     st.metric("Payout", f"{o['ratio']:.1f}x")
                     st.markdown(f"**{o['expiration']} ${o['strike']:.0f} C**")
                     st.markdown(f"**Cost:** ${o['ask']:.2f}")
+                
+                # --- SOURCE VERIFICATION ---
+                with st.expander("📚 Analyzed Intelligence (Click to verify)"):
+                    st.markdown(v.get('sources', 'No sources available.'))
