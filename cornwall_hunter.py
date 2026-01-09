@@ -11,8 +11,8 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# --- GOOGLE AI LIBRARY ---
-import google.generativeai as genai
+# --- OPENAI STANDARD LIBRARY (For OpenRouter) ---
+from openai import OpenAI
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Cornwall Hunter")
@@ -26,7 +26,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini 2.0 Exp)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (OpenRouter Free)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -37,35 +37,24 @@ with st.sidebar:
     st.divider()
     st.write("### 🔌 Connection Debugger")
     
-    # 1. LIST MODELS
-    if st.button("1. List Available Models"):
-        try:
-            api_key = st.secrets.get("GOOGLE_API_KEY")
-            if api_key:
-                genai.configure(api_key=api_key)
-                models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                st.success("API Key Accepted.")
-                st.code("\n".join(models))
-            else:
-                st.error("No API Key found.")
-        except Exception as e:
-            st.error(f"Error: {e}")
-
-    # 2. TEST CONNECTION
-    if st.button("2. Test API Call (Ping)"):
-        api_key = st.secrets.get("GOOGLE_API_KEY")
+    if st.button("Test OpenRouter Connection"):
+        api_key = st.secrets.get("OPENROUTER_API_KEY")
         if not api_key:
-            st.error("No API Key.")
+            st.error("Missing OPENROUTER_API_KEY")
         else:
             try:
-                genai.configure(api_key=api_key)
-                # Using the experimental model which usually has free tier open
-                model = genai.GenerativeModel('gemini-2.0-flash-exp')
-                with st.spinner("Pinging Gemini 2.0 Exp..."):
-                    response = model.generate_content("Reply with one word: 'Connected'")
-                st.success(f"✅ Success! Response: {response.text}")
+                client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=api_key,
+                )
+                with st.spinner("Pinging Free Model..."):
+                    completion = client.chat.completions.create(
+                        model="google/gemma-2-9b-it:free",
+                        messages=[{"role": "user", "content": "Reply with one word: Connected"}]
+                    )
+                st.success(f"✅ Success: {completion.choices[0].message.content}")
             except Exception as e:
-                st.error(f"❌ API Failed: {e}")
+                st.error(f"❌ Connection Failed: {e}")
 
 # --- EXPANDED UNIVERSE ---
 LIQUID_TICKERS = [
@@ -78,18 +67,15 @@ LIQUID_TICKERS = [
     "SPY", "QQQ", "IWM", "ARKK", "KRE"
 ]
 
-# --- GEMINI SETUP ---
-def configure_gemini():
-    api_key = st.secrets.get("GOOGLE_API_KEY")
+# --- SETUP CLIENT ---
+def get_ai_client():
+    api_key = st.secrets.get("OPENROUTER_API_KEY")
     if not api_key:
-        st.error("Missing GOOGLE_API_KEY in secrets.toml")
-        return False
-    try:
-        genai.configure(api_key=api_key)
-        return True
-    except Exception as e:
-        st.error(f"Gemini Config Error: {e}")
-        return False
+        return None
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+    )
 
 # --- DEBUG LOGGER ---
 def log_debug(msg):
@@ -142,8 +128,8 @@ def scan_for_panic(ticker, dev=False):
         log_debug(f"{ticker}: Quant Error {str(e)}")
         return None
 
-# --- PHASE 2: AI CLASSIFIER ---
-def analyze_solvency_gemini(ticker, stock_obj, dev=False):
+# --- PHASE 2: AI CLASSIFIER (OPENROUTER) ---
+def analyze_solvency_openrouter(ticker, stock_obj, client, dev=False):
     try:
         news_items = stock_obj.news
         if not news_items:
@@ -156,11 +142,10 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
             headlines.append(f"- {title}")
         news_text = "\n".join(headlines)
         
-        # --- MODEL: 2.0 FLASH EXPERIMENTAL ---
-        # This is the most likely model to have an open free tier right now.
-        model = genai.GenerativeModel('gemini-2.0-flash-exp',
-            generation_config={"response_mime_type": "application/json"}
-        )
+        # --- OPENROUTER FREE MODEL ---
+        # "google/gemma-2-9b-it:free" is usually very reliable and free.
+        # Alternatives if busy: "meta-llama/llama-3.2-3b-instruct:free"
+        model_id = "google/gemma-2-9b-it:free"
         
         prompt = f"""
         Analyze the recent news for {ticker} causing the price drop. 
@@ -174,27 +159,36 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
         Return JSON format: {{"category": "TERMINAL" or "SOLVABLE", "reason": "Short summary (max 15 words)"}}
         """
         
-        response = model.generate_content(prompt)
-        return json.loads(response.text)
+        completion = client.chat.completions.create(
+            model=model_id,
+            messages=[
+                {"role": "system", "content": "You are a financial risk analyst. Output only JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            # OpenRouter specific headers for rankings (optional)
+            extra_headers={
+                "HTTP-Referer": "https://streamlit.app",
+                "X-Title": "CornwallHunter"
+            }
+        )
+        
+        content = completion.choices[0].message.content
+        
+        # Clean response to ensure pure JSON
+        content = content.replace("```json", "").replace("```", "").strip()
+        return json.loads(content)
         
     except Exception as e:
         error_msg = str(e)
-        log_debug(f"GEMINI ERROR ({ticker}): {error_msg}")
-        
-        # Note: We are NOT mocking this in Dev Mode anymore.
-        # We want to see the real connection error.
-            
-        if "429" in error_msg: 
-            return {"category": "RATE_LIMIT", "reason": "Gemini Rate Limit Hit."}
-        return {"category": "ERROR", "reason": error_msg[:50]}
+        log_debug(f"AI ERROR ({ticker}): {error_msg}")
+        return {"category": "ERROR", "reason": "AI Connection Failed"}
 
-# --- PHASE 3: OPTION MATH (ROBUST) ---
+# --- PHASE 3: OPTION MATH ---
 def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
     try:
         exps = stock_obj.options
         
         # --- DEV MODE MOCK ---
-        # We mock this part because we are debugging AI, not YFinance
         if dev:
             return {
                 "expiration": "2025-06-20",
@@ -261,21 +255,19 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
 # --- MAIN EXECUTION ---
 
 if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
-    if not configure_gemini(): st.stop()
+    client = get_ai_client()
+    if not client:
+        st.error("Missing OPENROUTER_API_KEY in secrets.toml")
+        st.stop()
     
     status = st.empty()
     bar = st.progress(0)
     st.session_state.debug_logs = [] 
     found_opportunities = []
     
-    # DEV MODE SPEED: Only scan ONE ticker to test connection quickly
+    # DEV MODE SPEED
     scan_list = LIQUID_TICKERS[:1] if dev_mode else LIQUID_TICKERS
     
-    if "last_gemini_call" not in st.session_state:
-        st.session_state.last_gemini_call = 0
-    
-    RATE_LIMIT_DELAY = 5.0 
-
     for i, ticker in enumerate(scan_list):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
@@ -284,33 +276,15 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         panic_data = scan_for_panic(ticker, dev=dev_mode)
         if not panic_data: continue
         
-        status.text(f"💥 Panic: {ticker}. Analyzing news (Real AI Call)...")
+        status.text(f"💥 Panic: {ticker}. Analyzing news...")
         
-        # 2. AI LOOP
-        verdict = None
-        retries = 0
-        while retries < 2: # Reduce retries to fail faster during debug
-            elapsed = time.time() - st.session_state.last_gemini_call
-            
-            # Smart Sleep: Show countdown
-            if elapsed < RATE_LIMIT_DELAY:
-                wait_time = RATE_LIMIT_DELAY - elapsed
-                status.text(f"⏳ Throttling: Wait {wait_time:.1f}s...")
-                time.sleep(wait_time)
-
-            result = analyze_solvency_gemini(ticker, panic_data['stock_obj'], dev=dev_mode)
-            st.session_state.last_gemini_call = time.time()
-            
-            if result.get('category') == "RATE_LIMIT":
-                status.warning(f"⚠️ Rate Limit. Retrying in 5s... ({retries+1}/2)")
-                time.sleep(5) # Shorter retry for connection test
-                retries += 1
-            else:
-                verdict = result
-                break
+        # 2. AI (OPENROUTER)
+        # Add a tiny sleep to be nice to the free tier
+        time.sleep(1) 
+        verdict = analyze_solvency_openrouter(ticker, panic_data['stock_obj'], client, dev=dev_mode)
         
-        if not verdict or verdict.get('category') == "RATE_LIMIT":
-            log_debug(f"{ticker}: Skipped (Connection Failed)")
+        if verdict.get('category') == "ERROR":
+            log_debug(f"{ticker}: Skipped (AI Error)")
             continue
 
         # 3. MATH
@@ -334,20 +308,19 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                 })
                 
                 if dev_mode:
-                    status.text("✅ Dev Mode: Success! Connection works.")
+                    status.text("✅ Dev Mode: Opportunity found.")
                     break
     
     status.empty()
     bar.empty()
     
-    # Always show logs in Dev Mode
     if dev_mode or st.session_state.debug_logs:
         with st.expander("🔍 Debug Logs", expanded=True):
             for log in st.session_state.debug_logs:
                 st.text(log)
     
     if not found_opportunities:
-        st.info("No opportunities found (or Connection Failed). Check logs.")
+        st.info("No asymmetric opportunities found.")
     else:
         st.success(f"Found {len(found_opportunities)} Cornwall Setups")
         
@@ -367,7 +340,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                 with c2:
                     cat = v.get('category', 'UNKNOWN')
                     color = "#00C853" if cat == 'SOLVABLE' else "#FFA726"
-                    st.markdown(f"**Gemini:** <span style='color:{color}; font-weight:bold;'>{cat}</span>", unsafe_allow_html=True)
+                    st.markdown(f"**AI:** <span style='color:{color}; font-weight:bold;'>{cat}</span>", unsafe_allow_html=True)
                     st.write(f"_{v.get('reason')}_")
                 with c3:
                     st.metric("Payout", f"{o['ratio']:.1f}x")
