@@ -26,7 +26,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini 2.0)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini 2.0 Lite)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -137,7 +137,10 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
             headlines.append(f"- {title}")
         news_text = "\n".join(headlines)
         
-        model = genai.GenerativeModel('gemini-2.0-flash',
+        # --- SWITCH TO FLASH-LITE ---
+        # "Lite" models are optimized for high throughput and less likely to hit
+        # the strict limits of the main "Flash" or experimental models.
+        model = genai.GenerativeModel('gemini-2.0-flash-lite',
             generation_config={"response_mime_type": "application/json"}
         )
         
@@ -157,8 +160,12 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
         return json.loads(response.text)
         
     except Exception as e:
-        if "429" in str(e): return {"category": "RATE_LIMIT", "reason": "Gemini Rate Limit Hit."}
-        return {"category": "ERROR", "reason": str(e)}
+        error_msg = str(e)
+        log_debug(f"GEMINI ERROR ({ticker}): {error_msg}")
+        
+        if "429" in error_msg: 
+            return {"category": "RATE_LIMIT", "reason": "Gemini Rate Limit Hit."}
+        return {"category": "ERROR", "reason": error_msg[:50]}
 
 # --- PHASE 3: OPTION MATH (ROBUST) ---
 def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
@@ -178,7 +185,6 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
             
         if not exps: return None
         
-        # LEAPS > 250 days
         leaps = [e for e in exps if (datetime.strptime(e, "%Y-%m-%d") - datetime.now()).days > 250]
         if not leaps: 
             log_debug("No LEAPS > 250d.")
@@ -190,49 +196,34 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         
         target_strike = normal_price
         
-        # 1. Broad Search (Range: 80% to 120% of target)
         candidates = calls[(calls['strike'] >= target_strike * 0.80) & (calls['strike'] <= target_strike * 1.20)].copy()
         
         if candidates.empty: 
-            if dev: # Widen massively for dev
+            if dev: 
                 candidates = calls[(calls['strike'] >= target_strike * 0.50) & (calls['strike'] <= target_strike * 1.50)].copy()
             else:
                 log_debug("No strikes near target.")
                 return None
 
-        # 2. Smart Price Calculation
-        # yfinance often has Ask=0 for illiquid options. We must clean this.
         def get_valid_price(row):
             ask = row.get('ask', 0)
             bid = row.get('bid', 0)
             last = row.get('lastPrice', 0)
-            
-            # Trust Ask if it exists and looks real
             if ask > 0: return ask
-            
-            # If Ask is 0 (market closed/wide), try Midpoint
             if bid > 0 and last > 0: return (bid + last) / 2
-            
-            # Last resort
             if last > 0: return last
             return 0
 
         candidates['valid_price'] = candidates.apply(get_valid_price, axis=1)
-        
-        # 3. Liquidity Sort (Prioritize Volume + Open Interest)
-        # Avoids "Ghost" options with good prices but no liquidity
         candidates['liquidity'] = candidates['volume'].fillna(0) + candidates['openInterest'].fillna(0)
-        
-        # Filter out junk (Price=0)
         candidates = candidates[candidates['valid_price'] > 0]
         
         if candidates.empty: 
-            if dev: # Create dummy row if Dev
+            if dev:
                 candidates = pd.DataFrame([{'strike': target_strike, 'valid_price': 0.50, 'liquidity': 100}])
             else:
                 return None
             
-        # Pick the most liquid option
         option = candidates.sort_values('liquidity', ascending=False).iloc[0]
         
         ask_price = option['valid_price']
@@ -268,12 +259,13 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     st.session_state.debug_logs = [] 
     found_opportunities = []
     
+    # 1. Dev Mode: Use tiny list.
     scan_list = LIQUID_TICKERS[:3] if dev_mode else LIQUID_TICKERS
     
+    # 2. Rate Limit Logic (PERSISTENT)
+    RATE_LIMIT_DELAY = 5.0 
     if "last_gemini_call" not in st.session_state:
         st.session_state.last_gemini_call = 0
-    
-    RATE_LIMIT_DELAY = 5.0 
 
     for i, ticker in enumerate(scan_list):
         status.text(f"Scanning {ticker}...")
@@ -305,7 +297,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                 break
         
         if not verdict or verdict.get('category') == "RATE_LIMIT":
-            log_debug(f"{ticker}: Skipped (Rate Limit)")
+            log_debug(f"{ticker}: Skipped (Rate Limit Persistent)")
             continue
 
         # 3. MATH
@@ -335,7 +327,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     status.empty()
     bar.empty()
     
-    with st.expander("🔍 View Scan Debug Logs"):
+    with st.expander("🔍 View Scan Debug Logs (Check this if 'Rate Limit' persists)", expanded=True):
         for log in st.session_state.debug_logs:
             st.text(log)
     
