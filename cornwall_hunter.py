@@ -26,7 +26,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini 2.0)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Gemini 2.0 Exp)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -34,19 +34,38 @@ with st.sidebar:
     st.header("Hunter Settings")
     dev_mode = st.checkbox("🛠 Dev Mode (Test Logic)", value=False, help="Forces detection of 'Panic' to test AI and UI logic.")
     
-    # DEBUG TOOL
-    if st.button("🔍 Check Available Models"):
+    st.divider()
+    st.write("### 🔌 Connection Debugger")
+    
+    # 1. LIST MODELS
+    if st.button("1. List Available Models"):
         try:
             api_key = st.secrets.get("GOOGLE_API_KEY")
             if api_key:
                 genai.configure(api_key=api_key)
                 models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                st.success("✅ Valid Models Found:")
+                st.success("API Key Accepted.")
                 st.code("\n".join(models))
             else:
                 st.error("No API Key found.")
         except Exception as e:
-            st.error(f"Error checking models: {e}")
+            st.error(f"Error: {e}")
+
+    # 2. TEST CONNECTION
+    if st.button("2. Test API Call (Ping)"):
+        api_key = st.secrets.get("GOOGLE_API_KEY")
+        if not api_key:
+            st.error("No API Key.")
+        else:
+            try:
+                genai.configure(api_key=api_key)
+                # Using the experimental model which usually has free tier open
+                model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                with st.spinner("Pinging Gemini 2.0 Exp..."):
+                    response = model.generate_content("Reply with one word: 'Connected'")
+                st.success(f"✅ Success! Response: {response.text}")
+            except Exception as e:
+                st.error(f"❌ API Failed: {e}")
 
 # --- EXPANDED UNIVERSE ---
 LIQUID_TICKERS = [
@@ -137,9 +156,9 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
             headlines.append(f"- {title}")
         news_text = "\n".join(headlines)
         
-        # --- SWITCH TO STANDARD FLASH ---
-        # "Lite" was giving 'limit: 0'. Standard Flash usually has a real free tier.
-        model = genai.GenerativeModel('gemini-2.0-flash',
+        # --- MODEL: 2.0 FLASH EXPERIMENTAL ---
+        # This is the most likely model to have an open free tier right now.
+        model = genai.GenerativeModel('gemini-2.0-flash-exp',
             generation_config={"response_mime_type": "application/json"}
         )
         
@@ -162,6 +181,9 @@ def analyze_solvency_gemini(ticker, stock_obj, dev=False):
         error_msg = str(e)
         log_debug(f"GEMINI ERROR ({ticker}): {error_msg}")
         
+        # Note: We are NOT mocking this in Dev Mode anymore.
+        # We want to see the real connection error.
+            
         if "429" in error_msg: 
             return {"category": "RATE_LIMIT", "reason": "Gemini Rate Limit Hit."}
         return {"category": "ERROR", "reason": error_msg[:50]}
@@ -172,8 +194,8 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         exps = stock_obj.options
         
         # --- DEV MODE MOCK ---
-        if (not exps or len(exps) == 0) and dev:
-            log_debug("Dev Mode: mocking missing option chain.")
+        # We mock this part because we are debugging AI, not YFinance
+        if dev:
             return {
                 "expiration": "2025-06-20",
                 "strike": round(normal_price, 0),
@@ -198,11 +220,8 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         candidates = calls[(calls['strike'] >= target_strike * 0.80) & (calls['strike'] <= target_strike * 1.20)].copy()
         
         if candidates.empty: 
-            if dev: 
-                candidates = calls[(calls['strike'] >= target_strike * 0.50) & (calls['strike'] <= target_strike * 1.50)].copy()
-            else:
-                log_debug("No strikes near target.")
-                return None
+            log_debug("No strikes near target.")
+            return None
 
         def get_valid_price(row):
             ask = row.get('ask', 0)
@@ -217,22 +236,13 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         candidates['liquidity'] = candidates['volume'].fillna(0) + candidates['openInterest'].fillna(0)
         candidates = candidates[candidates['valid_price'] > 0]
         
-        if candidates.empty: 
-            if dev:
-                candidates = pd.DataFrame([{'strike': target_strike, 'valid_price': 0.50, 'liquidity': 100}])
-            else:
-                return None
+        if candidates.empty: return None
             
         option = candidates.sort_values('liquidity', ascending=False).iloc[0]
         
         ask_price = option['valid_price']
         projected_intrinsic = normal_price - option['strike']
         
-        # Dev Mode Override
-        if dev:
-            ask_price = 0.50
-            projected_intrinsic = 10.0
-            
         if projected_intrinsic <= 0: return None
         
         payout_ratio = projected_intrinsic / ask_price
@@ -258,12 +268,12 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     st.session_state.debug_logs = [] 
     found_opportunities = []
     
-    scan_list = LIQUID_TICKERS[:3] if dev_mode else LIQUID_TICKERS
+    # DEV MODE SPEED: Only scan ONE ticker to test connection quickly
+    scan_list = LIQUID_TICKERS[:1] if dev_mode else LIQUID_TICKERS
     
     if "last_gemini_call" not in st.session_state:
         st.session_state.last_gemini_call = 0
     
-    # 5 Seconds Delay is SAFE for the Standard Model
     RATE_LIMIT_DELAY = 5.0 
 
     for i, ticker in enumerate(scan_list):
@@ -274,29 +284,33 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         panic_data = scan_for_panic(ticker, dev=dev_mode)
         if not panic_data: continue
         
-        status.text(f"💥 Panic: {ticker}. Analyzing news...")
+        status.text(f"💥 Panic: {ticker}. Analyzing news (Real AI Call)...")
         
         # 2. AI LOOP
         verdict = None
         retries = 0
-        while retries < 3:
+        while retries < 2: # Reduce retries to fail faster during debug
             elapsed = time.time() - st.session_state.last_gemini_call
+            
+            # Smart Sleep: Show countdown
             if elapsed < RATE_LIMIT_DELAY:
-                time.sleep(RATE_LIMIT_DELAY - elapsed)
+                wait_time = RATE_LIMIT_DELAY - elapsed
+                status.text(f"⏳ Throttling: Wait {wait_time:.1f}s...")
+                time.sleep(wait_time)
 
             result = analyze_solvency_gemini(ticker, panic_data['stock_obj'], dev=dev_mode)
             st.session_state.last_gemini_call = time.time()
             
             if result.get('category') == "RATE_LIMIT":
-                status.warning(f"⚠️ Rate Limit (429). Cooling... ({retries+1}/3)")
-                time.sleep(60)
+                status.warning(f"⚠️ Rate Limit. Retrying in 5s... ({retries+1}/2)")
+                time.sleep(5) # Shorter retry for connection test
                 retries += 1
             else:
                 verdict = result
                 break
         
         if not verdict or verdict.get('category') == "RATE_LIMIT":
-            log_debug(f"{ticker}: Skipped (Rate Limit Persistent)")
+            log_debug(f"{ticker}: Skipped (Connection Failed)")
             continue
 
         # 3. MATH
@@ -320,18 +334,20 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                 })
                 
                 if dev_mode:
-                    status.text("✅ Dev Mode: Opportunity found.")
+                    status.text("✅ Dev Mode: Success! Connection works.")
                     break
     
     status.empty()
     bar.empty()
     
-    with st.expander("🔍 View Scan Debug Logs (Check this if 'Rate Limit' persists)", expanded=True):
-        for log in st.session_state.debug_logs:
-            st.text(log)
+    # Always show logs in Dev Mode
+    if dev_mode or st.session_state.debug_logs:
+        with st.expander("🔍 Debug Logs", expanded=True):
+            for log in st.session_state.debug_logs:
+                st.text(log)
     
     if not found_opportunities:
-        st.info("No asymmetric opportunities found.")
+        st.info("No opportunities found (or Connection Failed). Check logs.")
     else:
         st.success(f"Found {len(found_opportunities)} Cornwall Setups")
         
