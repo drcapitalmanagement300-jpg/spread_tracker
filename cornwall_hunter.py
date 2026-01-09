@@ -5,6 +5,8 @@ import numpy as np
 from datetime import datetime
 import json
 import time
+import requests
+import xml.etree.ElementTree as ET
 
 # --- SILENCE WARNINGS ---
 import warnings
@@ -13,13 +15,6 @@ warnings.simplefilter(action='ignore', category=UserWarning)
 
 # --- OPENAI STANDARD LIBRARY ---
 from openai import OpenAI
-
-# --- DUCKDUCKGO SEARCH (Fallback) ---
-try:
-    from duckduckgo_search import DDGS
-    HAS_DDG = True
-except ImportError:
-    HAS_DDG = False
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Cornwall Hunter")
@@ -33,7 +28,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Long-Range LEAPS)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Google News Intel)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -65,29 +60,19 @@ with st.sidebar:
 
 # --- EXPANDED UNIVERSE (Cleaned & De-Duplicated) ---
 LIQUID_TICKERS = list(set([
-    # --- MEGA CAP VOLATILITY ---
     "TSLA", "NVDA", "AMD", "AMZN", "GOOGL", "META", "MSFT", "NFLX",
-    # --- HIGH GROWTH / SAAS ---
     "PLTR", "SOFI", "HOOD", "DKNG", "ROKU", "SHOP", "SQ", "AFRM", "UPST", "CVNA",
     "NET", "DDOG", "SNOW", "U", "RBLX", "COIN", "CRWD", "ZS", "PANW", "TTD",
     "APP", "MDB", "TEAM", "HUBS", "BILL", "DOCU", "TWLO", "OKTA", "ZM",
-    # --- CRYPTO MINERS ---
     "MSTR", "MARA", "RIOT", "CLSK", "CIFR", "IREN", "WULF", "HUT", "BITF",
-    # --- SEMIS & HARDWARE ---
     "SMCI", "ARM", "MU", "INTC", "QCOM", "AVGO", "MRVL", "ANET", "VRT",
-    # --- TURNAROUNDS & RETAIL ---
     "BA", "WBA", "DIS", "NKE", "SBUX", "LULU", "EL", "ULTA", "DG", "DLTR",
     "MMM", "T", "VZ", "PFE", "BMY", "CVS",
-    # --- BIOTECH ---
     "XBI", "LABU", "MRNA", "BNTX", "CRSP", "NTLA", "EDIT", "BEAM", "SAVA",
-    # --- TRAVEL ---
     "CCL", "RCL", "NCLH", "UAL", "AAL", "DAL", "LUV", "EXPE", "ABNB", "BKNG",
     "LVS", "WYNN", "MGM", "CZR", "PENN",
-    # --- COMMODITIES ---
     "URA", "CCJ", "FCX", "SCCO", "CLF", "AA",
-    # --- SPECULATIVE ---
     "CHWY", "RDDT", "DJT", "SPCE", "ASTS", "LUNR", "RKLB", "JOBY", "ACHR",
-    # --- LEVERAGED ETFs ---
     "TQQQ", "SQQQ", "SOXL", "SOXS", "ARKK", "KRE", "XOP", "TAN"
 ]))
 
@@ -107,24 +92,30 @@ def log_debug(msg):
         st.session_state.debug_logs = []
     st.session_state.debug_logs.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
 
-# --- HELPER: WEB SEARCH ---
-def get_web_news(ticker):
-    """Fallback: Search DuckDuckGo if yfinance has no news."""
-    if not HAS_DDG:
-        log_debug("DuckDuckGo library not installed.")
-        return ""
+# --- HELPER: GOOGLE NEWS RSS FETCHER ---
+def get_google_news(ticker):
+    """Fetches real news from Google News RSS when Yahoo fails."""
     try:
-        query = f"{ticker} stock price drop reason news"
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=3))
-            
-        if not results:
-            return ""
+        # Search for Ticker + Stock to avoid generic results
+        query = f"{ticker} stock news"
+        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
         
-        headlines = [f"DDG: {r['title']} - {r['body']}" for r in results]
+        response = requests.get(url, timeout=5)
+        if response.status_code != 200:
+            return ""
+            
+        root = ET.fromstring(response.content)
+        headlines = []
+        
+        # Parse XML for titles
+        for item in root.findall('./channel/item')[:5]:
+            title = item.find('title').text
+            pubDate = item.find('pubDate').text
+            headlines.append(f"- {title} ({pubDate})")
+            
         return "\n".join(headlines)
     except Exception as e:
-        log_debug(f"Web Search Failed for {ticker}: {e}")
+        log_debug(f"Google News Fetch Failed for {ticker}: {e}")
         return ""
 
 # --- PHASE 1: QUANT SCANNER ---
@@ -138,7 +129,6 @@ def scan_for_panic(ticker, dev=False):
         
         current_price = hist['Close'].iloc[-1]
         
-        # --- DEV MODE FORCE PASS ---
         if dev:
             return {
                 "ticker": ticker,
@@ -172,48 +162,46 @@ def scan_for_panic(ticker, dev=False):
         log_debug(f"{ticker}: Quant Error {str(e)}")
         return None
 
-# --- PHASE 2: AI CLASSIFIER (INTELLIGENT PARSING) ---
+# --- PHASE 2: AI CLASSIFIER (GOOGLE NEWS BACKED) ---
 def analyze_solvency_openrouter(ticker, stock_obj, client, dev=False):
     try:
-        # 1. Try yfinance News
-        news_items = stock_obj.news
-        headlines = []
+        news_text = ""
         source_used = "None"
         
-        if news_items:
-            for n in news_items[:5]:
-                # ROBUST TITLE CHECK:
-                # yfinance sometimes returns 'title': None or 'title': '' or missing keys
-                t = n.get('title')
-                if not t:
-                    t = n.get('headline')
-                
-                # Only add if we found a valid string
-                if t and len(t) > 5:
-                    headlines.append(f"- {t}")
-        
-        # If Yahoo gave us meaningful headlines, use them.
-        if headlines:
-            news_text = "\n".join(headlines)
-            source_used = "Yahoo Finance"
-            log_debug(f"{ticker}: Found {len(headlines)} valid headlines via Yahoo.")
-        else:
-            # 2. Fallback: DuckDuckGo Search
-            log_debug(f"{ticker}: Yahoo news empty/invalid. Searching Web...")
-            news_text = get_web_news(ticker)
+        # 1. Try yfinance News First
+        try:
+            news_items = stock_obj.news
+            if news_items:
+                headlines = []
+                for n in news_items[:5]:
+                    t = n.get('title')
+                    if t and len(t) > 10:
+                        headlines.append(f"- {t}")
+                if headlines:
+                    news_text = "\n".join(headlines)
+                    source_used = "Yahoo Finance"
+        except: pass
+            
+        # 2. Fallback: Google News RSS (Reliable)
+        if not news_text:
+            log_debug(f"{ticker}: Yahoo empty. Fetching Google News RSS...")
+            news_text = get_google_news(ticker)
             if news_text:
-                source_used = "DuckDuckGo Web Search"
+                source_used = "Google News RSS"
             
         # 3. If STILL no news
         if not news_text:
-            if dev: return {"category": "SOLVABLE", "reason": "(DEV) No news.", "sources": "Dev Mode Mock"}
-            return {
-                "category": "UNKNOWN", 
-                "reason": "No news found via Yahoo or Web Search.",
-                "sources": "No articles found."
-            }
+            if dev: 
+                # DEV MODE: Inject fake bad news if we can't find real news
+                news_text = "- Stock crashes 20% on earnings miss due to temporary supply chain issue.\n- Analyst downgrades but maintains long term buy.\n- CEO says headwinds are transient."
+                source_used = "Dev Mode Simulation"
+            else:
+                return {
+                    "category": "UNKNOWN", 
+                    "reason": "No news found via Yahoo or Google News.",
+                    "sources": "No articles found."
+                }
         
-        # --- ROBUST FREE MODEL LIST ---
         FREE_MODELS = [
             "google/gemini-2.0-flash-lite-preview-02-05:free",
             "deepseek/deepseek-r1:free",
@@ -281,9 +269,8 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         exps = stock_obj.options
         
         if dev:
-            # DEV MODE MOCK (Now uses Long Date)
             return {
-                "expiration": "2026-06-18", # Long date for mock
+                "expiration": "2026-06-18",
                 "strike": round(normal_price, 0),
                 "ask": 0.50,
                 "ratio": 20.0,
@@ -299,9 +286,7 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
             log_debug("No LEAPS > 360d found.")
             return None
         
-        # Prefer the FURTHEST date available (True Cornwall Style)
         target_exp = leaps[-1] 
-        
         chain = stock_obj.option_chain(target_exp)
         calls = chain.calls
         
@@ -378,11 +363,9 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         verdict = analyze_solvency_openrouter(ticker, panic_data['stock_obj'], client, dev=dev_mode)
         
         if not verdict or not isinstance(verdict, dict):
-            log_debug(f"{ticker}: AI output invalid.")
             continue
             
         if verdict.get('category') == "ERROR":
-            log_debug(f"{ticker}: Skipped (AI Error)")
             continue
 
         # 3. MATH
@@ -428,7 +411,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
             v = opp['verdict']
             o = opp['option']
             
-            # FORMAT DATE PRETTILY (e.g., June 20 2026)
+            # Format Date nicely
             try:
                 raw_date = o['expiration']
                 fmt_date = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%B %d %Y")
@@ -448,11 +431,14 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                     st.markdown(f"**AI:** <span style='color:{color}; font-weight:bold;'>{cat}</span>", unsafe_allow_html=True)
                     st.write(f"_{v.get('reason')}_")
                 with c3:
+                    # Clean UI, no green, no bold
                     st.markdown(f"""
-                    **${o['strike']:.2f} Strike Call** Expiration: {fmt_date}  
+                    <div style='font-size: 14px;'>
+                    <b>{o['strike']:.2f} Strike Call</b><br>
+                    Expiration: {fmt_date}<br>
                     Estimated Cost: ${o['ask']:.2f}
-                    """)
-                    st.caption(f"Payout Ratio: {o['ratio']:.1f}x")
+                    </div>
+                    """, unsafe_allow_html=True)
                 
                 with st.expander("📚 Analyzed Intelligence (Click to verify)"):
                     st.markdown(v.get('sources', 'No sources available.'))
