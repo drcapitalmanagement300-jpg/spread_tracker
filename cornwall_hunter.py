@@ -26,7 +26,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (OpenRouter Free)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (OpenRouter Multi-Model)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -47,9 +47,10 @@ with st.sidebar:
                     base_url="https://openrouter.ai/api/v1",
                     api_key=api_key,
                 )
-                with st.spinner("Pinging Free Model..."):
+                # Try the most reliable free model first
+                with st.spinner("Pinging DeepSeek R1 (Free)..."):
                     completion = client.chat.completions.create(
-                        model="google/gemma-2-9b-it:free",
+                        model="deepseek/deepseek-r1:free",
                         messages=[{"role": "user", "content": "Reply with one word: Connected"}]
                     )
                 st.success(f"✅ Success: {completion.choices[0].message.content}")
@@ -128,7 +129,7 @@ def scan_for_panic(ticker, dev=False):
         log_debug(f"{ticker}: Quant Error {str(e)}")
         return None
 
-# --- PHASE 2: AI CLASSIFIER (OPENROUTER) ---
+# --- PHASE 2: AI CLASSIFIER (MULTI-MODEL FALLBACK) ---
 def analyze_solvency_openrouter(ticker, stock_obj, client, dev=False):
     try:
         news_items = stock_obj.news
@@ -142,10 +143,15 @@ def analyze_solvency_openrouter(ticker, stock_obj, client, dev=False):
             headlines.append(f"- {title}")
         news_text = "\n".join(headlines)
         
-        # --- OPENROUTER FREE MODEL ---
-        # "google/gemma-2-9b-it:free" is usually very reliable and free.
-        # Alternatives if busy: "meta-llama/llama-3.2-3b-instruct:free"
-        model_id = "google/gemma-2-9b-it:free"
+        # --- ROBUST FREE MODEL LIST ---
+        # If one fails (404/429), it automatically tries the next.
+        FREE_MODELS = [
+            "deepseek/deepseek-r1:free",          # DeepSeek R1 (Very smart, often free)
+            "google/gemini-2.0-flash-exp:free",   # Gemini 2.0 Flash Exp (Google's free tier on OR)
+            "meta-llama/llama-3.2-3b-instruct:free", # Llama 3 (Reliable fallback)
+            "mistralai/mistral-7b-instruct:free", # Mistral 7B (Solid fallback)
+            "google/gemini-2.0-flash-lite-preview-02-05:free" # New Lite model
+        ]
         
         prompt = f"""
         Analyze the recent news for {ticker} causing the price drop. 
@@ -159,29 +165,43 @@ def analyze_solvency_openrouter(ticker, stock_obj, client, dev=False):
         Return JSON format: {{"category": "TERMINAL" or "SOLVABLE", "reason": "Short summary (max 15 words)"}}
         """
         
-        completion = client.chat.completions.create(
-            model=model_id,
-            messages=[
-                {"role": "system", "content": "You are a financial risk analyst. Output only JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            # OpenRouter specific headers for rankings (optional)
-            extra_headers={
-                "HTTP-Referer": "https://streamlit.app",
-                "X-Title": "CornwallHunter"
-            }
-        )
+        last_error = ""
         
-        content = completion.choices[0].message.content
+        for model_id in FREE_MODELS:
+            try:
+                # log_debug(f"Trying model: {model_id}...") # Optional verbose logging
+                completion = client.chat.completions.create(
+                    model=model_id,
+                    messages=[
+                        {"role": "system", "content": "You are a financial risk analyst. Output only JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    extra_headers={
+                        "HTTP-Referer": "https://streamlit.app",
+                        "X-Title": "CornwallHunter"
+                    }
+                )
+                
+                content = completion.choices[0].message.content
+                # Clean response (DeepSeek sometimes adds <think> tags, remove them if needed, mostly handled by JSON parser)
+                if "<think>" in content:
+                    content = content.split("</think>")[-1].strip()
+                    
+                content = content.replace("```json", "").replace("```", "").strip()
+                return json.loads(content)
+                
+            except Exception as e:
+                # If this model failed, loop to the next one
+                last_error = str(e)
+                continue
         
-        # Clean response to ensure pure JSON
-        content = content.replace("```json", "").replace("```", "").strip()
-        return json.loads(content)
+        # If ALL models failed
+        log_debug(f"All AI models failed. Last error: {last_error}")
+        return {"category": "ERROR", "reason": "All Free Models Busy/Offline"}
         
     except Exception as e:
-        error_msg = str(e)
-        log_debug(f"AI ERROR ({ticker}): {error_msg}")
-        return {"category": "ERROR", "reason": "AI Connection Failed"}
+        log_debug(f"AI Critical Error: {str(e)}")
+        return {"category": "ERROR", "reason": "AI Critical Failure"}
 
 # --- PHASE 3: OPTION MATH ---
 def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
@@ -278,13 +298,13 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         
         status.text(f"💥 Panic: {ticker}. Analyzing news...")
         
-        # 2. AI (OPENROUTER)
+        # 2. AI (OPENROUTER MULTI-MODEL)
         # Add a tiny sleep to be nice to the free tier
         time.sleep(1) 
         verdict = analyze_solvency_openrouter(ticker, panic_data['stock_obj'], client, dev=dev_mode)
         
         if verdict.get('category') == "ERROR":
-            log_debug(f"{ticker}: Skipped (AI Error)")
+            log_debug(f"{ticker}: Skipped (AI Error - All models failed)")
             continue
 
         # 3. MATH
