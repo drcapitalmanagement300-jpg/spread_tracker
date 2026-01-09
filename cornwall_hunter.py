@@ -25,7 +25,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Bulldog V24)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (New Router V25)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -42,11 +42,15 @@ with st.sidebar:
             st.error("Missing HUGGINGFACE_API_KEY")
         else:
             try:
-                API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+                # NEW ROUTER URL
+                API_URL = "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3"
                 headers = {"Authorization": f"Bearer {api_key}"}
                 payload = {"inputs": "Reply with one word: Connected"}
                 response = requests.post(API_URL, headers=headers, json=payload)
-                st.success(f"✅ Success: {response.json()[0]['generated_text']}")
+                if response.status_code == 200:
+                    st.success(f"✅ Success: {response.json()[0]['generated_text']}")
+                else:
+                    st.error(f"❌ Error {response.status_code}: {response.text}")
             except Exception as e:
                 st.error(f"❌ Connection Failed: {e}")
 
@@ -94,15 +98,12 @@ def get_google_news(ticker):
 
 # --- PHASE 1: QUANT SCANNER (BULLDOG MODE) ---
 def scan_for_panic(ticker, dev=False):
-    # BULLDOG LOOP: Never quit on a connection error.
-    # Exponential backoff: 10s -> 20s -> 40s -> 60s
     wait_time = 10 
     
     while True:
         try:
             stock = yf.Ticker(ticker)
             
-            # --- DEV MODE MOCK ---
             if dev:
                 return {
                     "ticker": ticker,
@@ -113,12 +114,11 @@ def scan_for_panic(ticker, dev=False):
                     "stock_obj": stock
                 }
 
-            # Attempt download
             hist = stock.history(period="3mo")
             
             if hist.empty: 
-                log_debug(f"{ticker}: No history found (Invalid Ticker?).")
-                return None # Only return None if data is empty (not a connection error)
+                log_debug(f"{ticker}: No history found.")
+                return None 
             
             current_price = hist['Close'].iloc[-1]
             last_30 = hist.tail(30)
@@ -129,7 +129,6 @@ def scan_for_panic(ticker, dev=False):
             hist['Returns'] = hist['Close'].pct_change()
             current_hv = hist['Returns'].tail(30).std() * np.sqrt(252) * 100
             
-            # --- SUCCESS! Return Data ---
             if drop_pct > -15.0: return None 
             if current_hv < 35: return None 
 
@@ -144,19 +143,16 @@ def scan_for_panic(ticker, dev=False):
 
         except Exception as e:
             err_msg = str(e)
-            # Detect Rate Limits
             if "Too Many Requests" in err_msg or "Rate limited" in err_msg or "429" in err_msg:
-                st.warning(f"⚠️ Rate Limit on {ticker}. Pausing {wait_time}s to cool down...")
+                st.warning(f"⚠️ Rate Limit on {ticker}. Pausing {wait_time}s...")
                 time.sleep(wait_time)
-                # Exponential Backoff (Cap at 60s)
                 wait_time = min(wait_time * 2, 60)
-                continue # TRY AGAIN. Do not skip.
+                continue 
             else:
-                # If it's a real crash (e.g. math error), log it and skip.
                 log_debug(f"{ticker}: Quant Error {err_msg}")
                 return None
 
-# --- PHASE 2: AI CLASSIFIER (HUGGING FACE) ---
+# --- PHASE 2: AI CLASSIFIER (NEW ROUTER) ---
 def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
     try:
         news_text = ""
@@ -181,7 +177,6 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
             news_text = get_google_news(ticker)
             if news_text: source_used = "Google News RSS"
             
-        # 3. If STILL no news
         if not news_text:
             if dev: 
                 news_text = "Stock down on macro fears."
@@ -189,8 +184,9 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
             else:
                 return {"category": "UNKNOWN", "reason": "No news found."}
         
-        # --- HUGGING FACE INFERENCE ---
-        API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+        # --- NEW URL STRUCTURE ---
+        # Note the "/hf-inference/" part which is critical now
+        API_URL = "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3"
         headers = {"Authorization": f"Bearer {api_key}"}
         
         prompt = f"""[INST] You are a financial risk analyst.
@@ -207,12 +203,12 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
             "parameters": {"max_new_tokens": 100, "return_full_text": False}
         }
         
-        # Retry logic for AI as well
+        # Retry logic for AI
         for _ in range(3):
             response = requests.post(API_URL, headers=headers, json=payload)
             if response.status_code == 200:
                 break
-            time.sleep(2) # Short pause for AI retry
+            time.sleep(2)
         
         if response.status_code != 200:
             log_debug(f"HF Error {response.status_code}: {response.text}")
@@ -234,7 +230,7 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
         log_debug(f"AI Critical Error: {str(e)}")
         return {"category": "ERROR", "reason": "AI Critical Failure"}
 
-# --- PHASE 3: OPTION MATH (TRUE LEAPS) ---
+# --- PHASE 3: OPTION MATH ---
 def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
     try:
         exps = stock_obj.options
@@ -308,7 +304,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        # POLITE SCANNING: Always wait 2 seconds between stocks
+        # POLITE SCANNING
         time.sleep(2.0) 
         
         # 1. QUANT
@@ -318,7 +314,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"💥 Panic: {ticker}. Intel gathering...")
         
         # 2. AI (Hugging Face)
-        time.sleep(1.0) # Hugging Face Throttle
+        time.sleep(1.0) 
         verdict = analyze_solvency_hf(ticker, panic_data['stock_obj'], api_key, dev=dev_mode)
         
         if not verdict or verdict.get('category') == "ERROR":
@@ -367,7 +363,6 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
             v = opp['verdict']
             o = opp['option']
             
-            # Format Date nicely
             try:
                 raw_date = o['expiration']
                 fmt_date = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%B %d %Y")
