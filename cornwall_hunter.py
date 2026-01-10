@@ -7,6 +7,7 @@ import json
 import time
 import requests
 import xml.etree.ElementTree as ET
+import os
 
 # --- SILENCE WARNINGS ---
 import warnings
@@ -19,13 +20,18 @@ st.set_page_config(layout="wide", page_title="Cornwall Hunter")
 # --- UI HEADER ---
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
-    try: st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
-    except: st.write("**DR CAPITAL**")
+    # CRASH-PROOF IMAGE LOADER
+    logo_path = "754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG"
+    if os.path.exists(logo_path):
+        st.image(logo_path, width=130)
+    else:
+        st.write("**DR CAPITAL**")
+        
 with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Universal Router V26)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Stable V27)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -53,7 +59,6 @@ with st.sidebar:
                 response = requests.post(API_URL, headers=headers, json=payload)
                 if response.status_code == 200:
                     data = response.json()
-                    # Parse OpenAI-style response
                     msg = data['choices'][0]['message']['content']
                     st.success(f"✅ Success: {msg}")
                 else:
@@ -61,7 +66,8 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"❌ Connection Failed: {e}")
 
-# --- EXPANDED UNIVERSE (Cleaned & De-Duplicated) ---
+# --- EXPANDED UNIVERSE (NO GENERIC ETFs) ---
+# Removed SPY, QQQ, Sector ETFs to stop 404 errors.
 LIQUID_TICKERS = list(set([
     "TSLA", "NVDA", "AMD", "AMZN", "GOOGL", "META", "MSFT", "NFLX",
     "PLTR", "SOFI", "HOOD", "DKNG", "ROKU", "SHOP", "SQ", "AFRM", "UPST", "CVNA",
@@ -105,7 +111,7 @@ def get_google_news(ticker):
 
 # --- PHASE 1: QUANT SCANNER (BULLDOG MODE) ---
 def scan_for_panic(ticker, dev=False):
-    wait_time = 10 
+    wait_time = 15 # Increased base wait time
     
     while True:
         try:
@@ -121,11 +127,16 @@ def scan_for_panic(ticker, dev=False):
                     "stock_obj": stock
                 }
 
+            # Attempt download
+            # We treat empty history as a potential rate limit if it's a major ticker
             hist = stock.history(period="3mo")
             
-            if hist.empty: 
-                log_debug(f"{ticker}: No history found.")
-                return None 
+            if hist.empty:
+                # Ghost Detection: If a major stock like SQ/WBA returns empty, it's a block.
+                st.warning(f"⚠️ {ticker} returned no data (Possible Ghost Ban). Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                wait_time = min(wait_time * 2, 60)
+                continue
             
             current_price = hist['Close'].iloc[-1]
             last_30 = hist.tail(30)
@@ -191,8 +202,7 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
             else:
                 return {"category": "UNKNOWN", "reason": "No news found."}
         
-        # --- NEW UNIVERSAL ROUTER ---
-        # This is the "OpenAI-Compatible" endpoint from Hugging Face
+        # --- UNIVERSAL ROUTER ---
         API_URL = "https://router.huggingface.co/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -207,7 +217,6 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
         
         Respond with valid JSON only: {{"category": "TERMINAL" or "SOLVABLE", "reason": "summary"}}"""
         
-        # Model Fallback List (If one 404s, try the next)
         MODELS_TO_TRY = [
             "mistralai/Mistral-7B-Instruct-v0.3",
             "meta-llama/Llama-3.2-3B-Instruct", 
@@ -225,7 +234,6 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
                     "temperature": 0.1
                 }
                 
-                # Retry logic for connection glitches
                 for _ in range(2):
                     response = requests.post(API_URL, headers=headers, json=payload)
                     if response.status_code == 200:
@@ -234,16 +242,12 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
                 
                 if response.status_code != 200:
                     last_error = f"{model_id}: {response.status_code}"
-                    continue # Try next model
+                    continue 
                 
-                # Parse OpenAI-Style Response
                 result = response.json()
                 content = result['choices'][0]['message']['content']
-                
-                # Clean JSON
                 content = content.replace("```json", "").replace("```", "").strip()
                 
-                # Attempt Parse
                 start_idx = content.find('{')
                 end_idx = content.rfind('}') + 1
                 if start_idx != -1 and end_idx != -1:
