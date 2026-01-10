@@ -20,7 +20,6 @@ st.set_page_config(layout="wide", page_title="Cornwall Hunter")
 # --- UI HEADER ---
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
-    # CRASH-PROOF IMAGE LOADER
     logo_path = "754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG"
     if os.path.exists(logo_path):
         st.image(logo_path, width=130)
@@ -31,7 +30,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Stable V27)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Stealth Mode V28)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -48,7 +47,6 @@ with st.sidebar:
             st.error("Missing HUGGINGFACE_API_KEY")
         else:
             try:
-                # NEW UNIVERSAL ROUTER ENDPOINT (OpenAI Compatible)
                 API_URL = "https://router.huggingface.co/v1/chat/completions"
                 headers = {"Authorization": f"Bearer {api_key}"}
                 payload = {
@@ -66,8 +64,7 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"❌ Connection Failed: {e}")
 
-# --- EXPANDED UNIVERSE (NO GENERIC ETFs) ---
-# Removed SPY, QQQ, Sector ETFs to stop 404 errors.
+# --- EXPANDED UNIVERSE ---
 LIQUID_TICKERS = list(set([
     "TSLA", "NVDA", "AMD", "AMZN", "GOOGL", "META", "MSFT", "NFLX",
     "PLTR", "SOFI", "HOOD", "DKNG", "ROKU", "SHOP", "SQ", "AFRM", "UPST", "CVNA",
@@ -91,7 +88,16 @@ def log_debug(msg):
         st.session_state.debug_logs = []
     st.session_state.debug_logs.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
 
-# --- HELPER: GOOGLE NEWS RSS FETCHER ---
+# --- STEALTH SESSION FOR YAHOO ---
+def get_yahoo_session():
+    """Creates a requests session with browser headers to avoid blocking."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    })
+    return session
+
+# --- HELPER: GOOGLE NEWS RSS FETCHER (PRIMARY) ---
 def get_google_news(ticker):
     """Fetches real news from Google News RSS."""
     try:
@@ -109,13 +115,16 @@ def get_google_news(ticker):
         log_debug(f"Google News Fetch Failed for {ticker}: {e}")
         return ""
 
-# --- PHASE 1: QUANT SCANNER (BULLDOG MODE) ---
+# --- PHASE 1: QUANT SCANNER (STEALTH MODE) ---
 def scan_for_panic(ticker, dev=False):
-    wait_time = 15 # Increased base wait time
+    max_retries = 2 # Don't get stuck forever
+    wait_time = 5
     
-    while True:
+    for attempt in range(max_retries + 1):
         try:
-            stock = yf.Ticker(ticker)
+            # Inject Stealth Session
+            session = get_yahoo_session()
+            stock = yf.Ticker(ticker, session=session)
             
             if dev:
                 return {
@@ -127,16 +136,17 @@ def scan_for_panic(ticker, dev=False):
                     "stock_obj": stock
                 }
 
-            # Attempt download
-            # We treat empty history as a potential rate limit if it's a major ticker
             hist = stock.history(period="3mo")
             
             if hist.empty:
-                # Ghost Detection: If a major stock like SQ/WBA returns empty, it's a block.
-                st.warning(f"⚠️ {ticker} returned no data (Possible Ghost Ban). Retrying in {wait_time}s...")
-                time.sleep(wait_time)
-                wait_time = min(wait_time * 2, 60)
-                continue
+                if attempt < max_retries:
+                    log_debug(f"⚠️ {ticker} empty data. Retrying {attempt+1}/{max_retries}...")
+                    time.sleep(wait_time)
+                    wait_time *= 2
+                    continue
+                else:
+                    log_debug(f"{ticker}: Skipped (No Data after retries).")
+                    return None
             
             current_price = hist['Close'].iloc[-1]
             last_30 = hist.tail(30)
@@ -160,40 +170,18 @@ def scan_for_panic(ticker, dev=False):
             }
 
         except Exception as e:
-            err_msg = str(e)
-            if "Too Many Requests" in err_msg or "Rate limited" in err_msg or "429" in err_msg:
-                st.warning(f"⚠️ Rate Limit on {ticker}. Pausing {wait_time}s...")
+            if attempt < max_retries:
                 time.sleep(wait_time)
-                wait_time = min(wait_time * 2, 60)
-                continue 
-            else:
-                log_debug(f"{ticker}: Quant Error {err_msg}")
-                return None
+                continue
+            return None
 
-# --- PHASE 2: AI CLASSIFIER (UNIVERSAL ROUTER) ---
+# --- PHASE 2: AI CLASSIFIER (GOOGLE PRIMARY) ---
 def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
     try:
-        news_text = ""
-        source_used = "None"
-        
-        # 1. Try yfinance News
-        try:
-            news_items = stock_obj.news
-            if news_items:
-                headlines = []
-                for n in news_items[:5]:
-                    t = n.get('title')
-                    if t and len(t) > 10: headlines.append(f"- {t}")
-                if headlines:
-                    news_text = "\n".join(headlines)
-                    source_used = "Yahoo Finance"
-        except: pass
-            
-        # 2. Fallback: Google News RSS
-        if not news_text:
-            log_debug(f"{ticker}: Yahoo empty. Fetching Google News RSS...")
-            news_text = get_google_news(ticker)
-            if news_text: source_used = "Google News RSS"
+        # GOOGLE NEWS PRIMARY (Save Yahoo Requests)
+        log_debug(f"{ticker}: Fetching Intel (Google RSS)...")
+        news_text = get_google_news(ticker)
+        source_used = "Google News RSS"
             
         if not news_text:
             if dev: 
@@ -341,7 +329,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        time.sleep(2.0) 
+        time.sleep(1.0) # Faster scan possible with Stealth Headers
         
         # 1. QUANT
         panic_data = scan_for_panic(ticker, dev=dev_mode)
@@ -350,7 +338,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"💥 Panic: {ticker}. Intel gathering...")
         
         # 2. AI (Universal Router)
-        time.sleep(1.0) 
+        time.sleep(0.5) 
         verdict = analyze_solvency_hf(ticker, panic_data['stock_obj'], api_key, dev=dev_mode)
         
         if not verdict or verdict.get('category') == "ERROR":
