@@ -30,13 +30,13 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Stealth Mode V28)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Llama 3.2 Router)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("Hunter Settings")
-    dev_mode = st.checkbox("🛠 Dev Mode (Test Logic)", value=False, help="Forces detection of 'Panic' to test AI and UI logic.")
+    dev_mode = st.checkbox("🛠 Dev Mode (Test AI Connection)", value=False, help="Mocks Yahoo data but sends REAL requests to AI.")
     
     st.divider()
     st.write("### 🔌 Connection Debugger")
@@ -47,10 +47,11 @@ with st.sidebar:
             st.error("Missing HUGGINGFACE_API_KEY")
         else:
             try:
+                # Use Llama 3.2 (Supported on Chat Router)
                 API_URL = "https://router.huggingface.co/v1/chat/completions"
                 headers = {"Authorization": f"Bearer {api_key}"}
                 payload = {
-                    "model": "mistralai/Mistral-7B-Instruct-v0.3",
+                    "model": "meta-llama/Llama-3.2-3B-Instruct",
                     "messages": [{"role": "user", "content": "Reply with one word: Connected"}],
                     "max_tokens": 10
                 }
@@ -88,18 +89,8 @@ def log_debug(msg):
         st.session_state.debug_logs = []
     st.session_state.debug_logs.append(f"{datetime.now().strftime('%H:%M:%S')} - {msg}")
 
-# --- STEALTH SESSION FOR YAHOO ---
-def get_yahoo_session():
-    """Creates a requests session with browser headers to avoid blocking."""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    })
-    return session
-
-# --- HELPER: GOOGLE NEWS RSS FETCHER (PRIMARY) ---
+# --- HELPER: GOOGLE NEWS RSS FETCHER ---
 def get_google_news(ticker):
-    """Fetches real news from Google News RSS."""
     try:
         query = f"{ticker} stock news"
         url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
@@ -115,17 +106,17 @@ def get_google_news(ticker):
         log_debug(f"Google News Fetch Failed for {ticker}: {e}")
         return ""
 
-# --- PHASE 1: QUANT SCANNER (STEALTH MODE) ---
+# --- PHASE 1: QUANT SCANNER ---
 def scan_for_panic(ticker, dev=False):
-    max_retries = 2 # Don't get stuck forever
+    max_retries = 2
     wait_time = 5
     
     for attempt in range(max_retries + 1):
         try:
-            # Inject Stealth Session
-            session = get_yahoo_session()
-            stock = yf.Ticker(ticker, session=session)
+            stock = yf.Ticker(ticker)
             
+            # --- DEV MODE: MOCK QUANT ONLY ---
+            # We mock this to skip the slow Yahoo download
             if dev:
                 return {
                     "ticker": ticker,
@@ -145,7 +136,6 @@ def scan_for_panic(ticker, dev=False):
                     wait_time *= 2
                     continue
                 else:
-                    log_debug(f"{ticker}: Skipped (No Data after retries).")
                     return None
             
             current_price = hist['Close'].iloc[-1]
@@ -175,22 +165,23 @@ def scan_for_panic(ticker, dev=False):
                 continue
             return None
 
-# --- PHASE 2: AI CLASSIFIER (GOOGLE PRIMARY) ---
+# --- PHASE 2: AI CLASSIFIER (UNIVERSAL ROUTER) ---
 def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
     try:
-        # GOOGLE NEWS PRIMARY (Save Yahoo Requests)
-        log_debug(f"{ticker}: Fetching Intel (Google RSS)...")
-        news_text = get_google_news(ticker)
-        source_used = "Google News RSS"
+        # --- DEV MODE: REAL AI, MOCK NEWS ---
+        # We want to test the connection, so we generate fake news but send it to the REAL AI.
+        if dev:
+            news_text = "- CEO unexpectedly resigns citing personal reasons.\n- Q3 earnings missed estimates by 5%.\n- Analysts maintain Buy rating despite volatility."
+            source_used = "Dev Mode Mock News (Testing AI Connection...)"
+        else:
+            # 1. Google News Primary
+            news_text = get_google_news(ticker)
+            source_used = "Google News RSS"
             
         if not news_text:
-            if dev: 
-                news_text = "Stock down on macro fears."
-                source_used = "Dev Mock"
-            else:
-                return {"category": "UNKNOWN", "reason": "No news found."}
+            return {"category": "UNKNOWN", "reason": "No news found."}
         
-        # --- UNIVERSAL ROUTER ---
+        # 2. Universal Router Call
         API_URL = "https://router.huggingface.co/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -205,13 +196,12 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
         
         Respond with valid JSON only: {{"category": "TERMINAL" or "SOLVABLE", "reason": "summary"}}"""
         
+        # UPDATED MODEL LIST (Chat Compatible)
         MODELS_TO_TRY = [
-            "mistralai/Mistral-7B-Instruct-v0.3",
             "meta-llama/Llama-3.2-3B-Instruct", 
-            "microsoft/Phi-3.5-mini-instruct"
+            "microsoft/Phi-3.5-mini-instruct",
+            "HuggingFaceH4/zephyr-7b-beta"
         ]
-        
-        last_error = ""
         
         for model_id in MODELS_TO_TRY:
             try:
@@ -222,6 +212,7 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
                     "temperature": 0.1
                 }
                 
+                # Retry loop
                 for _ in range(2):
                     response = requests.post(API_URL, headers=headers, json=payload)
                     if response.status_code == 200:
@@ -229,13 +220,13 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
                     time.sleep(2)
                 
                 if response.status_code != 200:
-                    last_error = f"{model_id}: {response.status_code}"
                     continue 
                 
                 result = response.json()
                 content = result['choices'][0]['message']['content']
                 content = content.replace("```json", "").replace("```", "").strip()
                 
+                # Parse JSON
                 start_idx = content.find('{')
                 end_idx = content.rfind('}') + 1
                 if start_idx != -1 and end_idx != -1:
@@ -244,15 +235,12 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
                     parsed['sources'] = f"**Source: {source_used}**\n\n{news_text}"
                     return parsed
             
-            except Exception as e:
-                last_error = str(e)
+            except:
                 continue
                 
-        log_debug(f"All Models Failed. Last error: {last_error}")
         return {"category": "ERROR", "reason": "AI Models Unavailable"}
             
-    except Exception as e:
-        log_debug(f"AI Critical Error: {str(e)}")
+    except:
         return {"category": "ERROR", "reason": "AI Critical Failure"}
 
 # --- PHASE 3: OPTION MATH ---
@@ -260,9 +248,11 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
     try:
         exps = stock_obj.options
         
+        # --- DEV MODE MOCK ---
+        # We mock this because we are debugging AI, not Options
         if dev:
             return {
-                "expiration": "2026-06-18",
+                "expiration": "2027-01-15",
                 "strike": round(normal_price, 0),
                 "ask": 0.50,
                 "ratio": 20.0,
@@ -323,13 +313,16 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     st.session_state.debug_logs = [] 
     found_opportunities = []
     
+    # Dev Mode: Scan 1 ticker. Normal: Scan All.
     scan_list = LIQUID_TICKERS[:1] if dev_mode else LIQUID_TICKERS
     
     for i, ticker in enumerate(scan_list):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        time.sleep(1.0) # Faster scan possible with Stealth Headers
+        # Polite Scan (Skip sleep in Dev Mode)
+        if not dev_mode:
+            time.sleep(1.0) 
         
         # 1. QUANT
         panic_data = scan_for_panic(ticker, dev=dev_mode)
@@ -337,11 +330,13 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         
         status.text(f"💥 Panic: {ticker}. Intel gathering...")
         
-        # 2. AI (Universal Router)
-        time.sleep(0.5) 
+        # 2. AI (REAL CALL IN DEV MODE)
+        if not dev_mode:
+            time.sleep(0.5) 
         verdict = analyze_solvency_hf(ticker, panic_data['stock_obj'], api_key, dev=dev_mode)
         
         if not verdict or verdict.get('category') == "ERROR":
+            if dev_mode: st.error("Dev Mode: AI Connection Failed.")
             continue
 
         # 3. MATH
@@ -365,7 +360,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                 })
                 
                 if dev_mode:
-                    status.text("✅ Dev Mode: Opportunity found.")
+                    status.text("✅ Dev Mode: AI Connection Verified & Logic Passed.")
                     break
     
     status.empty()
