@@ -116,8 +116,6 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     ax.axhline(y=long_strike, color='#FF5252', linestyle='-', linewidth=1.2)
     ax.axhspan(short_strike, long_strike, color='#FF5252', alpha=0.15)
 
-    # REMOVED: Stop Loss Line logic was here
-
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.spines['bottom'].set_color(text_color)
@@ -141,38 +139,20 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
 def render_profit_bar(current_pl, max_loss, max_gain):
     """
     Renders a Hybrid P&L Bar.
-    - Positive (Green): % of Max Profit (Premium).
-    - Negative (Red): % of Max Risk (Collateral).
     """
     if current_pl is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
     
-    # Calculate Hybrid %
     if current_pl >= 0:
-        # Profit relative to Credit Collected (Target is 60%)
         display_pct = (current_pl / max_gain) * 100 if max_gain > 0 else 0
         is_profit = True
     else:
-        # Loss relative to Max Risk (Stop is usually managed before -100%)
         display_pct = (current_pl / max_loss) * 100 if max_loss > 0 else 0
         is_profit = False
 
-    # Visual Mapping for the CSS Bar (0 to 100 scale)
-    # We want the bar to split in the middle (50%).
-    # -100% Risk -> 0% Bar
-    # 0% PnL -> 50% Bar
-    # +60% Gain -> ~80% Bar (Target)
-    # +100% Gain -> 100% Bar
-    
-    # Scale Logic:
-    # If Profit: Map 0..100 to 50..100
-    # If Loss: Map -100..0 to 0..50
-    
     if is_profit:
-        visual_fill = 50 + (display_pct / 2) # e.g., 60% profit -> 50 + 30 = 80% filled
+        visual_fill = 50 + (display_pct / 2) 
     else:
-        # display_pct is negative (e.g., -50%)
-        # -100% -> 0 fill. -50% -> 25 fill. 0% -> 50 fill.
         visual_fill = 50 - (abs(display_pct) / 2)
         
     visual_fill = max(0, min(visual_fill, 100))
@@ -188,7 +168,6 @@ def render_profit_bar(current_pl, max_loss, max_gain):
         label_color = WARNING_COLOR
         status_text = f"LOSS: {display_pct:.1f}% (of Risk)"
 
-    # Target Marker Position (60% Profit = 80% visual position)
     target_marker_left = 80 
 
     return (
@@ -199,13 +178,8 @@ def render_profit_bar(current_pl, max_loss, max_gain):
         f'</div>'
         
         f'<div style="width: 100%; background-color: #333; height: 8px; border-radius: 4px; position: relative; overflow: hidden; border: 1px solid #444;">'
-            # The Fill Bar
             f'<div style="width: {visual_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>'
-            
-            # Break Even Marker (Center)
             f'<div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.8);" title="Break Even"></div>'
-            
-            # Target Marker (60% Profit)
             f'<div style="position: absolute; left: {target_marker_left}%; top: 0; bottom: 0; width: 2px; background-color: {SUCCESS_COLOR}; opacity: 0.7;" title="Target (60%)"></div>'
         f'</div>'
         
@@ -217,6 +191,139 @@ def render_profit_bar(current_pl, max_loss, max_gain):
         f'</div>'
     )
 
+def render_open_positions_grid(trades):
+    """
+    Renders a compact grid of mini-cards for high-level monitoring.
+    """
+    if not trades:
+        return
+
+    html_content = """
+    <style>
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px;
+            margin-bottom: 25px;
+        }
+        .mini-card {
+            border-radius: 8px;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            border: 1px solid #333;
+            transition: transform 0.2s;
+        }
+        .mini-card:hover {
+            border-color: #666;
+        }
+        .ticker-header {
+            font-size: 16px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .data-row {
+            font-size: 12px;
+            color: #ccc;
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+    </style>
+    <h3 style='margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 5px;'>Open Positions</h3>
+    <div class="grid-container">
+    """
+
+    for t in trades:
+        cached = t.get("cached", {})
+        
+        # --- Data Prep ---
+        ticker = t['ticker']
+        contracts = int(t.get("contracts", 1)) 
+        
+        width = abs(t["short_strike"] - t["long_strike"])
+        max_gain = t["credit"] * 100 * contracts
+        max_loss = (width - t["credit"]) * 100 * contracts
+        
+        profit_pct = cached.get("current_profit_percent")
+        spread_value = cached.get("spread_value_percent", 0.0)
+        day_change = cached.get("day_change_percent", 0.0)
+        
+        pl_dollars = 0.0
+        if profit_pct is not None:
+            pl_dollars = max_gain * (profit_pct / 100.0)
+
+        # --- Color Logic ---
+        # Default Dark Grey
+        bg_color = "rgba(40, 40, 45, 0.8)" 
+        border_color = "#333"
+        ticker_color = "#fff"
+
+        # Determine Profit/Loss status for coloration
+        # Intensity Calculation (0.0 to 1.0 based on how close to target/loss)
+        if pl_dollars >= 0:
+            # Green Logic
+            ratio = min(profit_pct / 60.0, 1.0) if profit_pct else 0 # 1.0 at 60% profit
+            # R, G, B, Alpha (Higher ratio = slightly more opacity)
+            alpha = 0.1 + (ratio * 0.2) 
+            bg_color = f"rgba(0, 200, 83, {alpha})"
+            status_text = f"+{profit_pct:.1f}% (Credit)"
+            status_color = SUCCESS_COLOR
+        else:
+            # Red Logic
+            # Convert profit_pct (e.g. -50) to ratio of max loss (e.g. -100)
+            loss_pct_of_risk = (pl_dollars / max_loss) * 100 if max_loss > 0 else 0
+            ratio = min(abs(loss_pct_of_risk) / 100.0, 1.0) 
+            alpha = 0.1 + (ratio * 0.2)
+            bg_color = f"rgba(211, 47, 47, {alpha})"
+            status_text = f"{loss_pct_of_risk:.1f}% (Risk)"
+            status_color = "#ff6b6b"
+
+        # Stop Loss Warning Overwrite
+        spread_val_str = f"{spread_value:.0f}%" if spread_value is not None else "-"
+        spread_color = "#ccc"
+        
+        if spread_value is not None and spread_value >= 400:
+            border_color = WARNING_COLOR
+            spread_color = WARNING_COLOR
+            # Make bg distinctively red if stop loss hit
+            bg_color = "rgba(100, 0, 0, 0.3)"
+
+        # Day Change Format
+        if day_change is None: day_change = 0.0
+        if day_change > 0:
+            day_fmt = f"<span style='color:{SUCCESS_COLOR}; font-size:12px;'>▲ {day_change:.2f}%</span>"
+        elif day_change < 0:
+            day_fmt = f"<span style='color:{WARNING_COLOR}; font-size:12px;'>▼ {abs(day_change):.2f}%</span>"
+        else:
+            day_fmt = f"<span style='color:gray; font-size:12px;'>0.00%</span>"
+
+        # --- Card HTML ---
+        html_content += f"""
+        <div class="mini-card" style="background-color: {bg_color}; border-color: {border_color};">
+            <div class="ticker-header">
+                <span style="color:{ticker_color}">{ticker}</span>
+                {day_fmt}
+            </div>
+            <div class="data-row">
+                <span>Spread Val:</span>
+                <span style="color:{spread_color}; font-weight:bold;">{spread_val_str}</span>
+            </div>
+            <div class="data-row">
+                <span>P&L:</span>
+                <span style="color:{status_color}; font-weight:bold;">{status_text}</span>
+            </div>
+        </div>
+        """
+
+    html_content += "</div>"
+    st.markdown(html_content, unsafe_allow_html=True)
+
+
 # ---------------- Load Drive State ----------------
 if drive_service:
     st.session_state.trades = load_from_drive(drive_service) or []
@@ -224,7 +331,12 @@ else:
     if "trades" not in st.session_state:
         st.session_state.trades = []
 
-# ---------------- Display Trades ----------------
+# ---------------- Open Positions Grid (NEW) ----------------
+# Only show if there are trades
+if st.session_state.trades:
+    render_open_positions_grid(st.session_state.trades)
+
+# ---------------- Display Detailed Trades ----------------
 if not st.session_state.trades:
     st.info("No active trades. Go to 'Spread Finder' to scan for new opportunities.")
 else:
