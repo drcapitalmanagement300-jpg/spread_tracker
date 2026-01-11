@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from streamlit_autorefresh import st_autorefresh
+import textwrap
 
 # ---------------- Persistence ----------------
 from persistence import (
@@ -137,9 +138,6 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     return fig
 
 def render_profit_bar(current_pl, max_loss, max_gain):
-    """
-    Renders a Hybrid P&L Bar.
-    """
     if current_pl is None:
         return '<div style="color:gray; font-size:12px;">Pending P&L...</div>'
     
@@ -170,73 +168,75 @@ def render_profit_bar(current_pl, max_loss, max_gain):
 
     target_marker_left = 80 
 
-    return (
-        f'<div style="margin-bottom: 12px; margin-top: 5px;">'
-        f'<div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">'
-        f'<strong style="color: #ddd;">Target Progress</strong>'
-        f'<span style="color:{label_color}; font-weight:bold;">{status_text}</span>'
-        f'</div>'
+    return textwrap.dedent(f"""
+        <div style="margin-bottom: 12px; margin-top: 5px;">
+        <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">
+        <strong style="color: #ddd;">Target Progress</strong>
+        <span style="color:{label_color}; font-weight:bold;">{status_text}</span>
+        </div>
         
-        f'<div style="width: 100%; background-color: #333; height: 8px; border-radius: 4px; position: relative; overflow: hidden; border: 1px solid #444;">'
-            f'<div style="width: {visual_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>'
-            f'<div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.8);" title="Break Even"></div>'
-            f'<div style="position: absolute; left: {target_marker_left}%; top: 0; bottom: 0; width: 2px; background-color: {SUCCESS_COLOR}; opacity: 0.7;" title="Target (60%)"></div>'
-        f'</div>'
+        <div style="width: 100%; background-color: #333; height: 8px; border-radius: 4px; position: relative; overflow: hidden; border: 1px solid #444;">
+            <div style="width: {visual_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>
+            <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.8);" title="Break Even"></div>
+            <div style="position: absolute; left: {target_marker_left}%; top: 0; bottom: 0; width: 2px; background-color: {SUCCESS_COLOR}; opacity: 0.7;" title="Target (60%)"></div>
+        </div>
         
-        f'<div style="position: relative; height: 15px; font-size: 9px; color: gray; margin-top: 2px;">'
-        f'<span style="position: absolute; left: 0;">Max Loss (-100%)</span>'
-        f'<span style="position: absolute; left: 50%; transform: translateX(-50%);">Break Even</span>'
-        f'<span style="position: absolute; left: {target_marker_left}%; transform: translateX(-50%);">Target (60%)</span>'
-        f'</div>'
-        f'</div>'
-    )
+        <div style="position: relative; height: 15px; font-size: 9px; color: gray; margin-top: 2px;">
+        <span style="position: absolute; left: 0;">Max Loss (-100%)</span>
+        <span style="position: absolute; left: 50%; transform: translateX(-50%);">Break Even</span>
+        <span style="position: absolute; left: {target_marker_left}%; transform: translateX(-50%);">Target (60%)</span>
+        </div>
+        </div>
+    """)
 
 def render_open_positions_grid(trades):
     """
     Renders a compact grid of mini-cards for high-level monitoring.
+    Uses textwrap.dedent to prevent Markdown code-block rendering.
     """
     if not trades:
         return
 
-    html_content = """
-    <style>
-        .grid-container {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 12px;
-            margin-bottom: 25px;
-        }
-        .mini-card {
-            border-radius: 8px;
-            padding: 12px;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            border: 1px solid #333;
-            transition: transform 0.2s;
-        }
-        .mini-card:hover {
-            border-color: #666;
-        }
-        .ticker-header {
-            font-size: 16px;
-            font-weight: bold;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 8px;
-        }
-        .data-row {
-            font-size: 12px;
-            color: #ccc;
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 4px;
-        }
-    </style>
-    <h3 style='margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 5px;'>Open Positions</h3>
-    <div class="grid-container">
-    """
+    # 1. Define Style Block (Dedented)
+    style_block = textwrap.dedent("""
+        <style>
+            .grid-container {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                gap: 12px;
+                margin-bottom: 25px;
+            }
+            .mini-card {
+                border-radius: 8px;
+                padding: 12px;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+                border: 1px solid #333;
+                transition: transform 0.2s;
+            }
+            .mini-card:hover {
+                border-color: #666;
+            }
+            .ticker-header {
+                font-size: 16px;
+                font-weight: bold;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 8px;
+            }
+            .data-row {
+                font-size: 12px;
+                color: #ccc;
+                display: flex;
+                justify-content: space-between;
+                margin-bottom: 4px;
+            }
+        </style>
+    """)
+
+    cards_html = ""
 
     for t in trades:
         cached = t.get("cached", {})
@@ -258,24 +258,17 @@ def render_open_positions_grid(trades):
             pl_dollars = max_gain * (profit_pct / 100.0)
 
         # --- Color Logic ---
-        # Default Dark Grey
         bg_color = "rgba(40, 40, 45, 0.8)" 
         border_color = "#333"
         ticker_color = "#fff"
 
-        # Determine Profit/Loss status for coloration
-        # Intensity Calculation (0.0 to 1.0 based on how close to target/loss)
         if pl_dollars >= 0:
-            # Green Logic
-            ratio = min(profit_pct / 60.0, 1.0) if profit_pct else 0 # 1.0 at 60% profit
-            # R, G, B, Alpha (Higher ratio = slightly more opacity)
+            ratio = min(profit_pct / 60.0, 1.0) if profit_pct else 0 
             alpha = 0.1 + (ratio * 0.2) 
             bg_color = f"rgba(0, 200, 83, {alpha})"
             status_text = f"+{profit_pct:.1f}% (Credit)"
             status_color = SUCCESS_COLOR
         else:
-            # Red Logic
-            # Convert profit_pct (e.g. -50) to ratio of max loss (e.g. -100)
             loss_pct_of_risk = (pl_dollars / max_loss) * 100 if max_loss > 0 else 0
             ratio = min(abs(loss_pct_of_risk) / 100.0, 1.0) 
             alpha = 0.1 + (ratio * 0.2)
@@ -283,17 +276,14 @@ def render_open_positions_grid(trades):
             status_text = f"{loss_pct_of_risk:.1f}% (Risk)"
             status_color = "#ff6b6b"
 
-        # Stop Loss Warning Overwrite
         spread_val_str = f"{spread_value:.0f}%" if spread_value is not None else "-"
         spread_color = "#ccc"
         
         if spread_value is not None and spread_value >= 400:
             border_color = WARNING_COLOR
             spread_color = WARNING_COLOR
-            # Make bg distinctively red if stop loss hit
             bg_color = "rgba(100, 0, 0, 0.3)"
 
-        # Day Change Format
         if day_change is None: day_change = 0.0
         if day_change > 0:
             day_fmt = f"<span style='color:{SUCCESS_COLOR}; font-size:12px;'>▲ {day_change:.2f}%</span>"
@@ -302,26 +292,33 @@ def render_open_positions_grid(trades):
         else:
             day_fmt = f"<span style='color:gray; font-size:12px;'>0.00%</span>"
 
-        # --- Card HTML ---
-        html_content += f"""
-        <div class="mini-card" style="background-color: {bg_color}; border-color: {border_color};">
-            <div class="ticker-header">
-                <span style="color:{ticker_color}">{ticker}</span>
-                {day_fmt}
+        # --- Card HTML (Dedented) ---
+        cards_html += textwrap.dedent(f"""
+            <div class="mini-card" style="background-color: {bg_color}; border-color: {border_color};">
+                <div class="ticker-header">
+                    <span style="color:{ticker_color}">{ticker}</span>
+                    {day_fmt}
+                </div>
+                <div class="data-row">
+                    <span>Spread Val:</span>
+                    <span style="color:{spread_color}; font-weight:bold;">{spread_val_str}</span>
+                </div>
+                <div class="data-row">
+                    <span>P&L:</span>
+                    <span style="color:{status_color}; font-weight:bold;">{status_text}</span>
+                </div>
             </div>
-            <div class="data-row">
-                <span>Spread Val:</span>
-                <span style="color:{spread_color}; font-weight:bold;">{spread_val_str}</span>
-            </div>
-            <div class="data-row">
-                <span>P&L:</span>
-                <span style="color:{status_color}; font-weight:bold;">{status_text}</span>
-            </div>
-        </div>
-        """
+        """)
 
-    html_content += "</div>"
-    st.markdown(html_content, unsafe_allow_html=True)
+    final_html = f"""
+    {style_block}
+    <h3 style='margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 5px;'>Open Positions</h3>
+    <div class="grid-container">
+        {cards_html}
+    </div>
+    """
+    
+    st.markdown(final_html, unsafe_allow_html=True)
 
 
 # ---------------- Load Drive State ----------------
@@ -344,7 +341,6 @@ else:
         cached = t.get("cached", {})
         current_dte = days_to_expiry(t["expiration"])
         
-        # Ensure contracts is an int
         contracts = int(t.get("contracts", 1)) 
         
         width = abs(t["short_strike"] - t["long_strike"])
@@ -539,11 +535,9 @@ else:
             )
             st.markdown(right_card_html, unsafe_allow_html=True)
             
-            # UPDATED CALL: Pass current dollars, max loss, max gain
             st.markdown(render_profit_bar(pl_dollars, max_loss_total, max_gain_total), unsafe_allow_html=True)
             
             price_hist = t.get("cached", {}).get("price_history", [])
-            # stop_price = t.get("cached", {}).get("stop_loss_price") # Unused now
             
             if price_hist:
                 try:
@@ -560,7 +554,6 @@ else:
                         expiration_date=pd.Timestamp(t['expiration']),
                         short_strike=t['short_strike'],
                         long_strike=t['long_strike']
-                        # crit_price removed
                     )
                     st.pyplot(fig)
                 except Exception:
