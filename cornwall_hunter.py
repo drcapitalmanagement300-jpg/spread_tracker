@@ -8,6 +8,7 @@ import time
 import requests
 import xml.etree.ElementTree as ET
 import os
+import random
 
 # --- SILENCE WARNINGS ---
 import warnings
@@ -30,7 +31,7 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Llama 3.2 Router)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Session Rotator V32)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
@@ -106,17 +107,29 @@ def get_google_news(ticker):
         log_debug(f"Google News Fetch Failed for {ticker}: {e}")
         return ""
 
+# --- SESSION ROTATOR (ANTI-BAN) ---
+def get_fresh_session():
+    """Generates a new session with random User-Agent to trick Yahoo."""
+    session = requests.Session()
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+    ]
+    session.headers.update({"User-Agent": random.choice(user_agents)})
+    return session
+
 # --- PHASE 1: QUANT SCANNER ---
-def scan_for_panic(ticker, dev=False):
+def scan_for_panic(ticker, session, dev=False):
     max_retries = 2
     wait_time = 5
     
     for attempt in range(max_retries + 1):
         try:
-            stock = yf.Ticker(ticker)
+            # Inject Rotated Session
+            stock = yf.Ticker(ticker, session=session)
             
             # --- DEV MODE: MOCK QUANT ONLY ---
-            # We mock this to skip the slow Yahoo download
             if dev:
                 return {
                     "ticker": ticker,
@@ -130,6 +143,7 @@ def scan_for_panic(ticker, dev=False):
             hist = stock.history(period="3mo")
             
             if hist.empty:
+                # 404/Empty often means Rate Limit. We retry.
                 if attempt < max_retries:
                     log_debug(f"⚠️ {ticker} empty data. Retrying {attempt+1}/{max_retries}...")
                     time.sleep(wait_time)
@@ -169,7 +183,6 @@ def scan_for_panic(ticker, dev=False):
 def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
     try:
         # --- DEV MODE: REAL AI, MOCK NEWS ---
-        # We want to test the connection, so we generate fake news but send it to the REAL AI.
         if dev:
             news_text = "- CEO unexpectedly resigns citing personal reasons.\n- Q3 earnings missed estimates by 5%.\n- Analysts maintain Buy rating despite volatility."
             source_used = "Dev Mode Mock News (Testing AI Connection...)"
@@ -212,7 +225,6 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
                     "temperature": 0.1
                 }
                 
-                # Retry loop
                 for _ in range(2):
                     response = requests.post(API_URL, headers=headers, json=payload)
                     if response.status_code == 200:
@@ -245,19 +257,19 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
 
 # --- PHASE 3: OPTION MATH ---
 def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
+    # --- CRITICAL FIX: ISOLATE DEV MODE ---
+    if dev:
+        return {
+            "expiration": "2027-01-15",
+            "strike": round(normal_price, 0),
+            "ask": 0.50,
+            "ratio": 20.0,
+            "contract": {"strike": normal_price, "ask": 0.50}
+        }
+
     try:
+        # REAL MODE: Call Yahoo
         exps = stock_obj.options
-        
-        # --- DEV MODE MOCK ---
-        # We mock this because we are debugging AI, not Options
-        if dev:
-            return {
-                "expiration": "2027-01-15",
-                "strike": round(normal_price, 0),
-                "ask": 0.50,
-                "ratio": 20.0,
-                "contract": {"strike": normal_price, "ask": 0.50}
-            }
             
         if not exps: return None
         
@@ -313,19 +325,25 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     st.session_state.debug_logs = [] 
     found_opportunities = []
     
-    # Dev Mode: Scan 1 ticker. Normal: Scan All.
+    # Init Session
+    current_session = get_fresh_session()
+    
     scan_list = LIQUID_TICKERS[:1] if dev_mode else LIQUID_TICKERS
     
     for i, ticker in enumerate(scan_list):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        # Polite Scan (Skip sleep in Dev Mode)
+        # SESSION ROTATION: Refresh browser identity every 10 tickers
+        if i > 0 and i % 10 == 0:
+            current_session = get_fresh_session()
+            time.sleep(1.0) # Pause during swap
+        
         if not dev_mode:
             time.sleep(1.0) 
         
-        # 1. QUANT
-        panic_data = scan_for_panic(ticker, dev=dev_mode)
+        # 1. QUANT (Pass Session)
+        panic_data = scan_for_panic(ticker, session=current_session, dev=dev_mode)
         if not panic_data: continue
         
         status.text(f"💥 Panic: {ticker}. Intel gathering...")
