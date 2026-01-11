@@ -168,73 +168,75 @@ def render_profit_bar(current_pl, max_loss, max_gain):
 
     target_marker_left = 80 
 
-    return textwrap.dedent(f"""
-        <div style="margin-bottom: 12px; margin-top: 5px;">
-        <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">
-        <strong style="color: #ddd;">Target Progress</strong>
-        <span style="color:{label_color}; font-weight:bold;">{status_text}</span>
-        </div>
-        
-        <div style="width: 100%; background-color: #333; height: 8px; border-radius: 4px; position: relative; overflow: hidden; border: 1px solid #444;">
-            <div style="width: {visual_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>
-            <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.8);" title="Break Even"></div>
-            <div style="position: absolute; left: {target_marker_left}%; top: 0; bottom: 0; width: 2px; background-color: {SUCCESS_COLOR}; opacity: 0.7;" title="Target (60%)"></div>
-        </div>
-        
-        <div style="position: relative; height: 15px; font-size: 9px; color: gray; margin-top: 2px;">
-        <span style="position: absolute; left: 0;">Max Loss (-100%)</span>
-        <span style="position: absolute; left: 50%; transform: translateX(-50%);">Break Even</span>
-        <span style="position: absolute; left: {target_marker_left}%; transform: translateX(-50%);">Target (60%)</span>
-        </div>
-        </div>
-    """)
+    # Removing indents to fix markdown rendering issues
+    html_block = f"""
+<div style="margin-bottom: 12px; margin-top: 5px;">
+<div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">
+<strong style="color: #ddd;">Target Progress</strong>
+<span style="color:{label_color}; font-weight:bold;">{status_text}</span>
+</div>
+
+<div style="width: 100%; background-color: #333; height: 8px; border-radius: 4px; position: relative; overflow: hidden; border: 1px solid #444;">
+    <div style="width: {visual_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>
+    <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.8);" title="Break Even"></div>
+    <div style="position: absolute; left: {target_marker_left}%; top: 0; bottom: 0; width: 2px; background-color: {SUCCESS_COLOR}; opacity: 0.7;" title="Target (60%)"></div>
+</div>
+
+<div style="position: relative; height: 15px; font-size: 9px; color: gray; margin-top: 2px;">
+<span style="position: absolute; left: 0;">Max Loss (-100%)</span>
+<span style="position: absolute; left: 50%; transform: translateX(-50%);">Break Even</span>
+<span style="position: absolute; left: {target_marker_left}%; transform: translateX(-50%);">Target (60%)</span>
+</div>
+</div>
+"""
+    return html_block
 
 def render_open_positions_grid(trades):
-    """
-    Renders a compact grid of mini-cards for high-level monitoring.
-    Uses textwrap.dedent to prevent Markdown code-block rendering.
-    """
     if not trades:
         return
 
-    # 1. Define Style Block (Dedented)
-    style_block = textwrap.dedent("""
-        <style>
-            .grid-container {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-                gap: 12px;
-                margin-bottom: 25px;
-            }
-            .mini-card {
-                border-radius: 8px;
-                padding: 12px;
-                display: flex;
-                flex-direction: column;
-                justify-content: space-between;
-                border: 1px solid #333;
-                transition: transform 0.2s;
-            }
-            .mini-card:hover {
-                border-color: #666;
-            }
-            .ticker-header {
-                font-size: 16px;
-                font-weight: bold;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 8px;
-            }
-            .data-row {
-                font-size: 12px;
-                color: #ccc;
-                display: flex;
-                justify-content: space-between;
-                margin-bottom: 4px;
-            }
-        </style>
-    """)
+    # STYLE: Removed indentations to prevent code-block rendering
+    # Added fixed width (220px) and height (140px) to make them squares
+    style_block = """
+<style>
+    .grid-container {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, 220px); /* Fixed width for squares */
+        gap: 12px;
+        margin-bottom: 25px;
+    }
+    .mini-card {
+        border-radius: 8px;
+        padding: 12px;
+        height: 140px; /* Fixed height for squares */
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        border: 1px solid #333;
+        transition: transform 0.2s;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    .mini-card:hover {
+        border-color: #666;
+        transform: translateY(-2px);
+    }
+    .ticker-header {
+        font-size: 16px;
+        font-weight: bold;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+    }
+    .data-row {
+        font-size: 12px;
+        color: #ccc;
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 4px;
+    }
+</style>
+"""
 
     cards_html = ""
 
@@ -266,7 +268,7 @@ def render_open_positions_grid(trades):
             ratio = min(profit_pct / 60.0, 1.0) if profit_pct else 0 
             alpha = 0.1 + (ratio * 0.2) 
             bg_color = f"rgba(0, 200, 83, {alpha})"
-            status_text = f"+{profit_pct:.1f}% (Credit)"
+            status_text = f"+{profit_pct:.1f}% (Cr)"
             status_color = SUCCESS_COLOR
         else:
             loss_pct_of_risk = (pl_dollars / max_loss) * 100 if max_loss > 0 else 0
@@ -292,31 +294,32 @@ def render_open_positions_grid(trades):
         else:
             day_fmt = f"<span style='color:gray; font-size:12px;'>0.00%</span>"
 
-        # --- Card HTML (Dedented) ---
-        cards_html += textwrap.dedent(f"""
-            <div class="mini-card" style="background-color: {bg_color}; border-color: {border_color};">
-                <div class="ticker-header">
-                    <span style="color:{ticker_color}">{ticker}</span>
-                    {day_fmt}
-                </div>
-                <div class="data-row">
-                    <span>Spread Val:</span>
-                    <span style="color:{spread_color}; font-weight:bold;">{spread_val_str}</span>
-                </div>
-                <div class="data-row">
-                    <span>P&L:</span>
-                    <span style="color:{status_color}; font-weight:bold;">{status_text}</span>
-                </div>
-            </div>
-        """)
+        # Construct Card HTML (No indentation to be safe)
+        cards_html += f"""
+<div class="mini-card" style="background-color: {bg_color}; border-color: {border_color};">
+    <div class="ticker-header">
+        <span style="color:{ticker_color}">{ticker}</span>
+        {day_fmt}
+    </div>
+    <div style="flex-grow:1; display:flex; flex-direction:column; justify-content:center; gap:5px;">
+        <div class="data-row">
+            <span>Spread Val:</span>
+            <span style="color:{spread_color}; font-weight:bold;">{spread_val_str}</span>
+        </div>
+        <div class="data-row">
+            <span>P&L:</span>
+            <span style="color:{status_color}; font-weight:bold;">{status_text}</span>
+        </div>
+    </div>
+</div>"""
 
     final_html = f"""
-    {style_block}
-    <h3 style='margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 5px;'>Open Positions</h3>
-    <div class="grid-container">
-        {cards_html}
-    </div>
-    """
+{style_block}
+<h3 style='margin-bottom: 15px; font-size: 18px; border-bottom: 1px solid #444; padding-bottom: 8px;'>Open Positions</h3>
+<div class="grid-container">
+{cards_html}
+</div>
+"""
     
     st.markdown(final_html, unsafe_allow_html=True)
 
