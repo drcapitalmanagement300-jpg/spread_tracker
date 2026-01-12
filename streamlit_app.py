@@ -62,8 +62,7 @@ with header_col3:
             st.session_state.pop("credentials", None)
         st.rerun()
 
-# Solid White Divider
-st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
+# REMOVED: Solid White Divider below header as requested
 
 # ---------------- Helpers ----------------
 def days_to_expiry(expiry) -> int:
@@ -192,9 +191,9 @@ def render_open_positions_grid(trades):
         return
 
     # UPDATES:
-    # 1. Increased card width (min 220px) for longer text.
-    # 2. Increased font sizes.
-    # 3. Dynamic color for Spread Value (Green < 400, Red >= 400).
+    # 1. Removed Header Border line.
+    # 2. Spread Value aligned Right.
+    # 3. Status (P&L) aligned Left.
     style_block = """
 <style>
 .grid-container {
@@ -230,12 +229,12 @@ def render_open_positions_grid(trades):
     gap: 8px;
 }
 .mc-ticker {
-    font-size: 16px; /* Increased */
+    font-size: 16px;
     font-weight: bold;
     color: #fff;
 }
 .mc-pl-dollar {
-    font-size: 15px; /* Increased */
+    font-size: 15px;
     font-weight: bold;
     text-align: right;
 }
@@ -245,11 +244,20 @@ def render_open_positions_grid(trades):
     gap: 3px;
     margin-top: auto;
 }
-.mc-row {
+/* Flex row to distribute Status (left) and Spread (right) */
+.mc-row-spread {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-end; /* Align Spread to Right */
     align-items: center;
-    font-size: 13px; /* Increased */
+    font-size: 13px;
+    color: #ccc;
+    line-height: 1.3;
+}
+.mc-row-status {
+    display: flex;
+    justify-content: flex-start; /* Align Status to Left */
+    align-items: center;
+    font-size: 13px;
     color: #ccc;
     line-height: 1.3;
 }
@@ -257,7 +265,7 @@ def render_open_positions_grid(trades):
     font-weight: bold;
 }
 .sub-text {
-    font-size: 10px; /* Increased */
+    font-size: 10px; 
     color: #999; 
     font-weight: normal; 
     margin-left: 2px;
@@ -284,7 +292,7 @@ def render_open_positions_grid(trades):
         if profit_pct is not None:
             pl_dollars = max_gain * (profit_pct / 100.0)
 
-        # Color Logic for Card Background
+        # Color Logic
         bg_color = "rgba(40, 40, 45, 0.8)" 
         border_color = "#333"
 
@@ -307,14 +315,12 @@ def render_open_positions_grid(trades):
             status_color = "#ff6b6b"
             pl_dollar_color = "#ff6b6b"
 
-        # Color Logic for Spread Value
         spread_val_str = f"{spread_value:.0f}%" if spread_value is not None else "-"
+        spread_color = "#ccc"
         
-        # Default Green if under 400, Red if over 400
         if spread_value is not None:
             if spread_value >= 400:
                 spread_color = WARNING_COLOR
-                # Card level warning override
                 border_color = WARNING_COLOR
                 bg_color = "rgba(100, 0, 0, 0.3)"
             else:
@@ -341,23 +347,25 @@ def render_open_positions_grid(trades):
 <div class="mc-pl-dollar" style="color:{pl_dollar_color};">{pl_str}</div>
 </div>
 <div class="mc-body">
-<div class="mc-row">
-<span>Spread Value:</span>
-<div>
+<div class="mc-row-spread">
+<div style="text-align:right;">
+<span style="font-size:11px; color:#aaa; margin-right:4px;">Spread Value:</span>
 <span class="mc-val" style="color:{spread_color};">{spread_val_str}</span>
-<span class="sub-text" style="display:block; text-align:right;">(Must not exceed 400%)</span>
+<span class="sub-text" style="display:block;">(Must not exceed 400%)</span>
 </div>
 </div>
-<div class="mc-row">
-<span>P&L:</span>
+<div class="mc-row-status">
+<div>
+<span style="font-size:11px; color:#aaa; margin-right:4px;">Status:</span>
 <span class="mc-val" style="color:{status_color};">{status_text}</span>
+</div>
 </div>
 </div>
 </div>"""
 
     final_html = f"""
 {style_block}
-<h3 style='margin-bottom: 15px; font-size: 18px; border-bottom: 1px solid #444; padding-bottom: 8px;'>Open Positions</h3>
+<h3 style='margin-bottom: 15px; font-size: 18px; border: 0; padding-bottom: 8px;'>Open Positions</h3>
 <div class="grid-container">
 {cards_html}
 </div>
