@@ -167,7 +167,6 @@ def render_profit_bar(current_pl, max_loss, max_gain):
 
     target_marker_left = 80 
 
-    # NOTE: No indentation in the string to prevent Markdown code block rendering
     html_block = f"""
 <div style="margin-bottom: 12px; margin-top: 5px;">
 <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">
@@ -192,19 +191,22 @@ def render_open_positions_grid(trades):
     if not trades:
         return
 
-    # No indentation in the style block
+    # UPDATES:
+    # 1. Increased card width (min 220px) for longer text.
+    # 2. Increased font sizes.
+    # 3. Dynamic color for Spread Value (Green < 400, Red >= 400).
     style_block = """
 <style>
 .grid-container {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
     gap: 12px;
     margin-bottom: 5px;
 }
 .mini-card {
     border-radius: 6px;
     padding: 10px;
-    height: 95px; /* TIGHTENED HEIGHT */
+    height: 105px;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -225,29 +227,29 @@ def render_open_positions_grid(trades):
 .mc-ticker-row {
     display: flex;
     align-items: baseline;
-    gap: 6px;
+    gap: 8px;
 }
 .mc-ticker {
-    font-size: 15px;
+    font-size: 16px; /* Increased */
     font-weight: bold;
     color: #fff;
 }
 .mc-pl-dollar {
-    font-size: 14px;
+    font-size: 15px; /* Increased */
     font-weight: bold;
     text-align: right;
 }
 .mc-body {
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: 3px;
     margin-top: auto;
 }
 .mc-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    font-size: 11px;
+    font-size: 13px; /* Increased */
     color: #ccc;
     line-height: 1.3;
 }
@@ -255,8 +257,8 @@ def render_open_positions_grid(trades):
     font-weight: bold;
 }
 .sub-text {
-    font-size: 9px; 
-    color: #888; 
+    font-size: 10px; /* Increased */
+    color: #999; 
     font-weight: normal; 
     margin-left: 2px;
 }
@@ -282,7 +284,7 @@ def render_open_positions_grid(trades):
         if profit_pct is not None:
             pl_dollars = max_gain * (profit_pct / 100.0)
 
-        # Color Logic
+        # Color Logic for Card Background
         bg_color = "rgba(40, 40, 45, 0.8)" 
         border_color = "#333"
 
@@ -305,23 +307,30 @@ def render_open_positions_grid(trades):
             status_color = "#ff6b6b"
             pl_dollar_color = "#ff6b6b"
 
+        # Color Logic for Spread Value
         spread_val_str = f"{spread_value:.0f}%" if spread_value is not None else "-"
-        spread_color = "#ccc"
         
-        if spread_value is not None and spread_value >= 400:
-            border_color = WARNING_COLOR
-            spread_color = WARNING_COLOR
-            bg_color = "rgba(100, 0, 0, 0.3)"
+        # Default Green if under 400, Red if over 400
+        if spread_value is not None:
+            if spread_value >= 400:
+                spread_color = WARNING_COLOR
+                # Card level warning override
+                border_color = WARNING_COLOR
+                bg_color = "rgba(100, 0, 0, 0.3)"
+            else:
+                spread_color = SUCCESS_COLOR
+        else:
+            spread_color = "#ccc"
 
         if day_change is None: day_change = 0.0
         if day_change > 0:
-            day_fmt = f"<span style='color:{SUCCESS_COLOR}; font-size:11px;'>▲{day_change:.1f}%</span>"
+            day_fmt = f"<span style='color:{SUCCESS_COLOR}; font-size:12px;'>▲{day_change:.1f}%</span>"
         elif day_change < 0:
-            day_fmt = f"<span style='color:{WARNING_COLOR}; font-size:11px;'>▼{abs(day_change):.1f}%</span>"
+            day_fmt = f"<span style='color:{WARNING_COLOR}; font-size:12px;'>▼{abs(day_change):.1f}%</span>"
         else:
-            day_fmt = f"<span style='color:gray; font-size:11px;'>0.0%</span>"
+            day_fmt = f"<span style='color:gray; font-size:12px;'>0.0%</span>"
 
-        # Card HTML - FLUSH LEFT to avoid Markdown indentation interpretation
+        # Card HTML
         cards_html += f"""
 <div class="mini-card" style="background-color: {bg_color}; border-color: {border_color};">
 <div class="mc-header">
@@ -333,10 +342,10 @@ def render_open_positions_grid(trades):
 </div>
 <div class="mc-body">
 <div class="mc-row">
-<span>Spread:</span>
+<span>Spread Value:</span>
 <div>
 <span class="mc-val" style="color:{spread_color};">{spread_val_str}</span>
-<span class="sub-text">(&lt;400%)</span>
+<span class="sub-text" style="display:block; text-align:right;">(Must not exceed 400%)</span>
 </div>
 </div>
 <div class="mc-row">
@@ -364,7 +373,6 @@ else:
         st.session_state.trades = []
 
 # ---------------- Open Positions Grid (NEW) ----------------
-# Only show if there are trades
 if st.session_state.trades:
     render_open_positions_grid(st.session_state.trades)
     st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
