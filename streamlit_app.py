@@ -62,8 +62,6 @@ with header_col3:
             st.session_state.pop("credentials", None)
         st.rerun()
 
-# REMOVED: Solid White Divider below header as requested
-
 # ---------------- Helpers ----------------
 def days_to_expiry(expiry) -> int:
     if isinstance(expiry, str):
@@ -191,9 +189,9 @@ def render_open_positions_grid(trades):
         return
 
     # UPDATES:
-    # 1. Removed Header Border line.
-    # 2. Spread Value aligned Right.
-    # 3. Status (P&L) aligned Left.
+    # 1. Height increased to 115px to fit 3 rows comfortably.
+    # 2. Status Row added at bottom.
+    # 3. P&L Row labeled "P&L".
     style_block = """
 <style>
 .grid-container {
@@ -205,7 +203,7 @@ def render_open_positions_grid(trades):
 .mini-card {
     border-radius: 6px;
     padding: 10px;
-    height: 105px;
+    height: 115px; /* Increased Height */
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -241,21 +239,21 @@ def render_open_positions_grid(trades):
 .mc-body {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     margin-top: auto;
 }
-/* Flex row to distribute Status (left) and Spread (right) */
+/* Rows */
 .mc-row-spread {
     display: flex;
-    justify-content: flex-end; /* Align Spread to Right */
+    justify-content: flex-end; 
     align-items: center;
     font-size: 13px;
     color: #ccc;
     line-height: 1.3;
 }
-.mc-row-status {
+.mc-row-std {
     display: flex;
-    justify-content: flex-start; /* Align Status to Left */
+    justify-content: space-between; 
     align-items: center;
     font-size: 13px;
     color: #ccc;
@@ -279,6 +277,7 @@ def render_open_positions_grid(trades):
         cached = t.get("cached", {})
         ticker = t['ticker']
         contracts = int(t.get("contracts", 1)) 
+        current_dte = days_to_expiry(t["expiration"])
         
         width = abs(t["short_strike"] - t["long_strike"])
         max_gain = t["credit"] * 100 * contracts
@@ -287,12 +286,34 @@ def render_open_positions_grid(trades):
         profit_pct = cached.get("current_profit_percent")
         spread_value = cached.get("spread_value_percent", 0.0)
         day_change = cached.get("day_change_percent", 0.0)
+        spy_crash_alert = cached.get("spy_below_ma", False)
         
         pl_dollars = 0.0
         if profit_pct is not None:
             pl_dollars = max_gain * (profit_pct / 100.0)
 
-        # Color Logic
+        # --- Status Logic Calculation ---
+        card_status_msg = "Nominal"
+        card_status_color = SUCCESS_COLOR
+
+        if spy_crash_alert:
+            card_status_msg = "CRASH ALERT"
+            card_status_color = WARNING_COLOR
+        elif profit_pct and profit_pct >= 60:
+            card_status_msg = "TARGET HIT"
+            card_status_color = SUCCESS_COLOR
+        else:
+            if spread_value and spread_value >= 400:
+                card_status_msg = "STOP LOSS"
+                card_status_color = WARNING_COLOR
+            elif current_dte <= 21:
+                card_status_msg = "< 21 DTE"
+                card_status_color = WARNING_COLOR
+            else:
+                card_status_msg = "Nominal"
+                card_status_color = SUCCESS_COLOR
+
+        # --- Color Logic ---
         bg_color = "rgba(40, 40, 45, 0.8)" 
         border_color = "#333"
 
@@ -303,16 +324,16 @@ def render_open_positions_grid(trades):
             ratio = min(profit_pct / 60.0, 1.0) if profit_pct else 0 
             alpha = 0.1 + (ratio * 0.2) 
             bg_color = f"rgba(0, 200, 83, {alpha})"
-            status_text = f"+{profit_pct:.1f}%"
-            status_color = SUCCESS_COLOR
+            pl_text = f"+{profit_pct:.1f}%"
+            pl_color = SUCCESS_COLOR
             pl_dollar_color = SUCCESS_COLOR
         else:
             loss_pct_of_risk = (pl_dollars / max_loss) * 100 if max_loss > 0 else 0
             ratio = min(abs(loss_pct_of_risk) / 100.0, 1.0) 
             alpha = 0.1 + (ratio * 0.2)
             bg_color = f"rgba(211, 47, 47, {alpha})"
-            status_text = f"{loss_pct_of_risk:.1f}%"
-            status_color = "#ff6b6b"
+            pl_text = f"{loss_pct_of_risk:.1f}%"
+            pl_color = "#ff6b6b"
             pl_dollar_color = "#ff6b6b"
 
         spread_val_str = f"{spread_value:.0f}%" if spread_value is not None else "-"
@@ -354,11 +375,13 @@ def render_open_positions_grid(trades):
 <span class="sub-text" style="display:block;">(Must not exceed 400%)</span>
 </div>
 </div>
-<div class="mc-row-status">
-<div>
-<span style="font-size:11px; color:#aaa; margin-right:4px;">Status:</span>
-<span class="mc-val" style="color:{status_color};">{status_text}</span>
+<div class="mc-row-std">
+<span>P&L:</span>
+<span class="mc-val" style="color:{pl_color};">{pl_text}</span>
 </div>
+<div class="mc-row-std">
+<span>Status:</span>
+<span class="mc-val" style="color:{card_status_color};">{card_status_msg}</span>
 </div>
 </div>
 </div>"""
