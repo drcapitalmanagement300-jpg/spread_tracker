@@ -195,20 +195,22 @@ def render_open_positions_grid(trades):
     if not trades:
         return
 
-    # STYLE: Removed indentations to prevent code-block rendering
-    # Added fixed width (220px) and height (140px) to make them squares
+    # UPDATES:
+    # 1. minmax(185px, 1fr) for narrower/squarish cards.
+    # 2. Fixed height 105px to condense info (no gap).
+    # 3. New Layout: Ticker + Change (Left), P&L Dollar (Right).
     style_block = """
 <style>
     .grid-container {
         display: grid;
-        grid-template-columns: repeat(auto-fill, 220px); /* Fixed width for squares */
+        grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
         gap: 12px;
-        margin-bottom: 25px;
+        margin-bottom: 5px;
     }
     .mini-card {
-        border-radius: 8px;
-        padding: 12px;
-        height: 140px; /* Fixed height for squares */
+        border-radius: 6px;
+        padding: 10px;
+        height: 105px;
         display: flex;
         flex-direction: column;
         justify-content: space-between;
@@ -220,20 +222,56 @@ def render_open_positions_grid(trades):
         border-color: #666;
         transform: translateY(-2px);
     }
-    .ticker-header {
-        font-size: 16px;
+    /* Header Row */
+    .mc-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 2px;
+    }
+    .mc-ticker-box {
+        display: flex;
+        flex-direction: column;
+        gap: 0px;
+    }
+    .mc-ticker {
+        font-size: 15px;
         font-weight: bold;
+        color: #fff;
+        line-height: 1.1;
+    }
+    .mc-change {
+        font-size: 10px;
+        line-height: 1.1;
+        margin-top: 2px;
+    }
+    .mc-pl-dollar {
+        font-size: 13px;
+        font-weight: bold;
+        text-align: right;
+    }
+
+    /* Body Rows */
+    .mc-body {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+    .mc-row {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        margin-bottom: 8px;
-    }
-    .data-row {
-        font-size: 12px;
+        font-size: 11px;
         color: #ccc;
-        display: flex;
-        justify-content: space-between;
-        margin-bottom: 4px;
+    }
+    .mc-val {
+        font-weight: bold;
+    }
+    .sub-text {
+        font-size: 9px; 
+        color: #888; 
+        font-weight: normal; 
+        margin-left: 2px;
     }
 </style>
 """
@@ -262,7 +300,10 @@ def render_open_positions_grid(trades):
         # --- Color Logic ---
         bg_color = "rgba(40, 40, 45, 0.8)" 
         border_color = "#333"
-        ticker_color = "#fff"
+
+        # P&L String
+        pl_str = f"{'+' if pl_dollars > 0 else ''}${pl_dollars:.0f}"
+        pl_dollar_color = "#ccc"
 
         if pl_dollars >= 0:
             ratio = min(profit_pct / 60.0, 1.0) if profit_pct else 0 
@@ -270,13 +311,15 @@ def render_open_positions_grid(trades):
             bg_color = f"rgba(0, 200, 83, {alpha})"
             status_text = f"+{profit_pct:.1f}% (Cr)"
             status_color = SUCCESS_COLOR
+            pl_dollar_color = SUCCESS_COLOR
         else:
             loss_pct_of_risk = (pl_dollars / max_loss) * 100 if max_loss > 0 else 0
             ratio = min(abs(loss_pct_of_risk) / 100.0, 1.0) 
             alpha = 0.1 + (ratio * 0.2)
             bg_color = f"rgba(211, 47, 47, {alpha})"
-            status_text = f"{loss_pct_of_risk:.1f}% (Risk)"
+            status_text = f"{loss_pct_of_risk:.1f}% (Rsk)"
             status_color = "#ff6b6b"
+            pl_dollar_color = "#ff6b6b"
 
         spread_val_str = f"{spread_value:.0f}%" if spread_value is not None else "-"
         spread_color = "#ccc"
@@ -288,30 +331,38 @@ def render_open_positions_grid(trades):
 
         if day_change is None: day_change = 0.0
         if day_change > 0:
-            day_fmt = f"<span style='color:{SUCCESS_COLOR}; font-size:12px;'>▲ {day_change:.2f}%</span>"
+            day_fmt = f"<div class='mc-change' style='color:{SUCCESS_COLOR};'>▲ {day_change:.2f}%</div>"
         elif day_change < 0:
-            day_fmt = f"<span style='color:{WARNING_COLOR}; font-size:12px;'>▼ {abs(day_change):.2f}%</span>"
+            day_fmt = f"<div class='mc-change' style='color:{WARNING_COLOR};'>▼ {abs(day_change):.2f}%</div>"
         else:
-            day_fmt = f"<span style='color:gray; font-size:12px;'>0.00%</span>"
+            day_fmt = f"<div class='mc-change' style='color:gray;'>0.00%</div>"
 
-        # Construct Card HTML (No indentation to be safe)
-        cards_html += f"""
-<div class="mini-card" style="background-color: {bg_color}; border-color: {border_color};">
-    <div class="ticker-header">
-        <span style="color:{ticker_color}">{ticker}</span>
-        {day_fmt}
-    </div>
-    <div style="flex-grow:1; display:flex; flex-direction:column; justify-content:center; gap:5px;">
-        <div class="data-row">
-            <span>Spread Val:</span>
-            <span style="color:{spread_color}; font-weight:bold;">{spread_val_str}</span>
-        </div>
-        <div class="data-row">
-            <span>P&L:</span>
-            <span style="color:{status_color}; font-weight:bold;">{status_text}</span>
-        </div>
-    </div>
-</div>"""
+        # Construct Card HTML
+        cards_html += textwrap.dedent(f"""
+            <div class="mini-card" style="background-color: {bg_color}; border-color: {border_color};">
+                <div class="mc-header">
+                    <div class="mc-ticker-box">
+                        <div class="mc-ticker">{ticker}</div>
+                        {day_fmt}
+                    </div>
+                    <div class="mc-pl-dollar" style="color:{pl_dollar_color};">{pl_str}</div>
+                </div>
+                
+                <div class="mc-body">
+                    <div class="mc-row">
+                        <span>Spread:</span>
+                        <div>
+                            <span class="mc-val" style="color:{spread_color};">{spread_val_str}</span>
+                            <span class="sub-text">(&lt;400%)</span>
+                        </div>
+                    </div>
+                    <div class="mc-row">
+                        <span>P&L:</span>
+                        <span class="mc-val" style="color:{status_color};">{status_text}</span>
+                    </div>
+                </div>
+            </div>
+        """)
 
     final_html = f"""
 {style_block}
@@ -320,7 +371,6 @@ def render_open_positions_grid(trades):
 {cards_html}
 </div>
 """
-    
     st.markdown(final_html, unsafe_allow_html=True)
 
 
@@ -335,6 +385,8 @@ else:
 # Only show if there are trades
 if st.session_state.trades:
     render_open_positions_grid(st.session_state.trades)
+    # DIVIDER AFTER THE GRID
+    st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # ---------------- Display Detailed Trades ----------------
 if not st.session_state.trades:
