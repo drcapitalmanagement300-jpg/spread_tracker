@@ -4,7 +4,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from streamlit_autorefresh import st_autorefresh
-import textwrap
 
 # ---------------- Persistence ----------------
 from persistence import (
@@ -168,20 +167,18 @@ def render_profit_bar(current_pl, max_loss, max_gain):
 
     target_marker_left = 80 
 
-    # Removing indents to fix markdown rendering issues
+    # NOTE: No indentation in the string to prevent Markdown code block rendering
     html_block = f"""
 <div style="margin-bottom: 12px; margin-top: 5px;">
 <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:3px;">
 <strong style="color: #ddd;">Target Progress</strong>
 <span style="color:{label_color}; font-weight:bold;">{status_text}</span>
 </div>
-
 <div style="width: 100%; background-color: #333; height: 8px; border-radius: 4px; position: relative; overflow: hidden; border: 1px solid #444;">
-    <div style="width: {visual_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>
-    <div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.8);" title="Break Even"></div>
-    <div style="position: absolute; left: {target_marker_left}%; top: 0; bottom: 0; width: 2px; background-color: {SUCCESS_COLOR}; opacity: 0.7;" title="Target (60%)"></div>
+<div style="width: {visual_fill}%; background-color: {bar_color}; height: 100%; transition: width 0.5s ease-in-out;"></div>
+<div style="position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: rgba(255,255,255,0.8);" title="Break Even"></div>
+<div style="position: absolute; left: {target_marker_left}%; top: 0; bottom: 0; width: 2px; background-color: {SUCCESS_COLOR}; opacity: 0.7;" title="Target (60%)"></div>
 </div>
-
 <div style="position: relative; height: 15px; font-size: 9px; color: gray; margin-top: 2px;">
 <span style="position: absolute; left: 0;">Max Loss (-100%)</span>
 <span style="position: absolute; left: 50%; transform: translateX(-50%);">Break Even</span>
@@ -195,84 +192,74 @@ def render_open_positions_grid(trades):
     if not trades:
         return
 
-    # UPDATES:
-    # 1. minmax(185px, 1fr) for narrower/squarish cards.
-    # 2. Fixed height 105px to condense info (no gap).
-    # 3. New Layout: Ticker + Change (Left), P&L Dollar (Right).
+    # No indentation in the style block
     style_block = """
 <style>
-    .grid-container {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
-        gap: 12px;
-        margin-bottom: 5px;
-    }
-    .mini-card {
-        border-radius: 6px;
-        padding: 10px;
-        height: 105px;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-        border: 1px solid #333;
-        transition: transform 0.2s;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-    }
-    .mini-card:hover {
-        border-color: #666;
-        transform: translateY(-2px);
-    }
-    /* Header Row */
-    .mc-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        margin-bottom: 2px;
-    }
-    .mc-ticker-box {
-        display: flex;
-        flex-direction: column;
-        gap: 0px;
-    }
-    .mc-ticker {
-        font-size: 15px;
-        font-weight: bold;
-        color: #fff;
-        line-height: 1.1;
-    }
-    .mc-change {
-        font-size: 10px;
-        line-height: 1.1;
-        margin-top: 2px;
-    }
-    .mc-pl-dollar {
-        font-size: 13px;
-        font-weight: bold;
-        text-align: right;
-    }
-
-    /* Body Rows */
-    .mc-body {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-    }
-    .mc-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        font-size: 11px;
-        color: #ccc;
-    }
-    .mc-val {
-        font-weight: bold;
-    }
-    .sub-text {
-        font-size: 9px; 
-        color: #888; 
-        font-weight: normal; 
-        margin-left: 2px;
-    }
+.grid-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+    gap: 12px;
+    margin-bottom: 5px;
+}
+.mini-card {
+    border-radius: 6px;
+    padding: 10px;
+    height: 95px; /* TIGHTENED HEIGHT */
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    border: 1px solid #333;
+    transition: transform 0.2s;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+.mini-card:hover {
+    border-color: #666;
+    transform: translateY(-2px);
+}
+.mc-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 0px;
+}
+.mc-ticker-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+}
+.mc-ticker {
+    font-size: 15px;
+    font-weight: bold;
+    color: #fff;
+}
+.mc-pl-dollar {
+    font-size: 14px;
+    font-weight: bold;
+    text-align: right;
+}
+.mc-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    margin-top: auto;
+}
+.mc-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: #ccc;
+    line-height: 1.3;
+}
+.mc-val {
+    font-weight: bold;
+}
+.sub-text {
+    font-size: 9px; 
+    color: #888; 
+    font-weight: normal; 
+    margin-left: 2px;
+}
 </style>
 """
 
@@ -280,8 +267,6 @@ def render_open_positions_grid(trades):
 
     for t in trades:
         cached = t.get("cached", {})
-        
-        # --- Data Prep ---
         ticker = t['ticker']
         contracts = int(t.get("contracts", 1)) 
         
@@ -297,11 +282,10 @@ def render_open_positions_grid(trades):
         if profit_pct is not None:
             pl_dollars = max_gain * (profit_pct / 100.0)
 
-        # --- Color Logic ---
+        # Color Logic
         bg_color = "rgba(40, 40, 45, 0.8)" 
         border_color = "#333"
 
-        # P&L String
         pl_str = f"{'+' if pl_dollars > 0 else ''}${pl_dollars:.0f}"
         pl_dollar_color = "#ccc"
 
@@ -309,7 +293,7 @@ def render_open_positions_grid(trades):
             ratio = min(profit_pct / 60.0, 1.0) if profit_pct else 0 
             alpha = 0.1 + (ratio * 0.2) 
             bg_color = f"rgba(0, 200, 83, {alpha})"
-            status_text = f"+{profit_pct:.1f}% (Cr)"
+            status_text = f"+{profit_pct:.1f}%"
             status_color = SUCCESS_COLOR
             pl_dollar_color = SUCCESS_COLOR
         else:
@@ -317,7 +301,7 @@ def render_open_positions_grid(trades):
             ratio = min(abs(loss_pct_of_risk) / 100.0, 1.0) 
             alpha = 0.1 + (ratio * 0.2)
             bg_color = f"rgba(211, 47, 47, {alpha})"
-            status_text = f"{loss_pct_of_risk:.1f}% (Rsk)"
+            status_text = f"{loss_pct_of_risk:.1f}%"
             status_color = "#ff6b6b"
             pl_dollar_color = "#ff6b6b"
 
@@ -331,38 +315,36 @@ def render_open_positions_grid(trades):
 
         if day_change is None: day_change = 0.0
         if day_change > 0:
-            day_fmt = f"<div class='mc-change' style='color:{SUCCESS_COLOR};'>▲ {day_change:.2f}%</div>"
+            day_fmt = f"<span style='color:{SUCCESS_COLOR}; font-size:11px;'>▲{day_change:.1f}%</span>"
         elif day_change < 0:
-            day_fmt = f"<div class='mc-change' style='color:{WARNING_COLOR};'>▼ {abs(day_change):.2f}%</div>"
+            day_fmt = f"<span style='color:{WARNING_COLOR}; font-size:11px;'>▼{abs(day_change):.1f}%</span>"
         else:
-            day_fmt = f"<div class='mc-change' style='color:gray;'>0.00%</div>"
+            day_fmt = f"<span style='color:gray; font-size:11px;'>0.0%</span>"
 
-        # Construct Card HTML
-        cards_html += textwrap.dedent(f"""
-            <div class="mini-card" style="background-color: {bg_color}; border-color: {border_color};">
-                <div class="mc-header">
-                    <div class="mc-ticker-box">
-                        <div class="mc-ticker">{ticker}</div>
-                        {day_fmt}
-                    </div>
-                    <div class="mc-pl-dollar" style="color:{pl_dollar_color};">{pl_str}</div>
-                </div>
-                
-                <div class="mc-body">
-                    <div class="mc-row">
-                        <span>Spread:</span>
-                        <div>
-                            <span class="mc-val" style="color:{spread_color};">{spread_val_str}</span>
-                            <span class="sub-text">(&lt;400%)</span>
-                        </div>
-                    </div>
-                    <div class="mc-row">
-                        <span>P&L:</span>
-                        <span class="mc-val" style="color:{status_color};">{status_text}</span>
-                    </div>
-                </div>
-            </div>
-        """)
+        # Card HTML - FLUSH LEFT to avoid Markdown indentation interpretation
+        cards_html += f"""
+<div class="mini-card" style="background-color: {bg_color}; border-color: {border_color};">
+<div class="mc-header">
+<div class="mc-ticker-row">
+<div class="mc-ticker">{ticker}</div>
+{day_fmt}
+</div>
+<div class="mc-pl-dollar" style="color:{pl_dollar_color};">{pl_str}</div>
+</div>
+<div class="mc-body">
+<div class="mc-row">
+<span>Spread:</span>
+<div>
+<span class="mc-val" style="color:{spread_color};">{spread_val_str}</span>
+<span class="sub-text">(&lt;400%)</span>
+</div>
+</div>
+<div class="mc-row">
+<span>P&L:</span>
+<span class="mc-val" style="color:{status_color};">{status_text}</span>
+</div>
+</div>
+</div>"""
 
     final_html = f"""
 {style_block}
@@ -385,7 +367,6 @@ else:
 # Only show if there are trades
 if st.session_state.trades:
     render_open_positions_grid(st.session_state.trades)
-    # DIVIDER AFTER THE GRID
     st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # ---------------- Display Detailed Trades ----------------
