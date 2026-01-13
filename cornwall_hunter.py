@@ -31,13 +31,13 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Force Pass V33)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Diagnostic V34)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("Hunter Settings")
-    dev_mode = st.checkbox("🛠 Dev Mode (Force Trade)", value=False, help="Mocks Price/Option data. Calls AI but IGNORES verdict to ensure a result appears.")
+    dev_mode = st.checkbox("🛠 Dev Mode (Diagnostic)", value=False, help="Forces a trade to appear. Prints debug steps to screen.")
     
     st.divider()
     st.write("### 🔌 Connection Debugger")
@@ -121,25 +121,28 @@ def get_fresh_session():
 
 # --- PHASE 1: QUANT SCANNER ---
 def scan_for_panic(ticker, session, dev=False):
+    # --- CRITICAL FIX: ISOLATE DEV MODE ---
+    # Return immediately. Do not touch yfinance.
+    if dev:
+        # Create a dummy stock object wrapper to prevent errors downstream
+        class MockStock:
+            def __init__(self): self.news = []
+        
+        return {
+            "ticker": ticker,
+            "price": 100.0,
+            "high_30d": 145.0, 
+            "drop_pct": -30.0,
+            "hv": 85.0,
+            "stock_obj": MockStock()
+        }
+
     max_retries = 2
     wait_time = 5
     
     for attempt in range(max_retries + 1):
         try:
-            # Inject Rotated Session
             stock = yf.Ticker(ticker, session=session)
-            
-            # --- DEV MODE: MOCK QUANT ONLY ---
-            if dev:
-                return {
-                    "ticker": ticker,
-                    "price": 100.0,
-                    "high_30d": 145.0, 
-                    "drop_pct": -30.0,
-                    "hv": 85.0,
-                    "stock_obj": stock
-                }
-
             hist = stock.history(period="3mo")
             
             if hist.empty:
@@ -250,11 +253,13 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
         # If we reach here, models failed.
         # DEV MODE OVERRIDE: If AI fails but we are in dev mode, return a dummy success
         if dev:
-            return {"category": "SOLVABLE", "reason": "Dev Mode AI Bypass (Connection Glitch)", "sources": "Simulated AI Response"}
+            return {"category": "SOLVABLE", "reason": "Dev Mode Force Pass (Connection Glitch)", "sources": "Simulated AI Response"}
             
         return {"category": "ERROR", "reason": "AI Models Unavailable"}
             
     except:
+        if dev:
+            return {"category": "SOLVABLE", "reason": "Dev Mode Force Pass (Critical Exception)", "sources": "Simulated AI Response"}
         return {"category": "ERROR", "reason": "AI Critical Failure"}
 
 # --- PHASE 3: OPTION MATH ---
@@ -325,39 +330,42 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
     st.session_state.debug_logs = [] 
     found_opportunities = []
     
-    # Init Session
     current_session = get_fresh_session()
-    
     scan_list = LIQUID_TICKERS[:1] if dev_mode else LIQUID_TICKERS
     
     for i, ticker in enumerate(scan_list):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        if i > 0 and i % 10 == 0:
-            current_session = get_fresh_session()
-            time.sleep(1.0)
-        
         if not dev_mode:
+            if i > 0 and i % 10 == 0:
+                current_session = get_fresh_session()
+                time.sleep(1.0)
             time.sleep(1.0) 
         
         # 1. QUANT
         panic_data = scan_for_panic(ticker, session=current_session, dev=dev_mode)
-        if not panic_data: continue
+        if not panic_data: 
+            if dev_mode: st.warning(f"Dev Mode: Quant Step Failed for {ticker}")
+            continue
         
-        status.text(f"💥 Panic: {ticker}. Intel gathering...")
+        if dev_mode: st.text(f"🔹 Quant Passed: {ticker}")
+        else: status.text(f"💥 Panic: {ticker}. Intel gathering...")
         
         # 2. AI
         if not dev_mode:
             time.sleep(0.5) 
+        
         verdict = analyze_solvency_hf(ticker, panic_data['stock_obj'], api_key, dev=dev_mode)
         
         if not verdict or verdict.get('category') == "ERROR":
             if dev_mode: 
-                # Should not happen with new override, but safety net:
-                verdict = {"category": "SOLVABLE", "reason": "Dev Mode Force Pass", "sources": "None"}
+                # This should be unreachable due to overrides, but just in case:
+                st.warning(f"Dev Mode: AI Step Failed for {ticker}")
             else:
                 continue
+        
+        if dev_mode: st.text(f"🔹 AI Passed: {verdict.get('category')}")
 
         # 3. MATH
         # FORCE PASS IN DEV MODE
@@ -369,6 +377,10 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                 recovery_target,
                 dev=dev_mode
             )
+            
+            if dev_mode:
+                if opportunity: st.text("🔹 Math Passed")
+                else: st.warning("Dev Mode: Math Step Failed")
             
             min_ratio = 2.0 if dev_mode else 8.0
             
