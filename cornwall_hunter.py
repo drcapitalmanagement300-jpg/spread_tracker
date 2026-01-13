@@ -31,13 +31,13 @@ with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
         <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Cornwall Hunter</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Session Rotator V32)</p>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Solvable Problem vs. Terminal Risk Classifier (Force Pass V33)</p>
     </div>""", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("Hunter Settings")
-    dev_mode = st.checkbox("🛠 Dev Mode (Test AI Connection)", value=False, help="Mocks Yahoo data but sends REAL requests to AI.")
+    dev_mode = st.checkbox("🛠 Dev Mode (Force Trade)", value=False, help="Mocks Price/Option data. Calls AI but IGNORES verdict to ensure a result appears.")
     
     st.divider()
     st.write("### 🔌 Connection Debugger")
@@ -143,7 +143,6 @@ def scan_for_panic(ticker, session, dev=False):
             hist = stock.history(period="3mo")
             
             if hist.empty:
-                # 404/Empty often means Rate Limit. We retry.
                 if attempt < max_retries:
                     log_debug(f"⚠️ {ticker} empty data. Retrying {attempt+1}/{max_retries}...")
                     time.sleep(wait_time)
@@ -209,7 +208,6 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
         
         Respond with valid JSON only: {{"category": "TERMINAL" or "SOLVABLE", "reason": "summary"}}"""
         
-        # UPDATED MODEL LIST (Chat Compatible)
         MODELS_TO_TRY = [
             "meta-llama/Llama-3.2-3B-Instruct", 
             "microsoft/Phi-3.5-mini-instruct",
@@ -238,7 +236,6 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
                 content = result['choices'][0]['message']['content']
                 content = content.replace("```json", "").replace("```", "").strip()
                 
-                # Parse JSON
                 start_idx = content.find('{')
                 end_idx = content.rfind('}') + 1
                 if start_idx != -1 and end_idx != -1:
@@ -249,7 +246,12 @@ def analyze_solvency_hf(ticker, stock_obj, api_key, dev=False):
             
             except:
                 continue
-                
+        
+        # If we reach here, models failed.
+        # DEV MODE OVERRIDE: If AI fails but we are in dev mode, return a dummy success
+        if dev:
+            return {"category": "SOLVABLE", "reason": "Dev Mode AI Bypass (Connection Glitch)", "sources": "Simulated AI Response"}
+            
         return {"category": "ERROR", "reason": "AI Models Unavailable"}
             
     except:
@@ -268,9 +270,7 @@ def find_cornwall_option(stock_obj, current_price, normal_price, dev=False):
         }
 
     try:
-        # REAL MODE: Call Yahoo
         exps = stock_obj.options
-            
         if not exps: return None
         
         leaps = [e for e in exps if (datetime.strptime(e, "%Y-%m-%d") - datetime.now()).days > 360]
@@ -334,31 +334,34 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
         status.text(f"Scanning {ticker}...")
         bar.progress((i+1) / len(scan_list))
         
-        # SESSION ROTATION: Refresh browser identity every 10 tickers
         if i > 0 and i % 10 == 0:
             current_session = get_fresh_session()
-            time.sleep(1.0) # Pause during swap
+            time.sleep(1.0)
         
         if not dev_mode:
             time.sleep(1.0) 
         
-        # 1. QUANT (Pass Session)
+        # 1. QUANT
         panic_data = scan_for_panic(ticker, session=current_session, dev=dev_mode)
         if not panic_data: continue
         
         status.text(f"💥 Panic: {ticker}. Intel gathering...")
         
-        # 2. AI (REAL CALL IN DEV MODE)
+        # 2. AI
         if not dev_mode:
             time.sleep(0.5) 
         verdict = analyze_solvency_hf(ticker, panic_data['stock_obj'], api_key, dev=dev_mode)
         
         if not verdict or verdict.get('category') == "ERROR":
-            if dev_mode: st.error("Dev Mode: AI Connection Failed.")
-            continue
+            if dev_mode: 
+                # Should not happen with new override, but safety net:
+                verdict = {"category": "SOLVABLE", "reason": "Dev Mode Force Pass", "sources": "None"}
+            else:
+                continue
 
         # 3. MATH
-        if verdict.get('category') == 'SOLVABLE' or (dev_mode and verdict.get('category') != 'ERROR'):
+        # FORCE PASS IN DEV MODE
+        if dev_mode or verdict.get('category') == 'SOLVABLE':
             recovery_target = panic_data['high_30d']
             opportunity = find_cornwall_option(
                 panic_data['stock_obj'], 
@@ -378,7 +381,7 @@ if st.button(f"Start Hunt {'(Dev Mode)' if dev_mode else ''}"):
                 })
                 
                 if dev_mode:
-                    status.text("✅ Dev Mode: AI Connection Verified & Logic Passed.")
+                    status.text("✅ Dev Mode: Setup Forced & Displayed.")
                     break
     
     status.empty()
