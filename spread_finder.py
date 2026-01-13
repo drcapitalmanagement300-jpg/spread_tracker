@@ -66,6 +66,7 @@ st.markdown("""
     .strategy-badge { border: 1px solid #d4ac0d; color: #d4ac0d; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
     .warning-box { background-color: rgba(211, 47, 47, 0.1); border: 1px solid #d32f2f; border-radius: 8px; padding: 15px; margin-bottom: 20px; text-align: center; }
+    .status-pulse { font-size: 12px; color: #00C853; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -119,21 +120,16 @@ def get_stock_data(ticker):
 
         # --- SECTOR & TYPE FETCH ---
         try:
-            # We use fast_info where possible or fall back to info for sector
-            # Note: Fetching .info can be slow for many tickers
             info = stock.info
-            
-            # 1. Asset Type
             q_type = info.get('quoteType', 'EQUITY').upper()
             if 'ETF' in q_type: type_str = "(ETF)"
             elif 'INDEX' in q_type: type_str = "(Index)"
             elif 'EQUITY' in q_type: type_str = "(Stock)"
             else: type_str = ""
 
-            # 2. Sector
             sector_str = info.get('sector', '')
             if not sector_str:
-                sector_str = info.get('category', 'Unknown Sector') # Fallback for ETFs
+                sector_str = info.get('category', 'Unknown Sector') 
         except:
             type_str = ""
             sector_str = "-"
@@ -191,14 +187,13 @@ def get_stock_data(ticker):
         }
     except: return None
 
-# --- TRADE LOGIC (TUNED) ---
+# --- TRADE LOGIC (STRICT) ---
 def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev_mode=False):
     try:
         exps = stock_obj.options
         if not exps: return None
         
         # 1. DTE TUNING
-        # Widen slightly to ensure we catch monthly cycles
         min_days = 14 if dev_mode else 25
         max_days = 60 if dev_mode else 50
         
@@ -228,26 +223,22 @@ def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev
         imp_vol = atm_puts.iloc[0]['impliedVolatility'] if not atm_puts.empty else (current_hv / 100.0)
 
         # 3. TARGETING (0.75x EM)
-        # Using 0.75x instead of 0.85x to ensure we find candidates in lower vol environments
         expected_move = current_price * imp_vol * np.sqrt(dte/365) * 0.75
         target_short_strike = current_price - expected_move
         
         otm_puts = puts[puts['strike'] <= target_short_strike].sort_values('strike', ascending=False)
         
-        # Fallback for Dev Mode
         if otm_puts.empty:
             if dev_mode:
                 otm_puts = puts[puts['strike'] < current_price].sort_values('strike', ascending=False)
             else:
-                # Try one last check closer to money (standard 1SD)
                 target_short_fallback = current_price * 0.95
                 otm_puts = puts[puts['strike'] <= target_short_fallback].sort_values('strike', ascending=False)
 
         if otm_puts.empty: return None
 
-        # 4. WIPEOUT FACTOR (REALISTIC)
+        # 4. STRICT FILTERS
         width = 5.0
-        # Min Credit: $0.70 (14% Yield)
         min_credit = 0.70 
         if dev_mode: min_credit = 0.05
 
@@ -317,7 +308,6 @@ def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
     ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
     ax.fill_between(dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.1)
 
-    # Vol Cone
     days_proj = 30
     safe_iv = iv if iv > 0 else 30
     vol_move = current_price * (safe_iv/100) * np.sqrt(np.arange(1, days_proj+1)/365)
@@ -347,8 +337,6 @@ with header_col2:
         <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
     </div>""", unsafe_allow_html=True)
 
-# NO DIVIDER LINE HERE - Removed as requested
-
 with st.sidebar:
     st.header("Scanner Settings")
     dev_mode = st.checkbox("🛠 Dev Mode (Bypass Filters)", value=False, help="Check this to test in bear markets.")
@@ -358,7 +346,13 @@ with st.sidebar:
 if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     
     # 1. MARKET HEALTH CHECK
+    status = st.empty()
+    status.text("Checking Market Pulse...")
+    
     market_healthy, spy_price, spy_sma = get_market_health()
+    
+    # PULSE INDICATOR (Prove data is flowing)
+    st.markdown(f"<div class='status-pulse'>Market Data Active | SPY: ${spy_price:.2f}</div>", unsafe_allow_html=True)
     
     if not market_healthy and not dev_mode:
         st.markdown(f"""
@@ -371,7 +365,6 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
         st.stop()
 
     # 2. PROCEED IF HEALTHY
-    status = st.empty()
     progress = st.progress(0)
     results = []
     
@@ -401,12 +394,11 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
                 credit_ratio = spread['credit'] / width
                 if credit_ratio >= 0.30: score += 20
                 elif credit_ratio >= 0.25: score += 15
-                elif credit_ratio >= 0.15: score += 10 # Added tier for acceptable credit
+                elif credit_ratio >= 0.15: score += 10
             if data['is_above_sma']: score += 10
             
             display_score = min(score, 100.0)
             
-            # Lowered display threshold slightly to catch 'Good' trades
             if dev_mode or display_score >= 50:
                 results.append({"ticker": ticker, "data": data, "spread": spread, "score": score, "display_score": display_score})
     
@@ -418,7 +410,7 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
 if st.session_state.scan_results is not None:
     results = st.session_state.scan_results
     if not results:
-        st.info("No setups found meeting criteria.")
+        st.info("No setups found meeting strict criteria. (Market is currently tight)")
     else:
         st.success(f"Found {len(results)} High-Probability Opportunities")
         cols = st.columns(3)
