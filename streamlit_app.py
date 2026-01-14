@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from streamlit_autorefresh import st_autorefresh
+import yfinance as yf # Imported for SNP fetch
 
 # ---------------- Persistence ----------------
 from persistence import (
@@ -76,6 +77,43 @@ def format_money(x):
         return f"${float(x):.2f}"
     except Exception:
         return "-"
+
+# ---------------- SNP Performance Widget ----------------
+def render_snp_performance():
+    """Fetches and displays S&P 500 daily performance."""
+    try:
+        snp = yf.Ticker("^GSPC")
+        hist = snp.history(period="2d")
+        
+        if len(hist) < 2:
+            return # Not enough data
+            
+        current = hist['Close'].iloc[-1]
+        prev = hist['Close'].iloc[-2]
+        change = current - prev
+        pct_change = (change / prev) * 100
+        
+        color = SUCCESS_COLOR if change >= 0 else WARNING_COLOR
+        arrow = "▲" if change >= 0 else "▼"
+        
+        st.markdown(f"""
+        <div style="
+            background-color: rgba(40, 40, 45, 0.6); 
+            border: 1px solid #444; 
+            border-radius: 6px; 
+            padding: 8px 15px; 
+            margin-bottom: 15px; 
+            display: inline-flex; 
+            align-items: center; 
+            gap: 15px;">
+            <span style="font-weight: bold; color: #fff; font-size: 14px;">S&P 500 (SPX)</span>
+            <span style="font-size: 14px; color: #ddd;">${current:,.2f}</span>
+            <span style="font-weight: bold; color: {color}; font-size: 14px;">{arrow} {pct_change:.2f}%</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    except Exception:
+        pass # Fail silently if YF is down
 
 # --- Charting & Progress Bar Functions ---
 def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_strike):
@@ -404,12 +442,16 @@ else:
         st.session_state.trades = []
 
 # ---------------- Open Positions Grid (NEW) ----------------
+# Only show if there are trades
 if st.session_state.trades:
+    render_snp_performance() # NEW: S&P 500 WIDGET
     render_open_positions_grid(st.session_state.trades)
     st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # ---------------- Display Detailed Trades ----------------
 if not st.session_state.trades:
+    # Still show SNP if no trades
+    render_snp_performance()
     st.info("No active trades. Go to 'Spread Finder' to scan for new opportunities.")
 else:
     for i, t in enumerate(st.session_state.trades):
