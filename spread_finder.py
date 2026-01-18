@@ -7,6 +7,8 @@ import scipy.stats as si
 from datetime import datetime, timedelta
 import finnhub
 import time
+import random
+import requests
 
 # Import persistence
 from persistence import (
@@ -33,6 +35,13 @@ BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
 
+# --- BROWSER SPOOFING (USER AGENTS) ---
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0'
+]
+
 # --- INITIALIZE SERVICES ---
 drive_service = None
 try:
@@ -40,22 +49,21 @@ try:
 except Exception:
     drive_service = None
 
-# Initialize Finnhub Client
 try:
     finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
 except Exception as e:
-    st.error(f"Failed to initialize Finnhub: {e}")
     finnhub_client = None
 
-# Load trades if logged in
+# Load trades
 if "trades" not in st.session_state:
-    if drive_service:
-        st.session_state.trades = load_from_drive(drive_service) or []
-    else:
-        st.session_state.trades = []
+    st.session_state.trades = load_from_drive(drive_service) or [] if drive_service else []
 
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
+
+# --- NEW: SCAN LOG STATE ---
+if "scan_log" not in st.session_state:
+    st.session_state.scan_log = []
 
 # 1. EXPANDED UNIVERSE
 LIQUID_TICKERS = [
@@ -71,7 +79,6 @@ LIQUID_TICKERS = [
     "LLY", "UNH", "JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "MRNA"
 ]
 
-# ETF LIST (To skip earnings checks)
 ETFS = [
     "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX",
     "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS"
@@ -88,6 +95,8 @@ st.markdown("""
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
     .status-reject { font-size: 12px; color: #ff4b4b; font-style: italic; }
     .status-pulse { font-size: 12px; color: #00C853; font-weight: bold; }
+    /* Console Log Style */
+    .stCodeBlock { font-family: 'Courier New', monospace; font-size: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -99,16 +108,30 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-# --- EARNINGS SAFETY CHECK (DYNAMIC + THROTTLED) ---
-def is_safe_from_earnings(ticker, expiration_date_str):
-    if ticker in ETFS:
-        return True, "ETF"
+# --- SMART RETRY LOGIC ---
+def safe_yfinance_call(func, *args, **kwargs):
+    max_retries = 3
+    base_wait = 2 
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "429" in err_msg or "too many requests" in err_msg:
+                wait_time = base_wait * (2 ** attempt) + random.uniform(0.1, 1.0)
+                time.sleep(wait_time)
+            else:
+                if attempt == max_retries - 1: return None
+                time.sleep(1)
+    return None
 
-    if not finnhub_client:
-        return True, "No API"
+# --- EARNINGS SAFETY CHECK ---
+def is_safe_from_earnings(ticker, expiration_date_str):
+    if ticker in ETFS: return True, "ETF"
+    if not finnhub_client: return True, "No API"
 
     try:
-        time.sleep(0.5) 
+        time.sleep(0.6) 
         today = datetime.now().date()
         exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
         
@@ -124,7 +147,7 @@ def is_safe_from_earnings(ticker, expiration_date_str):
                 return False, report_date
         return True, "Clear" 
     except Exception as e:
-        print(f"Finnhub Error for {ticker}: {e}")
+        if "429" in str(e): time.sleep(5)
         return True, "Error"
 
 # --- MARKET HEALTH CHECK ---
@@ -132,41 +155,37 @@ def get_market_health():
     try:
         spy = yf.Ticker("SPY")
         hist = spy.history(period="1y") 
-        if hist.empty or len(hist) < 200:
-            return True, 0, 0 
+        if hist.empty or len(hist) < 200: return True, 0, 0 
         current_price = hist['Close'].iloc[-1]
         sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
-        is_healthy = current_price > sma_200
-        return is_healthy, current_price, sma_200
-    except Exception as e:
-        return True, 0, 0
+        return current_price > sma_200, current_price, sma_200
+    except: return True, 0, 0
 
-# --- DATA FETCHING (WITH BOLLINGER BANDS) ---
+# --- DATA FETCHING (ROBUST) ---
 @st.cache_data(ttl=3600)
 def get_stock_data(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        try:
-            hist = stock.history(period="1y")
-        except: return None
-            
-        if hist.empty: return None
+        session = requests.Session()
+        session.headers.update({'User-Agent': random.choice(USER_AGENTS)})
+        stock = yf.Ticker(ticker, session=session)
+        hist = safe_yfinance_call(stock.history, period="1y")
+        
+        if hist is None or hist.empty: return None
         
         current_price = hist['Close'].iloc[-1]
         prev_price = hist['Close'].iloc[-2]
         change_pct = ((current_price - prev_price) / prev_price) * 100
         
-        # Volatility
         hist['Returns'] = hist['Close'].pct_change()
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
         current_hv = hist['HV'].iloc[-1] if not pd.isna(hist['HV'].iloc[-1]) else 0
 
-        # Technicals: SMA & RSI
+        # Technicals
         hist['SMA_100'] = hist['Close'].rolling(window=100).mean()
         hist['SMA_200'] = hist['Close'].rolling(window=200).mean()
         hist['RSI'] = calculate_rsi(hist['Close'])
 
-        # Technicals: Bollinger Bands (20, 2)
+        # BB
         hist['SMA_20'] = hist['Close'].rolling(window=20).mean()
         hist['STD_20'] = hist['Close'].rolling(window=20).std()
         hist['BB_Upper'] = hist['SMA_20'] + (hist['STD_20'] * 2)
@@ -177,48 +196,41 @@ def get_stock_data(ticker):
         bb_lower = hist['BB_Lower'].iloc[-1] if not pd.isna(hist['BB_Lower'].iloc[-1]) else current_price * 0.95
         current_rsi = hist['RSI'].iloc[-1] if len(hist) >= 14 else 50
 
-        is_above_sma = current_price > hist['SMA_100'].iloc[-1] if len(hist) >= 100 else True
         is_uptrend = current_price > sma_200
-        
-        # Determine Tech Status
-        is_oversold_bb = current_price <= (bb_lower * 1.01) # Within 1% of lower band
+        is_oversold_bb = current_price <= (bb_lower * 1.01)
         is_overbought_bb = current_price >= (bb_upper * 0.99)
 
-        # --- SECTOR & TYPE FETCH ---
         try:
-            info = stock.info
+            info = stock.info 
             q_type = info.get('quoteType', 'EQUITY').upper()
             if 'ETF' in q_type: type_str = "(ETF)"
             elif 'INDEX' in q_type: type_str = "(Index)"
             elif 'EQUITY' in q_type: type_str = "(Stock)"
             else: type_str = ""
             sector_str = info.get('sector', '')
-            if not sector_str: sector_str = info.get('category', 'Unknown Sector') 
+            if not sector_str: sector_str = info.get('category', 'Unknown') 
         except:
             type_str = ""
             sector_str = "-"
 
         return {
-            "price": current_price,
-            "change_pct": change_pct,
-            "hv": current_hv,
-            "is_above_sma": is_above_sma,
-            "is_uptrend": is_uptrend,
-            "rsi": current_rsi,
-            "bb_lower": bb_lower,
-            "bb_upper": bb_upper,
-            "is_oversold_bb": is_oversold_bb,
-            "is_overbought_bb": is_overbought_bb,
-            "type_str": type_str,
-            "sector_str": sector_str,
-            "hist": hist
+            "price": current_price, "change_pct": change_pct, "hv": current_hv,
+            "is_uptrend": is_uptrend, "rsi": current_rsi,
+            "bb_lower": bb_lower, "bb_upper": bb_upper,
+            "is_oversold_bb": is_oversold_bb, "is_overbought_bb": is_overbought_bb,
+            "type_str": type_str, "sector_str": sector_str, "hist": hist
         }
     except: return None
 
 # --- TRADE LOGIC ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
     try:
-        exps = stock_obj.options
+        try:
+            exps = stock_obj.options
+        except: 
+            time.sleep(1)
+            exps = stock_obj.options
+            
         if not exps: return None, "No Options Chain"
         
         min_days = 14 if dev_mode else 25
@@ -239,9 +251,10 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         best_exp = max(valid_exps) 
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
 
-        chain = stock_obj.option_chain(best_exp)
-        puts = chain.puts
+        chain = safe_yfinance_call(stock_obj.option_chain, best_exp)
+        if not chain: return None, "Failed to fetch Chain"
         
+        puts = chain.puts
         atm_puts = puts[abs(puts['strike'] - current_price) == abs(puts['strike'] - current_price).min()]
         imp_vol = atm_puts.iloc[0]['impliedVolatility'] if not atm_puts.empty else (current_hv / 100.0)
 
@@ -251,13 +264,12 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         otm_puts = puts[puts['strike'] <= target_short_strike].sort_values('strike', ascending=False)
         
         if otm_puts.empty:
-            if dev_mode:
-                otm_puts = puts[puts['strike'] < current_price].sort_values('strike', ascending=False)
+            if dev_mode: otm_puts = puts[puts['strike'] < current_price].sort_values('strike', ascending=False)
             else:
                 target_short_fallback = current_price * 0.95
                 otm_puts = puts[puts['strike'] <= target_short_fallback].sort_values('strike', ascending=False)
 
-        if otm_puts.empty: return None, "No Strikes Found"
+        if otm_puts.empty: return None, "No Safe Strikes"
 
         width = 5.0
         if ticker in ETFS: min_credit = 0.50 
@@ -265,26 +277,23 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         if dev_mode: min_credit = 0.05
 
         best_spread = None
-        rejection_reason = "Credit Too Low"
+        rejection_reason = f"Credit < ${min_credit}"
 
         for index, short_row in otm_puts.iterrows():
             short_strike = short_row['strike']
             bid = short_row['bid']
             ask = short_row['ask']
-            
             if ask <= 0: continue
             
             spread_width = ask - bid
             slippage_pct = spread_width / ask
             is_liquid = dev_mode or (spread_width <= 0.05) or (slippage_pct <= 0.20)
-            
             if not is_liquid: 
                 rejection_reason = "Illiquid Strikes"
                 continue
 
             long_strike_target = short_strike - width
             long_leg = puts[abs(puts['strike'] - long_strike_target) < 0.2] 
-            
             if long_leg.empty: continue 
             long_row = long_leg.iloc[0]
             mid_credit = bid - long_row['ask']
@@ -298,50 +307,39 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
                 exp_date_str = exp_date_obj.strftime("%b %d, %Y")
 
                 best_spread = {
-                    "expiration_raw": best_exp,
-                    "expiration": exp_date_str,
-                    "dte": dte, 
+                    "expiration_raw": best_exp, "expiration": exp_date_str, "dte": dte, 
                     "short": short_strike, "long": long_row['strike'],
                     "credit": mid_credit, "max_loss": max_loss, 
-                    "iv": iv, "roi": roi,
-                    "em": expected_move
+                    "iv": iv, "roi": roi, "em": expected_move
                 }
                 break 
         
         if best_spread and not dev_mode:
             is_safe, msg = is_safe_from_earnings(ticker, best_exp)
-            if not is_safe:
-                return None, f"Earnings on {msg}"
+            if not is_safe: return None, f"Earnings on {msg}"
         
         if best_spread: return best_spread, None
         else: return None, rejection_reason
 
     except Exception as e: return None, f"Error: {str(e)}"
 
-# --- PLOTTING FUNCTION (UPDATED FOR BB) ---
+# --- PLOTTING ---
 def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike, bb_lower, bb_upper):
     fig, ax = plt.subplots(figsize=(4, 1.3)) 
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(BG_COLOR)
-    
     last_60 = hist.tail(60).copy()
     dates = last_60.index
     if 'Open' not in last_60.columns: last_60['Open'] = last_60['Close']
-
     bar_colors = np.where(last_60['Close'] >= last_60['Open'], SUCCESS_COLOR, WARNING_COLOR)
     heights = last_60['Close'] - last_60['Open']
     bottoms = last_60['Open']
-    
     ax.bar(dates, heights, bottom=bottoms, color=bar_colors, width=0.8, align='center', alpha=0.9)
-    
-    # Plot Bollinger Bands faint lines
     ax.plot(dates, last_60['BB_Upper'], color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
     ax.plot(dates, last_60['BB_Lower'], color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
-    
     ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, alpha=0.9)
     ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
     ax.fill_between(dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.1)
-
     ax.grid(True, which='major', linestyle=':', color=GRID_COLOR, alpha=0.3)
     ax.axis('off') 
     plt.tight_layout(pad=0.1)
@@ -366,6 +364,7 @@ with st.sidebar:
 
 # --- SCAN BUTTON ---
 if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
+    st.session_state.scan_log = [] # Clear previous log
     status = st.empty()
     status.text("Checking Market Pulse...")
     market_healthy, spy_price, spy_sma = get_market_health()
@@ -376,62 +375,67 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
         <div class="warning-box">
             <h3 style="color: #d32f2f; margin-bottom: 0px;">🚫 MARKET CAUTION: BEAR REGIME DETECTED</h3>
             <p style="color: white; font-size: 16px;">SPY is trading at <b>${spy_price:.2f}</b>, below the 200 SMA (<b>${spy_sma:.2f}</b>).</p>
-            <p style="color: #bbb; font-size: 14px;">Put Credit Spreads are high-risk in this environment. Enable <b>Dev Mode</b> if you wish to proceed anyway.</p>
-        </div>
-        """, unsafe_allow_html=True)
+        </div>""", unsafe_allow_html=True)
         st.stop()
 
     progress = st.progress(0)
     results = []
     
+    # --- COMMAND LINE LOG CONTAINER (AT BOTTOM) ---
+    st.markdown("---") # Divider before results
+    results_container = st.container() # Place results here
+    
+    st.markdown("### 📟 Scanner Execution Log")
+    log_placeholder = st.empty() # Log will update here live
+
     for i, ticker in enumerate(LIQUID_TICKERS):
         status.text(f"Scanning {ticker}...")
         progress.progress((i + 1) / len(LIQUID_TICKERS))
-        time.sleep(0.25)
+        
+        # Human Jitter
+        time.sleep(random.uniform(1.5, 3.0))
         
         data = get_stock_data(ticker)
-        if not data: continue
+        if not data: 
+            st.session_state.scan_log.append(f"[{ticker}] ❌ Failed to fetch data")
+            continue
         
         spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
         
-        if not spread and reject_reason:
-            status.markdown(f"<span style='color: #777;'>Skipping <b>{ticker}</b>: {reject_reason}</span>", unsafe_allow_html=True)
-            time.sleep(0.01)
-        
         if spread:
-            # --- ADVANCED SCORING (BB + RSI + TREND) ---
-            score = 0
-            
-            # 1. Volatility Edge
-            if spread['iv'] > (data['hv'] + 5.0): score += 30
-            elif spread['iv'] > data['hv']: score += 15
-            
-            # 2. Credit Quality
-            width = spread['short'] - spread['long']
-            if width > 0:
-                credit_ratio = spread['credit'] / width
-                if credit_ratio >= 0.30: score += 20
-                elif credit_ratio >= 0.25: score += 15
-                elif credit_ratio >= 0.15: score += 10
-            
-            # 3. Trend Alignment
-            if data['is_uptrend']: score += 10
-                
-            # 4. DIP LOGIC (Bollinger + RSI)
-            # GOLD: Uptrend + Oversold on BB
-            if data['is_uptrend'] and data['is_oversold_bb']: score += 30
-            # SILVER: Uptrend + Low RSI
-            elif data['is_uptrend'] and data['rsi'] < 45: score += 20
-            # BRONZE: Just Low RSI
-            elif data['rsi'] < 50: score += 10
-            # PENALTY: Overbought
-            if data['is_overbought_bb'] or data['rsi'] > 70: score -= 20
-            
-            score += 20 
-            display_score = min(score, 100.0)
-            
-            if dev_mode or display_score >= 50:
-                results.append({"ticker": ticker, "data": data, "spread": spread, "score": score, "display_score": display_score})
+             st.session_state.scan_log.append(f"[{ticker}] ✅ FOUND TRADE | Credit: ${spread['credit']:.2f}")
+             
+             # Scoring
+             score = 0
+             if spread['iv'] > (data['hv'] + 5.0): score += 30
+             elif spread['iv'] > data['hv']: score += 15
+             width = spread['short'] - spread['long']
+             if width > 0:
+                 credit_ratio = spread['credit'] / width
+                 if credit_ratio >= 0.30: score += 20
+                 elif credit_ratio >= 0.25: score += 15
+                 elif credit_ratio >= 0.15: score += 10
+             
+             if data['is_uptrend']: score += 10
+             
+             # Dip Logic
+             if data['is_uptrend'] and data['is_oversold_bb']: score += 30
+             elif data['is_uptrend'] and data['rsi'] < 45: score += 20
+             elif data['rsi'] < 50: score += 10
+             if data['is_overbought_bb'] or data['rsi'] > 70: score -= 20
+             
+             score += 20 
+             display_score = min(score, 100.0)
+             
+             if dev_mode or display_score >= 50:
+                 results.append({"ticker": ticker, "data": data, "spread": spread, "score": score, "display_score": display_score})
+        else:
+            # Append rejection to log
+            st.session_state.scan_log.append(f"[{ticker}] ⚠️ Skipped: {reject_reason}")
+        
+        # UPDATE LOG LIVE
+        log_text = "\n".join(st.session_state.scan_log[-10:]) # Show last 10 lines
+        log_placeholder.code(log_text, language="text")
     
     progress.empty()
     status.empty()
@@ -440,121 +444,118 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
 # --- DISPLAY LOGIC ---
 if st.session_state.scan_results is not None:
     results = st.session_state.scan_results
-    if not results:
-        st.info("No setups found. (Check 'Dev Mode' to see if strict filters are hiding trades)")
-    else:
-        st.success(f"Found {len(results)} High-Probability Opportunities")
-        cols = st.columns(3)
-        for i, res in enumerate(results):
-            t = res['ticker']
-            d = res['data']
-            s = res['spread']
-            
-            with cols[i % 3]:
-                with st.container(border=True):
-                    pill_class = "price-pill-red" if d['change_pct'] < 0 else "price-pill-green"
-                    badge_text = "ELITE EDGE" if res['display_score'] >= 80 else "SOLID SETUP"
-                    badge_style = "border: 1px solid #00C853; color: #00C853;" if res['display_score'] >= 80 else "border: 1px solid #d4ac0d; color: #d4ac0d;"
-                    
-                    if dev_mode and res['display_score'] < 50:
-                        badge_text = "TEST RESULT"
-                        badge_style = "border: 1px solid gray; color: gray;"
+    with results_container: # Render results in the middle
+        if not results:
+            st.info("No setups found.")
+        else:
+            st.success(f"Found {len(results)} High-Probability Opportunities")
+            cols = st.columns(3)
+            for i, res in enumerate(results):
+                t = res['ticker']
+                d = res['data']
+                s = res['spread']
+                with cols[i % 3]:
+                    with st.container(border=True):
+                        pill_class = "price-pill-red" if d['change_pct'] < 0 else "price-pill-green"
+                        badge_text = "ELITE EDGE" if res['display_score'] >= 80 else "SOLID SETUP"
+                        badge_style = "border: 1px solid #00C853; color: #00C853;" if res['display_score'] >= 80 else "border: 1px solid #d4ac0d; color: #d4ac0d;"
+                        if dev_mode and res['display_score'] < 50:
+                            badge_text = "TEST RESULT"
+                            badge_style = "border: 1px solid gray; color: gray;"
 
-                    st.markdown(f"""
-                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                        <div>
-                            <div style="font-size: 22px; font-weight: 900; color: white; line-height: 1;">
-                                {t} <span style="font-size: 12px; font-weight: 400; color: #aaa;">{d['type_str']}</span>
-                            </div>
-                            <div style="font-size: 11px; color: #888; margin-bottom: 4px;">{d['sector_str']}</div>
-                            <div style="margin-top: 2px;"><span class="{pill_class}">${d['price']:.2f} ({d['change_pct']:.2f}%)</span></div>
-                        </div>
-                        <div class="strategy-badge" style="{badge_style}">{badge_text}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.divider()
-                    
-                    exp_dt = datetime.strptime(s['expiration_raw'], "%Y-%m-%d")
-                    exit_dt = exp_dt - timedelta(days=21)
-                    exit_str = exit_dt.strftime("%b %d, %Y")
-                    
-                    # Trend Context
-                    trend_txt = "⬆ UPTREND" if d['is_uptrend'] else "⬇ DOWNTREND"
-                    
-                    # Tech Status Logic
-                    if d['is_oversold_bb']: 
-                        tech_status = "<span style='color: #00FFAA; font-weight: bold;'>⚡ OVERSOLD (BB Low)</span>"
-                    elif d['rsi'] < 45: 
-                        tech_status = "<span style='color: #00C853;'>✅ HEALTHY DIP</span>"
-                    elif d['is_overbought_bb'] or d['rsi'] > 70:
-                        tech_status = "<span style='color: #FF5252;'>⚠️ OVERBOUGHT</span>"
-                    else:
-                        tech_status = "<span style='color: gray;'>NEUTRAL</span>"
-
-                    c1, c2 = st.columns(2)
-                    with c1:
                         st.markdown(f"""
-                        <div class="metric-label">Strikes</div>
-                        <div class="metric-value">${s['short']:.0f} / ${s['long']:.0f}</div>
-                        <div style="height: 8px;"></div>
-                        <div style="display: flex; gap: 15px;">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                             <div>
-                                <div class="metric-label">Credit</div>
-                                <div class="metric-value" style="color:{SUCCESS_COLOR}">${s['credit']:.2f}</div>
+                                <div style="font-size: 22px; font-weight: 900; color: white; line-height: 1;">
+                                    {t} <span style="font-size: 12px; font-weight: 400; color: #aaa;">{d['type_str']}</span>
+                                </div>
+                                <div style="font-size: 11px; color: #888; margin-bottom: 4px;">{d['sector_str']}</div>
+                                <div style="margin-top: 2px;"><span class="{pill_class}">${d['price']:.2f} ({d['change_pct']:.2f}%)</span></div>
                             </div>
-                            <div>
-                                <div class="metric-label">Max Risk</div>
-                                <div class="metric-value" style="color:#FF5252">${s['max_loss']:.2f}</div>
-                            </div>
+                            <div class="strategy-badge" style="{badge_style}">{badge_text}</div>
                         </div>
                         """, unsafe_allow_html=True)
-                    with c2:
-                        st.markdown(f"""
-                        <div class="metric-label">Expiry</div>
-                        <div class="metric-value">{s['dte']} Days</div>
-                        <div style="height: 8px;"></div>
-                        <div class="metric-label">Tech Context</div>
-                        <div style="font-size: 11px; color: #ccc;">{trend_txt}</div>
-                        <div style="font-size: 12px;">{tech_status}</div>
-                        <div style="font-size: 10px; color: #888;">RSI: {d['rsi']:.0f} | LowBB: ${d['bb_lower']:.2f}</div>
-                        """, unsafe_allow_html=True)
-                    
-                    st.markdown("---")
-                    vc1, vc2 = st.columns([2, 1])
-                    with vc1: st.pyplot(plot_sparkline_cone(d['hist'], d['price'], s['iv'], s['short'], s['long'], d['bb_lower'], d['bb_upper']), use_container_width=True)
-                    with vc2:
-                        st.markdown(f"""
-                        <div class="metric-label" style="text-align: right;">Edge Score</div>
-                        <div class="metric-value" style="text-align: right; color: #d4ac0d;">{res['display_score']:.0f}</div>
-                        """, unsafe_allow_html=True)
-                    
-                    st.markdown(f"""<div class="roc-box"><span style="font-size:11px; color: #00c864; text-transform: uppercase;">Return on Capital</span><br><span style="font-size:18px; font-weight:800; color: #00c864;">{s['roi']:.2f}%</span></div>""", unsafe_allow_html=True)
-                    
-                    add_key = f"add_mode_{t}_{i}"
-                    st.write("") 
-                    if st.button(f"Add {t}", key=f"btn_{t}_{i}", use_container_width=True):
-                        st.session_state[add_key] = True
+                        st.divider()
+                        
+                        exp_dt = datetime.strptime(s['expiration_raw'], "%Y-%m-%d")
+                        exit_dt = exp_dt - timedelta(days=21)
+                        exit_str = exit_dt.strftime("%b %d, %Y")
+                        
+                        trend_txt = "⬆ UPTREND" if d['is_uptrend'] else "⬇ DOWNTREND"
+                        if d['is_oversold_bb']: tech_status = "<span style='color: #00FFAA; font-weight: bold;'>⚡ OVERSOLD (BB Low)</span>"
+                        elif d['rsi'] < 45: tech_status = "<span style='color: #00C853;'>✅ HEALTHY DIP</span>"
+                        elif d['is_overbought_bb'] or d['rsi'] > 70: tech_status = "<span style='color: #FF5252;'>⚠️ OVERBOUGHT</span>"
+                        else: tech_status = "<span style='color: gray;'>NEUTRAL</span>"
 
-                    if st.session_state.get(add_key, False):
-                        st.markdown("##### Size")
-                        num = st.number_input(f"Contracts", min_value=1, value=1, key=f"c_{t}_{i}")
-                        cc1, cc2 = st.columns(2)
-                        with cc1:
-                            if st.button("✅", key=f"ok_{t}_{i}"):
-                                new_trade = {
-                                    "id": f"{t}-{s['short']}-{s['expiration_raw']}",
-                                    "ticker": t, "contracts": num, 
-                                    "short_strike": s['short'], "long_strike": s['long'],
-                                    "expiration": s['expiration_raw'], "credit": s['credit'],
-                                    "entry_date": datetime.now().date().isoformat(),
-                                    "pnl_history": []
-                                }
-                                st.session_state.trades.append(new_trade)
-                                if drive_service: save_to_drive(drive_service, st.session_state.trades)
-                                st.toast(f"Added {t}")
-                                del st.session_state[add_key]
-                                st.rerun()
-                        with cc2:
-                            if st.button("❌", key=f"no_{t}_{i}"):
-                                del st.session_state[add_key]
-                                st.rerun()
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.markdown(f"""
+                            <div class="metric-label">Strikes</div>
+                            <div class="metric-value">${s['short']:.0f} / ${s['long']:.0f}</div>
+                            <div style="height: 8px;"></div>
+                            <div style="display: flex; gap: 15px;">
+                                <div>
+                                    <div class="metric-label">Credit</div>
+                                    <div class="metric-value" style="color:{SUCCESS_COLOR}">${s['credit']:.2f}</div>
+                                </div>
+                                <div>
+                                    <div class="metric-label">Max Risk</div>
+                                    <div class="metric-value" style="color:#FF5252">${s['max_loss']:.2f}</div>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        with c2:
+                            st.markdown(f"""
+                            <div class="metric-label">Expiry</div>
+                            <div class="metric-value">{s['dte']} Days</div>
+                            <div style="height: 8px;"></div>
+                            <div class="metric-label">Tech Context</div>
+                            <div style="font-size: 11px; color: #ccc;">{trend_txt}</div>
+                            <div style="font-size: 12px;">{tech_status}</div>
+                            <div style="font-size: 10px; color: #888;">RSI: {d['rsi']:.0f} | LowBB: ${d['bb_lower']:.2f}</div>
+                            """, unsafe_allow_html=True)
+                        
+                        st.markdown("---")
+                        vc1, vc2 = st.columns([2, 1])
+                        with vc1: st.pyplot(plot_sparkline_cone(d['hist'], d['price'], s['iv'], s['short'], s['long'], d['bb_lower'], d['bb_upper']), use_container_width=True)
+                        with vc2:
+                            st.markdown(f"""
+                            <div class="metric-label" style="text-align: right;">Edge Score</div>
+                            <div class="metric-value" style="text-align: right; color: #d4ac0d;">{res['display_score']:.0f}</div>
+                            """, unsafe_allow_html=True)
+                        
+                        st.markdown(f"""<div class="roc-box"><span style="font-size:11px; color: #00c864; text-transform: uppercase;">Return on Capital</span><br><span style="font-size:18px; font-weight:800; color: #00c864;">{s['roi']:.2f}%</span></div>""", unsafe_allow_html=True)
+                        
+                        add_key = f"add_mode_{t}_{i}"
+                        st.write("") 
+                        if st.button(f"Add {t}", key=f"btn_{t}_{i}", use_container_width=True):
+                            st.session_state[add_key] = True
+
+                        if st.session_state.get(add_key, False):
+                            st.markdown("##### Size")
+                            num = st.number_input(f"Contracts", min_value=1, value=1, key=f"c_{t}_{i}")
+                            cc1, cc2 = st.columns(2)
+                            with cc1:
+                                if st.button("✅", key=f"ok_{t}_{i}"):
+                                    new_trade = {
+                                        "id": f"{t}-{s['short']}-{s['expiration_raw']}",
+                                        "ticker": t, "contracts": num, 
+                                        "short_strike": s['short'], "long_strike": s['long'],
+                                        "expiration": s['expiration_raw'], "credit": s['credit'],
+                                        "entry_date": datetime.now().date().isoformat(),
+                                        "pnl_history": []
+                                    }
+                                    st.session_state.trades.append(new_trade)
+                                    if drive_service: save_to_drive(drive_service, st.session_state.trades)
+                                    st.toast(f"Added {t}")
+                                    del st.session_state[add_key]
+                                    st.rerun()
+                            with cc2:
+                                if st.button("❌", key=f"no_{t}_{i}"):
+                                    del st.session_state[add_key]
+                                    st.rerun()
+
+# --- ALWAYS SHOW LOG AT BOTTOM ---
+if st.session_state.scan_log:
+    with st.expander("Show Full Scanner Log", expanded=True):
+        st.code("\n".join(st.session_state.scan_log), language="text")
