@@ -35,6 +35,46 @@ BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
 
+# --- ZERO-LATENCY METADATA (Replaces API Call) ---
+SECTOR_MAP = {
+    "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "IWM": "Russell 2000 ETF", "DIA": "Dow Jones ETF",
+    "GLD": "Gold Trust", "SLV": "Silver Trust", "TLT": "20+ Yr Treasury Bond", "XLK": "Technology ETF",
+    "XLF": "Financials ETF", "XLE": "Energy ETF", "XLV": "Health Care ETF", "XLI": "Industrials ETF",
+    "XLP": "Cons. Staples ETF", "XLU": "Utilities ETF", "XLY": "Cons. Discret. ETF", "SMH": "Semiconductor ETF",
+    "ARKK": "Innovation ETF", "KRE": "Regional Banking ETF", "XBI": "Biotech ETF", "GDX": "Gold Miners ETF",
+    "EEM": "Emerging Markets", "FXI": "China Large-Cap", "EWZ": "Brazil Capped ETF", "HYG": "High Yield Bond",
+    "LQD": "Inv Grade Corp Bond", "UVXY": "Short-Term Futures", "BITO": "Bitcoin Strategy", "USO": "Oil Fund",
+    "UNG": "Natural Gas Fund", "TQQQ": "ProShares UltraPro QQQ", "SQQQ": "ProShares UltraPro Short",
+    "SOXL": "Direxion Daily Semi Bull", "SOXS": "Direxion Daily Semi Bear",
+    "NVDA": "Semiconductors", "TSLA": "Auto Manufacturers", "AAPL": "Consumer Electronics", "MSFT": "Software - Infra",
+    "AMD": "Semiconductors", "AMZN": "Internet Retail", "META": "Internet Content", "GOOGL": "Internet Content",
+    "NFLX": "Entertainment", "AVGO": "Semiconductors", "QCOM": "Semiconductors", "INTC": "Semiconductors",
+    "MU": "Semiconductors", "ARM": "Semiconductors", "TXN": "Semiconductors", "AMAT": "Semiconductor Equip",
+    "LRCX": "Semiconductor Equip", "ADI": "Semiconductors", "IBM": "IT Services", "CSCO": "Communication Equip",
+    "ORCL": "Software - Infra", "PLTR": "Software - App", "CRM": "Software - App", "ADBE": "Software - Infra",
+    "SNOW": "Software - App", "NOW": "Software - App", "WDAY": "Software - App", "PANW": "Software - Infra",
+    "CRWD": "Software - Infra", "DDOG": "Software - App", "NET": "Software - Infra", "COIN": "Software - Infra",
+    "MSTR": "Software - App", "HOOD": "Software - Infra", "SQ": "Software - Infra", "PYPL": "Credit Services",
+    "V": "Credit Services", "MA": "Credit Services", "AFRM": "Credit Services", "SOFI": "Credit Services",
+    "DKNG": "Gambling", "UBER": "Software - App", "ABNB": "Travel Services", "ROKU": "Entertainment",
+    "SHOP": "Software - App", "DIS": "Entertainment", "NKE": "Footwear & Accessories", "SBUX": "Restaurants",
+    "MCD": "Restaurants", "WMT": "Discount Stores", "TGT": "Discount Stores", "COST": "Discount Stores",
+    "HD": "Home Improvement", "LOW": "Home Improvement", "LULU": "Apparel Retail", "CMG": "Restaurants",
+    "JPM": "Banks - Diversified", "BAC": "Banks - Diversified", "WFC": "Banks - Diversified", "GS": "Capital Markets",
+    "MS": "Capital Markets", "C": "Banks - Diversified", "AXP": "Credit Services", "BLK": "Asset Management",
+    "BA": "Aerospace & Defense", "CAT": "Farm & Heavy Const", "GE": "Specialty Ind Mach", "F": "Auto Manufacturers",
+    "GM": "Auto Manufacturers", "XOM": "Oil & Gas Integrated", "CVX": "Oil & Gas Integrated", "COP": "Oil & Gas E&P",
+    "OXY": "Oil & Gas E&P", "SLB": "Oil & Gas Equip", "HAL": "Oil & Gas Equip", "LLY": "Drug Manufacturers",
+    "UNH": "Healthcare Plans", "JNJ": "Drug Manufacturers", "PFE": "Drug Manufacturers", "MRK": "Drug Manufacturers",
+    "ABBV": "Drug Manufacturers", "BMY": "Drug Manufacturers", "AMGN": "Drug Manufacturers", "GILD": "Drug Manufacturers",
+    "MRNA": "Biotechnology"
+}
+
+ETFS = [
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX",
+    "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS"
+]
+
 # --- INITIALIZE SERVICES ---
 drive_service = None
 try:
@@ -56,45 +96,16 @@ if "scan_results" not in st.session_state:
 if "scan_log" not in st.session_state:
     st.session_state.scan_log = []
 
-# --- BATCH SCAN STATE ---
 if "current_ticker_index" not in st.session_state:
     st.session_state.current_ticker_index = 0
 if "batch_complete" not in st.session_state:
     st.session_state.batch_complete = False
 
-# 1. EXPANDED UNIVERSE
-LIQUID_TICKERS = [
-    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX",
-    "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS",
-    "NVDA", "TSLA", "AAPL", "MSFT", "AMD", "AMZN", "META", "GOOGL", "NFLX", 
-    "AVGO", "QCOM", "INTC", "MU", "ARM", "TXN", "AMAT", "LRCX", "ADI", "IBM", "CSCO", "ORCL",
-    "PLTR", "CRM", "ADBE", "SNOW", "NOW", "WDAY", "PANW", "CRWD", "DDOG", "NET",
-    "COIN", "MSTR", "HOOD", "SQ", "PYPL", "V", "MA", "AFRM", "SOFI",
-    "DKNG", "UBER", "ABNB", "ROKU", "SHOP", "DIS", "NKE", "SBUX", "MCD", "WMT", "TGT", "COST", "HD", "LOW", "LULU", "CMG",
-    "JPM", "BAC", "WFC", "GS", "MS", "C", "AXP", "BLK",
-    "BA", "CAT", "GE", "F", "GM", "XOM", "CVX", "COP", "OXY", "SLB", "HAL",
-    "LLY", "UNH", "JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "MRNA"
-]
-
-ETFS = [
-    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX",
-    "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS"
-]
-
-# --- CUSTOM CSS ---
-st.markdown("""
-<style>
-    .metric-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px; }
-    .metric-value { font-size: 16px; font-weight: 700; color: #FFF; }
-    .price-pill-red { background-color: rgba(255, 75, 75, 0.15); color: #ff4b4b; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
-    .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
-    .strategy-badge { border: 1px solid #d4ac0d; color: #d4ac0d; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
-    .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
-    .status-reject { font-size: 12px; color: #ff4b4b; font-style: italic; }
-    .status-pulse { font-size: 12px; color: #00C853; font-weight: bold; }
-    .stCodeBlock { font-family: 'Courier New', monospace; font-size: 12px; }
-</style>
-""", unsafe_allow_html=True)
+# Use Global Session for Connection Reuse
+session = requests.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+})
 
 # --- TECHNICAL ANALYSIS HELPER ---
 def calculate_rsi(series, period=14):
@@ -126,7 +137,7 @@ def is_safe_from_earnings(ticker, expiration_date_str):
     if ticker in ETFS: return True, "ETF"
     if not finnhub_client: return True, "No API"
     try:
-        time.sleep(0.5) 
+        time.sleep(0.2) # Fast throttle is fine now that we removed other heavy calls
         today = datetime.now().date()
         exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
         earnings = finnhub_client.earnings_calendar(_from=today.strftime("%Y-%m-%d"), to=exp_date.strftime("%Y-%m-%d"), symbol=ticker)
@@ -140,19 +151,37 @@ def is_safe_from_earnings(ticker, expiration_date_str):
 # --- MARKET HEALTH CHECK ---
 def get_market_health():
     try:
-        spy = yf.Ticker("SPY")
+        # Hybrid: Use Finnhub for price (fast/safe) if available
+        if finnhub_client:
+            try:
+                quote = finnhub_client.quote("SPY")
+                current_price = quote['c']
+            except:
+                current_price = 0
+        else:
+            current_price = 0
+
+        # Use Yahoo only for historical SMA
+        spy = yf.Ticker("SPY", session=session)
         hist = safe_yfinance_call(spy.history, period="1y")
-        if hist is None or hist.empty or len(hist) < 200: return True, 0, 0 
-        current_price = hist['Close'].iloc[-1]
+        
+        if hist is None or hist.empty: return True, current_price, 0
+        
+        if current_price == 0: # Fallback if Finnhub failed
+            current_price = hist['Close'].iloc[-1]
+            
         sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
         return current_price > sma_200, current_price, sma_200
     except: return True, 0, 0
 
-# --- DATA FETCHING ---
+# --- DATA FETCHING (OPTIMIZED) ---
 @st.cache_data(ttl=3600)
 def get_stock_data(ticker):
     try:
-        stock = yf.Ticker(ticker)
+        stock = yf.Ticker(ticker, session=session)
+        
+        # WE REMOVED STOCK.INFO -> This stops the throttling!
+        
         hist = safe_yfinance_call(stock.history, period="1y")
         if hist is None or hist.empty: return None
         
@@ -168,7 +197,6 @@ def get_stock_data(ticker):
         hist['SMA_200'] = hist['Close'].rolling(window=200).mean()
         hist['RSI'] = calculate_rsi(hist['Close'])
 
-        # BB
         hist['SMA_20'] = hist['Close'].rolling(window=20).mean()
         hist['STD_20'] = hist['Close'].rolling(window=20).std()
         hist['BB_Upper'] = hist['SMA_20'] + (hist['STD_20'] * 2)
@@ -183,18 +211,9 @@ def get_stock_data(ticker):
         is_oversold_bb = current_price <= (bb_lower * 1.01)
         is_overbought_bb = current_price >= (bb_upper * 0.99)
 
-        try:
-            info = stock.info 
-            q_type = info.get('quoteType', 'EQUITY').upper()
-            if 'ETF' in q_type: type_str = "(ETF)"
-            elif 'INDEX' in q_type: type_str = "(Index)"
-            elif 'EQUITY' in q_type: type_str = "(Stock)"
-            else: type_str = ""
-            sector_str = info.get('sector', '')
-            if not sector_str: sector_str = info.get('category', 'Unknown') 
-        except:
-            type_str = ""
-            sector_str = "-"
+        # FAST METADATA LOOKUP
+        type_str = "(ETF)" if ticker in ETFS else "(Stock)"
+        sector_str = SECTOR_MAP.get(ticker, "Unknown Sector")
 
         return {
             "price": current_price, "change_pct": change_pct, "hv": current_hv,
@@ -208,15 +227,17 @@ def get_stock_data(ticker):
 # --- TRADE LOGIC ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
     try:
+        # Retry options fetching
         try:
             exps = stock_obj.options
         except: 
-            time.sleep(1)
+            time.sleep(1) # Tiny pause
             exps = stock_obj.options
         if not exps: return None, "No Options Chain"
         
         min_days = 14 if dev_mode else 25
         max_days = 60 if dev_mode else 50
+        
         target_min_date = datetime.now() + timedelta(days=min_days)
         target_max_date = datetime.now() + timedelta(days=max_days)
         
@@ -314,7 +335,6 @@ def plot_clean_sparkline(hist, short_strike, long_strike):
     heights = last_60['Close'] - last_60['Open']
     bottoms = last_60['Open']
     ax.bar(dates, heights, bottom=bottoms, color=bar_colors, width=0.8, align='center', alpha=0.9)
-    # Clean chart: No BB lines, just price and strikes
     ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, alpha=0.9)
     ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
     ax.fill_between(dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.1)
@@ -359,12 +379,12 @@ st.progress(start_index / total_tickers)
 # --- SCAN BUTTON ---
 btn_label = "Scan Next 10 Tickers" if start_index < total_tickers else "Scan Complete (Reset to Restart)"
 if st.button(btn_label, disabled=(start_index >= total_tickers)):
-    st.session_state.batch_complete = False # Reset for this run
+    st.session_state.batch_complete = False 
     
     if start_index == 0:
         status = st.empty()
         status.info("Initializing Scanner (Warming up API)...")
-        time.sleep(3) 
+        time.sleep(2) 
         market_healthy, spy_price, spy_sma = get_market_health()
         status.empty()
         
@@ -374,11 +394,8 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
     
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
-    # --- LOG CONTAINER ---
     st.markdown("---") 
     log_placeholder = st.empty()
-    
     fail_count = 0 
 
     for i in range(start_index, end_index):
@@ -386,7 +403,8 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
         status_text.text(f"Scanning {ticker}...")
         progress_bar.progress((i - start_index + 1) / batch_size)
         
-        time.sleep(random.uniform(2.0, 3.5))
+        # Human Jitter (Can be slightly faster now that heavy calls are gone)
+        time.sleep(random.uniform(1.5, 2.5))
         
         data = get_stock_data(ticker)
         if not data: 
@@ -398,7 +416,7 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
             continue
         
         fail_count = 0
-        spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
+        spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker, session=session), data['price'], data['hv'], dev_mode=dev_mode)
         
         if spread:
              st.session_state.scan_log.append(f"[{ticker}] FOUND TRADE | Credit: ${spread['credit']:.2f}")
@@ -413,8 +431,6 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
                  elif credit_ratio >= 0.25: score += 15
                  elif credit_ratio >= 0.15: score += 10
              if data['is_uptrend']: score += 10
-             
-             # Dip Logic
              if data['is_uptrend'] and data['is_oversold_bb']: score += 30
              elif data['is_uptrend'] and data['rsi'] < 45: score += 20
              elif data['rsi'] < 50: score += 10
@@ -435,17 +451,14 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
         log_placeholder.code(log_text, language="text")
 
     st.session_state.current_ticker_index = i + 1
-    st.session_state.batch_complete = True # Trigger display
+    st.session_state.batch_complete = True 
     progress_bar.empty()
     status_text.empty()
     st.rerun() 
 
-# --- DISPLAY LOGIC (ONLY SHOW WHEN BATCH DONE) ---
+# --- DISPLAY LOGIC ---
 if st.session_state.batch_complete and st.session_state.scan_results:
-    
-    # SORT BY BEST SCORE FIRST
     sorted_results = sorted(st.session_state.scan_results, key=lambda x: x['score'], reverse=True)
-    
     st.success(f"Total Opportunities Found: {len(sorted_results)}")
     cols = st.columns(3)
     
@@ -481,7 +494,6 @@ if st.session_state.batch_complete and st.session_state.scan_results:
                 exit_dt = exp_dt - timedelta(days=21)
                 exit_str = exit_dt.strftime("%b %d, %Y")
                 
-                # SIMPLIFIED SIGNAL
                 if d['is_uptrend'] and (d['is_oversold_bb'] or d['rsi'] < 45):
                     signal_html = "<span style='color: #00FFAA; font-weight: bold; font-size: 14px;'>★ BUY NOW (DIP)</span>"
                 elif d['is_uptrend']:
@@ -517,7 +529,6 @@ if st.session_state.batch_complete and st.session_state.scan_results:
                 
                 st.markdown("---")
                 vc1, vc2 = st.columns([2, 1])
-                # Clean Sparkline (No BB lines)
                 with vc1: st.pyplot(plot_clean_sparkline(d['hist'], s['short'], s['long']), use_container_width=True)
                 with vc2:
                     st.markdown(f"""
