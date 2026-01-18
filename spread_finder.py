@@ -5,6 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats as si
 from datetime import datetime, timedelta
+import finnhub
+import time
 
 # Import persistence
 from persistence import (
@@ -17,6 +19,14 @@ from persistence import (
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Finder")
 
+# --- API KEYS (SECURE) ---
+try:
+    FINNHUB_API_KEY = st.secrets["general"]["FINNHUB_API_KEY"]
+except (FileNotFoundError, KeyError):
+    # Fallback for local testing without secrets file, or warn user
+    st.error("⚠️ FINNHUB_API_KEY not found in .streamlit/secrets.toml")
+    st.stop()
+
 # --- CONSTANTS & COLORS ---
 SUCCESS_COLOR = "#00C853"
 WARNING_COLOR = "#d32f2f"
@@ -24,12 +34,19 @@ BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
 
-# --- INITIALIZE DRIVE SERVICE ---
+# --- INITIALIZE SERVICES ---
 drive_service = None
 try:
     drive_service = build_drive_service_from_session()
 except Exception:
     drive_service = None
+
+# Initialize Finnhub Client
+try:
+    finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
+except Exception as e:
+    st.error(f"Failed to initialize Finnhub: {e}")
+    finnhub_client = None
 
 # Load trades if logged in
 if "trades" not in st.session_state:
@@ -38,7 +55,6 @@ if "trades" not in st.session_state:
     else:
         st.session_state.trades = []
 
-# --- PERSISTENCE: INITIALIZE SCAN RESULTS ---
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 
@@ -56,6 +72,12 @@ LIQUID_TICKERS = [
     "LLY", "UNH", "JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "MRNA"
 ]
 
+# ETF LIST (To skip API calls and assume safe)
+ETFS = [
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX",
+    "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS"
+]
+
 # --- CUSTOM CSS ---
 st.markdown("""
 <style>
@@ -69,6 +91,48 @@ st.markdown("""
     .status-pulse { font-size: 12px; color: #00C853; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
+
+# --- EARNINGS SAFETY CHECK (NEW) ---
+def is_safe_from_earnings(ticker, days_ahead=50):
+    """
+    Returns (True, msg) if:
+    1. It is an ETF (Always safe)
+    2. No earnings found in the next 'days_ahead' via Finnhub
+    """
+    # 1. ETF Bypass (Save API calls)
+    if ticker in ETFS:
+        return True, "ETF"
+
+    # 2. Check Finnhub
+    if not finnhub_client:
+        return True, "No API" # If API fails to load, default to allow (or set False to be strict)
+
+    try:
+        today = datetime.now().date()
+        end_date = today + timedelta(days=days_ahead)
+        
+        # Get earnings calendar
+        # Note: Finnhub free tier has rate limits, handle gracefully
+        earnings = finnhub_client.earnings_calendar(
+            _from=today.strftime("%Y-%m-%d"),
+            to=end_date.strftime("%Y-%m-%d"),
+            symbol=ticker
+        )
+        
+        # Check if list is populated
+        if earnings and 'earningsCalendar' in earnings:
+            if len(earnings['earningsCalendar']) > 0:
+                report_date = earnings['earningsCalendar'][0]['date']
+                return False, report_date # UNSAFE: Earnings found
+        
+        return True, "Clear" # SAFE: No earnings found
+        
+    except Exception as e:
+        # If API fails (Rate limit 429), we can choose to skip or allow.
+        # Allowing it ensures the scanner doesn't break, but risks an earnings slip.
+        # Printing error to console for debugging
+        print(f"Finnhub Error for {ticker}: {e}")
+        return True, "Error"
 
 # --- MATH HELPER ---
 def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_rate=0.045):
@@ -134,53 +198,11 @@ def get_stock_data(ticker):
             type_str = ""
             sector_str = "-"
 
-        rank = 50
-        if not hist['HV'].empty:
-            mn, mx = hist['HV'].min(), hist['HV'].max()
-            if mx != mn: 
-                rank = ((current_hv - mn) / (mx - mn)) * 100
-
-        earnings_days = 999
-        next_earnings_date_str = "Unknown"
-        try:
-            future_dates = []
-            try:
-                dates_df = stock.get_earnings_dates(limit=8)
-                if dates_df is not None and not dates_df.empty:
-                    for d in dates_df.index:
-                        if d.tzinfo: d = d.tz_localize(None)
-                        if d.date() > datetime.now().date():
-                            future_dates.append(d.date())
-            except: pass
-
-            if not future_dates:
-                try:
-                    cal = stock.calendar
-                    if cal is not None:
-                        if isinstance(cal, dict):
-                            for k in ['Earnings Date', 'Earnings High']:
-                                if k in cal:
-                                    ds = cal[k]
-                                    if isinstance(ds, list):
-                                        for d in ds:
-                                            if d.date() > datetime.now().date():
-                                                future_dates.append(d.date())
-                except: pass
-
-            if future_dates:
-                next_date = min(future_dates)
-                earnings_days = (next_date - datetime.now().date()).days
-                next_earnings_date_str = next_date.strftime("%b %d")
-        except: pass 
-
         return {
             "price": current_price,
             "change_pct": change_pct,
-            "rank": rank,
             "hv": current_hv,
             "is_above_sma": is_above_sma,
-            "earnings_days": earnings_days,
-            "earnings_date_str": next_earnings_date_str,
             "type_str": type_str,
             "sector_str": sector_str,
             "hist": hist
@@ -188,7 +210,7 @@ def get_stock_data(ticker):
     except: return None
 
 # --- TRADE LOGIC (STRICT) ---
-def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev_mode=False):
+def find_optimal_spread(stock_obj, current_price, current_hv, dev_mode=False):
     try:
         exps = stock_obj.options
         if not exps: return None
@@ -211,10 +233,6 @@ def find_optimal_spread(stock_obj, current_price, current_hv, earnings_days, dev
         if not valid_exps: return None
         best_exp = max(valid_exps) 
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
-
-        # 2. SAFETY: CLIFF-PROOF
-        if not dev_mode and earnings_days <= dte + 1:
-            return None
 
         chain = stock_obj.option_chain(best_exp)
         puts = chain.puts
@@ -369,6 +387,16 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     results = []
     
     for i, ticker in enumerate(LIQUID_TICKERS):
+        # 3. EARNINGS SAFETY CHECK (PRE-FLIGHT)
+        # Skip checking earnings if in Dev Mode
+        if not dev_mode:
+            is_safe, msg = is_safe_from_earnings(ticker)
+            if not is_safe:
+                status.text(f"Skipping {ticker} (Earnings on {msg})...")
+                # Update progress bar even if skipping to keep it smooth
+                progress.progress((i + 1) / len(LIQUID_TICKERS))
+                continue
+        
         status.caption(f"Analyzing {ticker}...")
         progress.progress((i + 1) / len(LIQUID_TICKERS))
         
@@ -379,7 +407,6 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
             yf.Ticker(ticker), 
             data['price'], 
             data['hv'], 
-            data['earnings_days'], 
             dev_mode=dev_mode
         )
         
@@ -410,7 +437,7 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
 if st.session_state.scan_results is not None:
     results = st.session_state.scan_results
     if not results:
-        st.info("No setups found meeting strict criteria. (Market is currently tight)")
+        st.info("No setups found meeting strict criteria. (Earnings season may be filtering out single stocks)")
     else:
         st.success(f"Found {len(results)} High-Probability Opportunities")
         cols = st.columns(3)
