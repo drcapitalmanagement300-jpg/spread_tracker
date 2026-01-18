@@ -86,9 +86,8 @@ st.markdown("""
     .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
     .strategy-badge { border: 1px solid #d4ac0d; color: #d4ac0d; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; }
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
-    .warning-box { background-color: rgba(211, 47, 47, 0.1); border: 1px solid #d32f2f; border-radius: 8px; padding: 15px; margin-bottom: 20px; text-align: center; }
-    .status-pulse { font-size: 12px; color: #00C853; font-weight: bold; }
     .status-reject { font-size: 12px; color: #ff4b4b; font-style: italic; }
+    .status-pulse { font-size: 12px; color: #00C853; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -102,10 +101,6 @@ def calculate_rsi(series, period=14):
 
 # --- EARNINGS SAFETY CHECK (DYNAMIC + THROTTLED) ---
 def is_safe_from_earnings(ticker, expiration_date_str):
-    """
-    Returns (True, msg) if safe.
-    Returns (False, date_str) if unsafe.
-    """
     if ticker in ETFS:
         return True, "ETF"
 
@@ -113,9 +108,7 @@ def is_safe_from_earnings(ticker, expiration_date_str):
         return True, "No API"
 
     try:
-        # THROTTLE: Sleep 1s before calling API to respect 60 calls/min limit
-        time.sleep(1.0) 
-        
+        time.sleep(0.5) 
         today = datetime.now().date()
         exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
         
@@ -128,15 +121,10 @@ def is_safe_from_earnings(ticker, expiration_date_str):
         if earnings and 'earningsCalendar' in earnings:
             if len(earnings['earningsCalendar']) > 0:
                 report_date = earnings['earningsCalendar'][0]['date']
-                return False, report_date # UNSAFE
-        
+                return False, report_date
         return True, "Clear" 
-        
     except Exception as e:
         print(f"Finnhub Error for {ticker}: {e}")
-        # If rate limit hit (429), force sleep and retry or skip.
-        if "429" in str(e):
-            time.sleep(5) # Cooldown
         return True, "Error"
 
 # --- MARKET HEALTH CHECK ---
@@ -153,12 +141,15 @@ def get_market_health():
     except Exception as e:
         return True, 0, 0
 
-# --- DATA FETCHING ---
+# --- DATA FETCHING (WITH BOLLINGER BANDS) ---
 @st.cache_data(ttl=3600)
 def get_stock_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="1y")
+        try:
+            hist = stock.history(period="1y")
+        except: return None
+            
         if hist.empty: return None
         
         current_price = hist['Close'].iloc[-1]
@@ -170,17 +161,28 @@ def get_stock_data(ticker):
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
         current_hv = hist['HV'].iloc[-1] if not pd.isna(hist['HV'].iloc[-1]) else 0
 
-        # Technicals
+        # Technicals: SMA & RSI
         hist['SMA_100'] = hist['Close'].rolling(window=100).mean()
         hist['SMA_200'] = hist['Close'].rolling(window=200).mean()
         hist['RSI'] = calculate_rsi(hist['Close'])
 
-        sma_100 = hist['SMA_100'].iloc[-1] if len(hist) >= 100 else current_price
+        # Technicals: Bollinger Bands (20, 2)
+        hist['SMA_20'] = hist['Close'].rolling(window=20).mean()
+        hist['STD_20'] = hist['Close'].rolling(window=20).std()
+        hist['BB_Upper'] = hist['SMA_20'] + (hist['STD_20'] * 2)
+        hist['BB_Lower'] = hist['SMA_20'] - (hist['STD_20'] * 2)
+
         sma_200 = hist['SMA_200'].iloc[-1] if len(hist) >= 200 else current_price
+        bb_upper = hist['BB_Upper'].iloc[-1] if not pd.isna(hist['BB_Upper'].iloc[-1]) else current_price * 1.05
+        bb_lower = hist['BB_Lower'].iloc[-1] if not pd.isna(hist['BB_Lower'].iloc[-1]) else current_price * 0.95
         current_rsi = hist['RSI'].iloc[-1] if len(hist) >= 14 else 50
 
-        is_above_sma = current_price > sma_100
+        is_above_sma = current_price > hist['SMA_100'].iloc[-1] if len(hist) >= 100 else True
         is_uptrend = current_price > sma_200
+        
+        # Determine Tech Status
+        is_oversold_bb = current_price <= (bb_lower * 1.01) # Within 1% of lower band
+        is_overbought_bb = current_price >= (bb_upper * 0.99)
 
         # --- SECTOR & TYPE FETCH ---
         try:
@@ -190,10 +192,8 @@ def get_stock_data(ticker):
             elif 'INDEX' in q_type: type_str = "(Index)"
             elif 'EQUITY' in q_type: type_str = "(Stock)"
             else: type_str = ""
-
             sector_str = info.get('sector', '')
-            if not sector_str:
-                sector_str = info.get('category', 'Unknown Sector') 
+            if not sector_str: sector_str = info.get('category', 'Unknown Sector') 
         except:
             type_str = ""
             sector_str = "-"
@@ -205,24 +205,22 @@ def get_stock_data(ticker):
             "is_above_sma": is_above_sma,
             "is_uptrend": is_uptrend,
             "rsi": current_rsi,
-            "sma_200": sma_200,
+            "bb_lower": bb_lower,
+            "bb_upper": bb_upper,
+            "is_oversold_bb": is_oversold_bb,
+            "is_overbought_bb": is_overbought_bb,
             "type_str": type_str,
             "sector_str": sector_str,
             "hist": hist
         }
     except: return None
 
-# --- TRADE LOGIC (OPTIMIZED ORDER) ---
+# --- TRADE LOGIC ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
-    """
-    Returns: (spread_dict, rejection_reason_string)
-    OPTIMIZATION: Checks Math FIRST, then API.
-    """
     try:
         exps = stock_obj.options
         if not exps: return None, "No Options Chain"
         
-        # 1. DTE TUNING
         min_days = 14 if dev_mode else 25
         max_days = 60 if dev_mode else 50
         
@@ -247,7 +245,6 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         atm_puts = puts[abs(puts['strike'] - current_price) == abs(puts['strike'] - current_price).min()]
         imp_vol = atm_puts.iloc[0]['impliedVolatility'] if not atm_puts.empty else (current_hv / 100.0)
 
-        # 3. TARGETING (0.75x EM)
         expected_move = current_price * imp_vol * np.sqrt(dte/365) * 0.75
         target_short_strike = current_price - expected_move
         
@@ -262,20 +259,14 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
 
         if otm_puts.empty: return None, "No Strikes Found"
 
-        # 4. BIFURCATED FILTERING
         width = 5.0
-        
-        if ticker in ETFS:
-            min_credit = 0.50 
-        else:
-            min_credit = 0.70 
-            
+        if ticker in ETFS: min_credit = 0.50 
+        else: min_credit = 0.70 
         if dev_mode: min_credit = 0.05
 
         best_spread = None
         rejection_reason = "Credit Too Low"
 
-        # MATH FIRST: Find a spread that works financially
         for index, short_row in otm_puts.iterrows():
             short_strike = short_row['strike']
             bid = short_row['bid']
@@ -317,21 +308,18 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
                 }
                 break 
         
-        # API CHECK LAST: Only check earnings if the math worked!
         if best_spread and not dev_mode:
             is_safe, msg = is_safe_from_earnings(ticker, best_exp)
             if not is_safe:
                 return None, f"Earnings on {msg}"
         
-        if best_spread:
-            return best_spread, None
-        else:
-            return None, rejection_reason
+        if best_spread: return best_spread, None
+        else: return None, rejection_reason
 
     except Exception as e: return None, f"Error: {str(e)}"
 
-# --- PLOTTING FUNCTION ---
-def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
+# --- PLOTTING FUNCTION (UPDATED FOR BB) ---
+def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike, bb_lower, bb_upper):
     fig, ax = plt.subplots(figsize=(4, 1.3)) 
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(BG_COLOR)
@@ -345,21 +333,14 @@ def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
     bottoms = last_60['Open']
     
     ax.bar(dates, heights, bottom=bottoms, color=bar_colors, width=0.8, align='center', alpha=0.9)
+    
+    # Plot Bollinger Bands faint lines
+    ax.plot(dates, last_60['BB_Upper'], color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
+    ax.plot(dates, last_60['BB_Lower'], color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
+    
     ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, alpha=0.9)
     ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
     ax.fill_between(dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.1)
-
-    days_proj = 30
-    safe_iv = iv if iv > 0 else 30
-    vol_move = current_price * (safe_iv/100) * np.sqrt(np.arange(1, days_proj+1)/365)
-    upper_cone = current_price + vol_move
-    lower_cone = current_price - vol_move
-    future_dates = [dates[-1] + timedelta(days=int(i)) for i in range(1, days_proj+1)]
-    
-    ax.fill_between(future_dates, lower_cone, upper_cone, color='#00FFAA', alpha=0.1)
-    ax.plot(future_dates, upper_cone, color='gray', linestyle=':', lw=0.5)
-    ax.plot(future_dates, lower_cone, color='gray', linestyle=':', lw=0.5)
-    ax.fill_between(future_dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.08)
 
     ax.grid(True, which='major', linestyle=':', color=GRID_COLOR, alpha=0.3)
     ax.axis('off') 
@@ -385,14 +366,9 @@ with st.sidebar:
 
 # --- SCAN BUTTON ---
 if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
-    
-    # 1. MARKET HEALTH CHECK
     status = st.empty()
     status.text("Checking Market Pulse...")
-    
     market_healthy, spy_price, spy_sma = get_market_health()
-    
-    # PULSE INDICATOR (Prove data is flowing)
     st.markdown(f"<div class='status-pulse'>Market Data Active | SPY: ${spy_price:.2f}</div>", unsafe_allow_html=True)
     
     if not market_healthy and not dev_mode:
@@ -405,35 +381,25 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
         """, unsafe_allow_html=True)
         st.stop()
 
-    # 2. PROCEED IF HEALTHY
     progress = st.progress(0)
     results = []
     
     for i, ticker in enumerate(LIQUID_TICKERS):
-        
         status.text(f"Scanning {ticker}...")
         progress.progress((i + 1) / len(LIQUID_TICKERS))
+        time.sleep(0.25)
         
         data = get_stock_data(ticker)
         if not data: continue
         
-        # Pass Ticker name to apply bifurcated logic
-        spread, reject_reason = find_optimal_spread(
-            ticker, 
-            yf.Ticker(ticker), 
-            data['price'], 
-            data['hv'], 
-            dev_mode=dev_mode
-        )
+        spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
         
-        # VISIBILITY: Show why it was skipped if it failed
         if not spread and reject_reason:
             status.markdown(f"<span style='color: #777;'>Skipping <b>{ticker}</b>: {reject_reason}</span>", unsafe_allow_html=True)
-            # Sleep tiny amount so the human eye can see the reject reason flash
             time.sleep(0.01)
         
         if spread:
-            # --- SCORING LOGIC (UPDATED WITH PRICE ACTION) ---
+            # --- ADVANCED SCORING (BB + RSI + TREND) ---
             score = 0
             
             # 1. Volatility Edge
@@ -448,18 +414,20 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
                 elif credit_ratio >= 0.25: score += 15
                 elif credit_ratio >= 0.15: score += 10
             
-            # 3. Trend Alignment (Buy the Dip in Uptrend)
-            if data['is_uptrend']: 
-                score += 10 # Price > SMA 200
+            # 3. Trend Alignment
+            if data['is_uptrend']: score += 10
                 
-            # 4. Dip Logic (RSI)
-            rsi = data['rsi']
-            if rsi < 30: score += 25 # Oversold (Great entry)
-            elif rsi < 50: score += 15 # Healthy Dip (Good entry)
-            elif rsi > 70: score -= 15 # Overbought (Bad entry)
+            # 4. DIP LOGIC (Bollinger + RSI)
+            # GOLD: Uptrend + Oversold on BB
+            if data['is_uptrend'] and data['is_oversold_bb']: score += 30
+            # SILVER: Uptrend + Low RSI
+            elif data['is_uptrend'] and data['rsi'] < 45: score += 20
+            # BRONZE: Just Low RSI
+            elif data['rsi'] < 50: score += 10
+            # PENALTY: Overbought
+            if data['is_overbought_bb'] or data['rsi'] > 70: score -= 20
             
-            score += 20 # Baseline for passing filters
-            
+            score += 20 
             display_score = min(score, 100.0)
             
             if dev_mode or display_score >= 50:
@@ -506,14 +474,22 @@ if st.session_state.scan_results is not None:
                     """, unsafe_allow_html=True)
                     st.divider()
                     
-                    # Calculate Exit Target (21 Days prior to Exp)
                     exp_dt = datetime.strptime(s['expiration_raw'], "%Y-%m-%d")
                     exit_dt = exp_dt - timedelta(days=21)
                     exit_str = exit_dt.strftime("%b %d, %Y")
                     
                     # Trend Context
-                    rsi_color = "#00C853" if d['rsi'] < 50 else "#FFA726"
                     trend_txt = "⬆ UPTREND" if d['is_uptrend'] else "⬇ DOWNTREND"
+                    
+                    # Tech Status Logic
+                    if d['is_oversold_bb']: 
+                        tech_status = "<span style='color: #00FFAA; font-weight: bold;'>⚡ OVERSOLD (BB Low)</span>"
+                    elif d['rsi'] < 45: 
+                        tech_status = "<span style='color: #00C853;'>✅ HEALTHY DIP</span>"
+                    elif d['is_overbought_bb'] or d['rsi'] > 70:
+                        tech_status = "<span style='color: #FF5252;'>⚠️ OVERBOUGHT</span>"
+                    else:
+                        tech_status = "<span style='color: gray;'>NEUTRAL</span>"
 
                     c1, c2 = st.columns(2)
                     with c1:
@@ -536,16 +512,16 @@ if st.session_state.scan_results is not None:
                         st.markdown(f"""
                         <div class="metric-label">Expiry</div>
                         <div class="metric-value">{s['dte']} Days</div>
-                        <div style="font-size: 10px; color: gray;">{s['expiration']}</div>
                         <div style="height: 8px;"></div>
                         <div class="metric-label">Tech Context</div>
-                        <div style="font-size: 12px; color: #ccc;">{trend_txt}</div>
-                        <div style="font-size: 12px; color: {rsi_color};">RSI: {d['rsi']:.0f}</div>
+                        <div style="font-size: 11px; color: #ccc;">{trend_txt}</div>
+                        <div style="font-size: 12px;">{tech_status}</div>
+                        <div style="font-size: 10px; color: #888;">RSI: {d['rsi']:.0f} | LowBB: ${d['bb_lower']:.2f}</div>
                         """, unsafe_allow_html=True)
                     
                     st.markdown("---")
                     vc1, vc2 = st.columns([2, 1])
-                    with vc1: st.pyplot(plot_sparkline_cone(d['hist'], d['price'], s['iv'], s['short'], s['long']), use_container_width=True)
+                    with vc1: st.pyplot(plot_sparkline_cone(d['hist'], d['price'], s['iv'], s['short'], s['long'], d['bb_lower'], d['bb_upper']), use_container_width=True)
                     with vc2:
                         st.markdown(f"""
                         <div class="metric-label" style="text-align: right;">Edge Score</div>
