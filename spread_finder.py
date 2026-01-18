@@ -23,8 +23,7 @@ st.set_page_config(layout="wide", page_title="Spread Finder")
 try:
     FINNHUB_API_KEY = st.secrets["general"]["FINNHUB_API_KEY"]
 except (FileNotFoundError, KeyError):
-    # Fallback for local testing without secrets file, or warn user
-    st.error("⚠️ FINNHUB_API_KEY not found in .streamlit/secrets.toml")
+    st.error("⚠️ FINNHUB_API_KEY not found. Please add it to .streamlit/secrets.toml")
     st.stop()
 
 # --- CONSTANTS & COLORS ---
@@ -72,7 +71,7 @@ LIQUID_TICKERS = [
     "LLY", "UNH", "JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "MRNA"
 ]
 
-# ETF LIST (To skip API calls and assume safe)
+# ETF LIST (To skip earnings checks and apply lower credit threshold)
 ETFS = [
     "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX",
     "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS"
@@ -92,62 +91,40 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- EARNINGS SAFETY CHECK (NEW) ---
-def is_safe_from_earnings(ticker, days_ahead=50):
+# --- EARNINGS SAFETY CHECK (DYNAMIC) ---
+def is_safe_from_earnings(ticker, expiration_date_str):
     """
     Returns (True, msg) if:
     1. It is an ETF (Always safe)
-    2. No earnings found in the next 'days_ahead' via Finnhub
+    2. No earnings found between TODAY and EXPIRATION_DATE
     """
-    # 1. ETF Bypass (Save API calls)
     if ticker in ETFS:
         return True, "ETF"
 
-    # 2. Check Finnhub
     if not finnhub_client:
-        return True, "No API" # If API fails to load, default to allow (or set False to be strict)
+        return True, "No API"
 
     try:
         today = datetime.now().date()
-        end_date = today + timedelta(days=days_ahead)
+        exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
         
-        # Get earnings calendar
-        # Note: Finnhub free tier has rate limits, handle gracefully
+        # Ask Finnhub: "Any earnings between NOW and EXPIRATION?"
         earnings = finnhub_client.earnings_calendar(
             _from=today.strftime("%Y-%m-%d"),
-            to=end_date.strftime("%Y-%m-%d"),
+            to=exp_date.strftime("%Y-%m-%d"),
             symbol=ticker
         )
         
-        # Check if list is populated
         if earnings and 'earningsCalendar' in earnings:
             if len(earnings['earningsCalendar']) > 0:
                 report_date = earnings['earningsCalendar'][0]['date']
-                return False, report_date # UNSAFE: Earnings found
+                return False, report_date # UNSAFE: Earnings detected before expiry
         
-        return True, "Clear" # SAFE: No earnings found
+        return True, "Clear" 
         
     except Exception as e:
-        # If API fails (Rate limit 429), we can choose to skip or allow.
-        # Allowing it ensures the scanner doesn't break, but risks an earnings slip.
-        # Printing error to console for debugging
         print(f"Finnhub Error for {ticker}: {e}")
         return True, "Error"
-
-# --- MATH HELPER ---
-def get_implied_volatility(price, strike, time_to_exp, market_price, risk_free_rate=0.045):
-    try:
-        sigma = 0.5
-        for i in range(20):
-            d1 = (np.log(price / strike) + (risk_free_rate + 0.5 * sigma ** 2) * time_to_exp) / (sigma * np.sqrt(time_to_exp))
-            d2 = d1 - sigma * np.sqrt(time_to_exp)
-            put_price = strike * np.exp(-risk_free_rate * time_to_exp) * si.norm.cdf(-d2) - price * si.norm.cdf(-d1)
-            vega = price * np.sqrt(time_to_exp) * si.norm.pdf(d1)
-            diff = put_price - market_price
-            if abs(diff) < 1e-5: break
-            sigma = sigma - diff / vega
-        return abs(sigma)
-    except: return 0.0
 
 # --- MARKET HEALTH CHECK ---
 def get_market_health():
@@ -209,8 +186,8 @@ def get_stock_data(ticker):
         }
     except: return None
 
-# --- TRADE LOGIC (STRICT) ---
-def find_optimal_spread(stock_obj, current_price, current_hv, dev_mode=False):
+# --- TRADE LOGIC (BIFURCATED) ---
+def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
     try:
         exps = stock_obj.options
         if not exps: return None
@@ -231,8 +208,15 @@ def find_optimal_spread(stock_obj, current_price, current_hv, dev_mode=False):
             except: pass
             
         if not valid_exps: return None
-        best_exp = max(valid_exps) 
+        best_exp = max(valid_exps) # Chosen monthly expiration
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
+
+        # --- DYNAMIC EARNINGS CHECK ---
+        # We only check if THIS specific expiration is safe.
+        if not dev_mode:
+            is_safe, msg = is_safe_from_earnings(ticker, best_exp)
+            if not is_safe:
+                return None # Skip unsafe trade
 
         chain = stock_obj.option_chain(best_exp)
         puts = chain.puts
@@ -255,9 +239,14 @@ def find_optimal_spread(stock_obj, current_price, current_hv, dev_mode=False):
 
         if otm_puts.empty: return None
 
-        # 4. STRICT FILTERS
+        # 4. BIFURCATED FILTERING
         width = 5.0
-        min_credit = 0.70 
+        
+        if ticker in ETFS:
+            min_credit = 0.50 # ETF Strategy (Income Focus)
+        else:
+            min_credit = 0.70 # Stock Strategy (Premium Focus)
+            
         if dev_mode: min_credit = 0.05
 
         best_spread = None
@@ -269,14 +258,12 @@ def find_optimal_spread(stock_obj, current_price, current_hv, dev_mode=False):
             
             if ask <= 0: continue
             
-            # Liquidity: Tolerant logic
             spread_width = ask - bid
             slippage_pct = spread_width / ask
             is_liquid = dev_mode or (spread_width <= 0.05) or (slippage_pct <= 0.20)
             
             if not is_liquid: continue
 
-            # Long Leg
             long_strike_target = short_strike - width
             long_leg = puts[abs(puts['strike'] - long_strike_target) < 0.2] 
             
@@ -387,15 +374,6 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     results = []
     
     for i, ticker in enumerate(LIQUID_TICKERS):
-        # 3. EARNINGS SAFETY CHECK (PRE-FLIGHT)
-        # Skip checking earnings if in Dev Mode
-        if not dev_mode:
-            is_safe, msg = is_safe_from_earnings(ticker)
-            if not is_safe:
-                status.text(f"Skipping {ticker} (Earnings on {msg})...")
-                # Update progress bar even if skipping to keep it smooth
-                progress.progress((i + 1) / len(LIQUID_TICKERS))
-                continue
         
         status.caption(f"Analyzing {ticker}...")
         progress.progress((i + 1) / len(LIQUID_TICKERS))
@@ -403,7 +381,9 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
         data = get_stock_data(ticker)
         if not data: continue
         
+        # Pass Ticker name to apply bifurcated logic
         spread = find_optimal_spread(
+            ticker, 
             yf.Ticker(ticker), 
             data['price'], 
             data['hv'], 
@@ -437,7 +417,7 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
 if st.session_state.scan_results is not None:
     results = st.session_state.scan_results
     if not results:
-        st.info("No setups found meeting strict criteria. (Earnings season may be filtering out single stocks)")
+        st.info("No setups found. (Check 'Dev Mode' to see if strict filters are hiding trades)")
     else:
         st.success(f"Found {len(results)} High-Probability Opportunities")
         cols = st.columns(3)
@@ -477,7 +457,6 @@ if st.session_state.scan_results is not None:
 
                     c1, c2 = st.columns(2)
                     with c1:
-                        # Added Max Risk side-by-side with Credit
                         st.markdown(f"""
                         <div class="metric-label">Strikes</div>
                         <div class="metric-value">${s['short']:.0f} / ${s['long']:.0f}</div>
