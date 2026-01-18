@@ -35,7 +35,7 @@ BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
 
-# --- SECTOR MAP ---
+# --- SECTOR MAP (Static Data to save API calls) ---
 SECTOR_MAP = {
     "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "IWM": "Russell 2000 ETF", "DIA": "Dow Jones ETF",
     "GLD": "Gold Trust", "SLV": "Silver Trust", "TLT": "20+ Yr Treasury Bond", "XLK": "Technology ETF",
@@ -103,12 +103,6 @@ if "current_ticker_index" not in st.session_state:
 if "batch_complete" not in st.session_state:
     st.session_state.batch_complete = False
 
-# Global Session
-session = requests.Session()
-session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-})
-
 # --- TECHNICAL ANALYSIS HELPER ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -162,8 +156,8 @@ def get_market_health():
         else:
             current_price = 0
 
-        # Use Yahoo for SMA
-        spy = yf.Ticker("SPY", session=session)
+        # Use Yahoo for SMA (No Session passed)
+        spy = yf.Ticker("SPY")
         hist = safe_yfinance_call(spy.history, period="1y")
         
         if hist is None or hist.empty: return True, current_price, 0
@@ -175,7 +169,7 @@ def get_market_health():
         return current_price > sma_200, current_price, sma_200
     except: return True, 0, 0
 
-# --- BULK DATA PROCESSING (FIXED) ---
+# --- BULK DATA PROCESSING ---
 def process_bulk_data(df, ticker):
     """
     Extracts single ticker data from the bulk DataFrame.
@@ -183,19 +177,16 @@ def process_bulk_data(df, ticker):
     try:
         hist = pd.DataFrame()
         
-        # KEY FIX: Handle the MultiIndex correctly based on group_by='ticker'
+        # Handle MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
-            # If ticker is top level
             try:
                 ticker_df = df[ticker].copy()
             except KeyError:
                 return None
         else:
-            # If flat (single ticker downloaded), columns are OHLC directly
-            # This happens if batch size is 1 or only 1 succeeded
+            # If flat (single ticker downloaded)
             ticker_df = df.copy()
 
-        # Normalize Columns
         if 'Close' not in ticker_df.columns:
             return None
             
@@ -261,7 +252,6 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         
         min_days = 14 if dev_mode else 25
         max_days = 60 if dev_mode else 50
-        
         target_min_date = datetime.now() + timedelta(days=min_days)
         target_max_date = datetime.now() + timedelta(days=max_days)
         
@@ -438,7 +428,6 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
         status_text.text(f"Analyzing {ticker}...")
         progress_bar.progress((i + 1) / len(current_batch_tickers))
         
-        # Use data from Bulk Dataframe
         if bulk_data is not None and not bulk_data.empty:
             data = process_bulk_data(bulk_data, ticker)
         else:
@@ -449,7 +438,9 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
             continue
         
         time.sleep(random.uniform(1.0, 2.0))
-        spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker, session=session), data['price'], data['hv'], dev_mode=dev_mode)
+        
+        # FIXED: Removed session=session argument
+        spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
         
         if spread:
              st.session_state.scan_log.append(f"[{ticker}] FOUND TRADE | Credit: ${spread['credit']:.2f}")
