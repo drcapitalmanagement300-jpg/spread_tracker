@@ -35,7 +35,7 @@ BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
 
-# --- SECTOR MAP (Static Data to save API calls) ---
+# --- SECTOR MAP ---
 SECTOR_MAP = {
     "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "IWM": "Russell 2000 ETF", "DIA": "Dow Jones ETF",
     "GLD": "Gold Trust", "SLV": "Silver Trust", "TLT": "20+ Yr Treasury Bond", "XLK": "Technology ETF",
@@ -98,10 +98,8 @@ if "scan_results" not in st.session_state:
 if "scan_log" not in st.session_state:
     st.session_state.scan_log = []
 
-if "current_ticker_index" not in st.session_state:
-    st.session_state.current_ticker_index = 0
-if "batch_complete" not in st.session_state:
-    st.session_state.batch_complete = False
+if "scan_complete" not in st.session_state:
+    st.session_state.scan_complete = False
 
 # --- TECHNICAL ANALYSIS HELPER ---
 def calculate_rsi(series, period=14):
@@ -146,7 +144,6 @@ def is_safe_from_earnings(ticker, expiration_date_str):
 # --- MARKET HEALTH CHECK ---
 def get_market_health():
     try:
-        # Use Finnhub for price (safe)
         if finnhub_client:
             try:
                 quote = finnhub_client.quote("SPY")
@@ -156,7 +153,6 @@ def get_market_health():
         else:
             current_price = 0
 
-        # Use Yahoo for SMA (No Session passed)
         spy = yf.Ticker("SPY")
         hist = safe_yfinance_call(spy.history, period="1y")
         
@@ -171,20 +167,15 @@ def get_market_health():
 
 # --- BULK DATA PROCESSING ---
 def process_bulk_data(df, ticker):
-    """
-    Extracts single ticker data from the bulk DataFrame.
-    """
     try:
         hist = pd.DataFrame()
         
-        # Handle MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             try:
                 ticker_df = df[ticker].copy()
             except KeyError:
                 return None
         else:
-            # If flat (single ticker downloaded)
             ticker_df = df.copy()
 
         if 'Close' not in ticker_df.columns:
@@ -252,6 +243,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         
         min_days = 14 if dev_mode else 25
         max_days = 60 if dev_mode else 50
+        
         target_min_date = datetime.now() + timedelta(days=min_days)
         target_max_date = datetime.now() + timedelta(days=max_days)
         
@@ -357,6 +349,32 @@ def plot_clean_sparkline(hist, short_strike, long_strike):
     plt.tight_layout(pad=0.1)
     return fig
 
+# --- CUSTOM CSS ---
+st.markdown("""
+<style>
+    .metric-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px; }
+    .metric-value { font-size: 16px; font-weight: 700; color: #FFF; }
+    .price-pill-red { background-color: rgba(255, 75, 75, 0.15); color: #ff4b4b; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
+    .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
+    
+    /* REMOVED UGLY BOX FROM BADGE, NOW CLEAN TEXT */
+    .strategy-badge { 
+        color: #d4ac0d; 
+        padding: 2px 8px; 
+        font-size: 12px; 
+        font-weight: bold; 
+        letter-spacing: 1px; 
+        text-transform: uppercase; 
+        text-align: right;
+    }
+    
+    .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
+    .status-reject { font-size: 12px; color: #ff4b4b; font-style: italic; }
+    .status-pulse { font-size: 12px; color: #00C853; font-weight: bold; }
+    .stCodeBlock { font-family: 'Courier New', monospace; font-size: 12px; }
+</style>
+""", unsafe_allow_html=True)
+
 # --- MAIN UI ---
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
@@ -375,118 +393,108 @@ with st.sidebar:
     if dev_mode: st.warning("DEV MODE ACTIVE: Safety Filters Disabled.")
     
     if st.button("Reset Scanner"):
-        st.session_state.current_ticker_index = 0
         st.session_state.scan_results = []
         st.session_state.scan_log = []
-        st.session_state.batch_complete = False
+        st.session_state.scan_complete = False
         st.rerun()
 
-# --- BATCH SCAN LOGIC ---
-total_tickers = len(LIQUID_TICKERS)
-start_index = st.session_state.current_ticker_index
-batch_size = 10
-end_index = min(start_index + batch_size, total_tickers)
-
-st.caption(f"Scanner Progress: {start_index}/{total_tickers} tickers scanned")
-st.progress(start_index / total_tickers)
-
-# --- SCAN BUTTON ---
-btn_label = "Scan Next 10 Tickers" if start_index < total_tickers else "Scan Complete (Reset to Restart)"
-if st.button(btn_label, disabled=(start_index >= total_tickers)):
-    st.session_state.batch_complete = False 
+# --- SCAN BUTTON (AUTO BATCH LOOP) ---
+if st.button("Scan Market (Full Run)"):
+    st.session_state.scan_results = []
+    st.session_state.scan_log = []
+    st.session_state.scan_complete = False
     
-    if start_index == 0:
-        status = st.empty()
-        status.info("Initializing Scanner...")
-        time.sleep(2) 
-        market_healthy, spy_price, spy_sma = get_market_health()
-        status.empty()
-        
-        if not market_healthy and not dev_mode:
-            st.error(f"BEAR REGIME DETECTED: SPY ${spy_price:.2f} < SMA ${spy_sma:.2f}")
-            st.stop()
+    status = st.empty()
+    status.info("Initializing Scanner...")
+    
+    # Market Health
+    market_healthy, spy_price, spy_sma = get_market_health()
+    if not market_healthy and not dev_mode:
+        st.error(f"BEAR REGIME DETECTED: SPY ${spy_price:.2f} < SMA ${spy_sma:.2f}")
+        st.stop()
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     st.markdown("---") 
     log_placeholder = st.empty()
     
-    # --- 1. BULK DOWNLOAD ---
-    current_batch_tickers = LIQUID_TICKERS[start_index:end_index]
-    status_text.text(f"Fetching Bulk Data for {len(current_batch_tickers)} tickers...")
+    # BATCHING LOGIC (10 at a time)
+    batch_size = 10
+    total_tickers = len(LIQUID_TICKERS)
     
-    try:
-        # group_by='ticker' ensures data is structured as df[Ticker][Close]
-        bulk_data = yf.download(current_batch_tickers, period="1y", group_by='ticker', progress=False)
-        st.session_state.scan_log.append(f"[BATCH] Bulk download successful for {len(current_batch_tickers)} tickers")
-    except Exception as e:
-        bulk_data = None
-        st.session_state.scan_log.append(f"[BATCH] Bulk download failed: {e}")
-
-    # --- 2. LOOP ---
-    for i, ticker in enumerate(current_batch_tickers):
-        status_text.text(f"Analyzing {ticker}...")
-        progress_bar.progress((i + 1) / len(current_batch_tickers))
+    for start_idx in range(0, total_tickers, batch_size):
+        end_idx = min(start_idx + batch_size, total_tickers)
+        batch = LIQUID_TICKERS[start_idx:end_idx]
         
-        if bulk_data is not None and not bulk_data.empty:
-            data = process_bulk_data(bulk_data, ticker)
-        else:
-            data = None 
+        status_text.text(f"Scanning Batch {start_idx}-{end_idx} of {total_tickers}...")
+        
+        # 1. Bulk Download for this batch
+        try:
+            bulk_data = yf.download(batch, period="1y", group_by='ticker', progress=False)
+            st.session_state.scan_log.append(f"[BATCH] Data acquired for {len(batch)} tickers")
+        except:
+            bulk_data = None
             
-        if not data: 
-            st.session_state.scan_log.append(f"[{ticker}] Data Unavailable (Check connection)")
-            continue
-        
-        time.sleep(random.uniform(1.0, 2.0))
-        
-        # FIXED: Removed session=session argument
-        spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
-        
-        if spread:
-             st.session_state.scan_log.append(f"[{ticker}] FOUND TRADE | Credit: ${spread['credit']:.2f}")
-             
-             score = 0
-             if spread['iv'] > (data['hv'] + 5.0): score += 30
-             elif spread['iv'] > data['hv']: score += 15
-             width = spread['short'] - spread['long']
-             if width > 0:
-                 credit_ratio = spread['credit'] / width
-                 if credit_ratio >= 0.30: score += 20
-                 elif credit_ratio >= 0.25: score += 15
-                 elif credit_ratio >= 0.15: score += 10
-             if data['is_uptrend']: score += 10
-             
-             if data['is_uptrend'] and data['is_oversold_bb']: score += 30
-             elif data['is_uptrend'] and data['rsi'] < 45: score += 20
-             elif data['rsi'] < 50: score += 10
-             if data['is_overbought_bb'] or data['rsi'] > 70: score -= 20
-             
-             score += 20 
-             display_score = min(score, 100.0)
-             
-             if dev_mode or display_score >= 50:
-                 st.session_state.scan_results.append({
-                     "ticker": ticker, "data": data, "spread": spread, 
-                     "score": score, "display_score": display_score
-                 })
-        else:
-            st.session_state.scan_log.append(f"[{ticker}] Skipped: {reject_reason}")
-        
-        log_text = "\n".join(st.session_state.scan_log[-10:])
-        log_placeholder.code(log_text, language="text")
+        # 2. Analyze Each
+        for i, ticker in enumerate(batch):
+            progress_val = (start_idx + i) / total_tickers
+            progress_bar.progress(progress_val)
+            
+            if bulk_data is not None and not bulk_data.empty:
+                data = process_bulk_data(bulk_data, ticker)
+            else:
+                data = None
+                
+            if not data:
+                st.session_state.scan_log.append(f"[{ticker}] No Data")
+                continue
+            
+            # Tiny sleep per ticker to save options API
+            time.sleep(random.uniform(0.5, 1.5))
+            
+            spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
+            
+            if spread:
+                st.session_state.scan_log.append(f"[{ticker}] FOUND TRADE | Credit: ${spread['credit']:.2f}")
+                
+                # Scoring
+                score = 0
+                if spread['iv'] > (data['hv'] + 5.0): score += 30
+                elif spread['iv'] > data['hv']: score += 15
+                if data['is_uptrend']: score += 10
+                if data['is_uptrend'] and data['is_oversold_bb']: score += 30
+                elif data['is_uptrend'] and data['rsi'] < 45: score += 20
+                
+                score += 20 
+                display_score = min(score, 100.0)
+                
+                if dev_mode or display_score >= 50:
+                    st.session_state.scan_results.append({
+                        "ticker": ticker, "data": data, "spread": spread, 
+                        "score": score, "display_score": display_score
+                    })
+            else:
+                st.session_state.scan_log.append(f"[{ticker}] Skipped: {reject_reason}")
+                
+            # Update Log
+            log_text = "\n".join(st.session_state.scan_log[-8:])
+            log_placeholder.code(log_text, language="text")
+            
+        # Batch cooldown to prevent IP Ban
+        if end_idx < total_tickers:
+            time.sleep(5) 
 
-    st.session_state.current_ticker_index = end_index
-    st.session_state.batch_complete = True 
+    st.session_state.scan_complete = True
     progress_bar.empty()
     status_text.empty()
-    st.rerun() 
+    st.rerun()
 
 # --- DISPLAY LOGIC ---
-if st.session_state.batch_complete and st.session_state.scan_results:
+if st.session_state.scan_complete and st.session_state.scan_results:
     sorted_results = sorted(st.session_state.scan_results, key=lambda x: x['score'], reverse=True)
-    st.success(f"Total Opportunities Found: {len(sorted_results)}")
-    cols = st.columns(3)
+    st.success(f"Scan Complete: Found {len(sorted_results)} Opportunities")
     
+    cols = st.columns(3)
     for i, res in enumerate(sorted_results):
         t = res['ticker']
         d = res['data']
@@ -496,10 +504,14 @@ if st.session_state.batch_complete and st.session_state.scan_results:
             with st.container(border=True):
                 pill_class = "price-pill-red" if d['change_pct'] < 0 else "price-pill-green"
                 badge_text = "ELITE EDGE" if res['display_score'] >= 80 else "SOLID SETUP"
-                badge_style = "border: 1px solid #00C853; color: #00C853;" if res['display_score'] >= 80 else "border: 1px solid #d4ac0d; color: #d4ac0d;"
-                if dev_mode and res['display_score'] < 50:
-                    badge_text = "TEST RESULT"
-                    badge_style = "border: 1px solid gray; color: gray;"
+                
+                # Signal
+                if d['is_uptrend'] and (d['is_oversold_bb'] or d['rsi'] < 45):
+                    signal_html = "<span style='color: #00FFAA; font-weight: bold; font-size: 14px;'>BUY NOW (DIP)</span>"
+                elif d['is_uptrend']:
+                    signal_html = "<span style='color: #FFA726; font-weight: bold; font-size: 14px;'>WAIT (NEUTRAL)</span>"
+                else:
+                    signal_html = "<span style='color: #FF5252; font-weight: bold; font-size: 14px;'>PASS (TREND)</span>"
 
                 st.markdown(f"""
                 <div style="display: flex; justify-content: space-between; align-items: flex-start;">
@@ -510,22 +522,15 @@ if st.session_state.batch_complete and st.session_state.scan_results:
                         <div style="font-size: 11px; color: #888; margin-bottom: 4px;">{d['sector_str']}</div>
                         <div style="margin-top: 2px;"><span class="{pill_class}">${d['price']:.2f} ({d['change_pct']:.2f}%)</span></div>
                     </div>
-                    <div class="strategy-badge" style="{badge_style}">{badge_text}</div>
+                    <div style="text-align: right;">
+                        <div class="strategy-badge">{badge_text}</div>
+                        <div style="font-size: 20px; font-weight: 900; color: #d4ac0d; margin-top: 4px;">{res['display_score']:.0f}</div>
+                        <div style="font-size: 9px; color: #666; text-transform: uppercase;">Edge Score</div>
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
                 st.divider()
                 
-                exp_dt = datetime.strptime(s['expiration_raw'], "%Y-%m-%d")
-                exit_dt = exp_dt - timedelta(days=21)
-                exit_str = exit_dt.strftime("%b %d, %Y")
-                
-                if d['is_uptrend'] and (d['is_oversold_bb'] or d['rsi'] < 45):
-                    signal_html = "<span style='color: #00FFAA; font-weight: bold; font-size: 14px;'>BUY NOW (DIP)</span>"
-                elif d['is_uptrend']:
-                    signal_html = "<span style='color: #FFA726; font-weight: bold; font-size: 14px;'>WAIT (NEUTRAL)</span>"
-                else:
-                    signal_html = "<span style='color: #FF5252; font-weight: bold; font-size: 14px;'>PASS (TREND)</span>"
-
                 c1, c2 = st.columns(2)
                 with c1:
                     st.markdown(f"""
@@ -553,19 +558,13 @@ if st.session_state.batch_complete and st.session_state.scan_results:
                     """, unsafe_allow_html=True)
                 
                 st.markdown("---")
-                vc1, vc2 = st.columns([2, 1])
-                with vc1: st.pyplot(plot_clean_sparkline(d['hist'], s['short'], s['long']), use_container_width=True)
-                with vc2:
-                    st.markdown(f"""
-                    <div class="metric-label" style="text-align: right;">Edge Score</div>
-                    <div class="metric-value" style="text-align: right; color: #d4ac0d;">{res['display_score']:.0f}</div>
-                    """, unsafe_allow_html=True)
+                st.pyplot(plot_clean_sparkline(d['hist'], s['short'], s['long']), use_container_width=True)
                 
                 st.markdown(f"""<div class="roc-box"><span style="font-size:11px; color: #00c864; text-transform: uppercase;">Return on Capital</span><br><span style="font-size:18px; font-weight:800; color: #00c864;">{s['roi']:.2f}%</span></div>""", unsafe_allow_html=True)
                 
                 add_key = f"add_mode_{t}_{i}"
                 st.write("") 
-                if st.button(f"Add {t}", key=f"btn_{t}_{i}", use_container_width=True):
+                if st.button(f"Add Trade", key=f"btn_{t}_{i}", use_container_width=True):
                     st.session_state[add_key] = True
 
                 if st.session_state.get(add_key, False):
@@ -573,7 +572,7 @@ if st.session_state.batch_complete and st.session_state.scan_results:
                     num = st.number_input(f"Contracts", min_value=1, value=1, key=f"c_{t}_{i}")
                     cc1, cc2 = st.columns(2)
                     with cc1:
-                        if st.button("OK", key=f"ok_{t}_{i}"):
+                        if st.button("Confirm Add", key=f"ok_{t}_{i}"):
                             new_trade = {
                                 "id": f"{t}-{s['short']}-{s['expiration_raw']}",
                                 "ticker": t, "contracts": num, 
@@ -588,7 +587,7 @@ if st.session_state.batch_complete and st.session_state.scan_results:
                             del st.session_state[add_key]
                             st.rerun()
                     with cc2:
-                        if st.button("X", key=f"no_{t}_{i}"):
+                        if st.button("Cancel", key=f"no_{t}_{i}"):
                             del st.session_state[add_key]
                             st.rerun()
 
