@@ -35,7 +35,7 @@ BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
 
-# --- ZERO-LATENCY METADATA (Replaces API Call) ---
+# --- 1. GLOBAL LISTS & MAPS (DEFINED FIRST) ---
 SECTOR_MAP = {
     "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "IWM": "Russell 2000 ETF", "DIA": "Dow Jones ETF",
     "GLD": "Gold Trust", "SLV": "Silver Trust", "TLT": "20+ Yr Treasury Bond", "XLK": "Technology ETF",
@@ -69,6 +69,8 @@ SECTOR_MAP = {
     "ABBV": "Drug Manufacturers", "BMY": "Drug Manufacturers", "AMGN": "Drug Manufacturers", "GILD": "Drug Manufacturers",
     "MRNA": "Biotechnology"
 }
+
+LIQUID_TICKERS = list(SECTOR_MAP.keys())
 
 ETFS = [
     "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX",
@@ -137,7 +139,7 @@ def is_safe_from_earnings(ticker, expiration_date_str):
     if ticker in ETFS: return True, "ETF"
     if not finnhub_client: return True, "No API"
     try:
-        time.sleep(0.2) # Fast throttle is fine now that we removed other heavy calls
+        time.sleep(0.5) 
         today = datetime.now().date()
         exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
         earnings = finnhub_client.earnings_calendar(_from=today.strftime("%Y-%m-%d"), to=exp_date.strftime("%Y-%m-%d"), symbol=ticker)
@@ -151,7 +153,7 @@ def is_safe_from_earnings(ticker, expiration_date_str):
 # --- MARKET HEALTH CHECK ---
 def get_market_health():
     try:
-        # Hybrid: Use Finnhub for price (fast/safe) if available
+        # Use Finnhub for price (safe)
         if finnhub_client:
             try:
                 quote = finnhub_client.quote("SPY")
@@ -161,13 +163,13 @@ def get_market_health():
         else:
             current_price = 0
 
-        # Use Yahoo only for historical SMA
+        # Use Yahoo for SMA
         spy = yf.Ticker("SPY", session=session)
         hist = safe_yfinance_call(spy.history, period="1y")
         
         if hist is None or hist.empty: return True, current_price, 0
         
-        if current_price == 0: # Fallback if Finnhub failed
+        if current_price == 0:
             current_price = hist['Close'].iloc[-1]
             
         sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
@@ -180,7 +182,7 @@ def get_stock_data(ticker):
     try:
         stock = yf.Ticker(ticker, session=session)
         
-        # WE REMOVED STOCK.INFO -> This stops the throttling!
+        # WE REMOVED STOCK.INFO TO PREVENT RATE LIMITS
         
         hist = safe_yfinance_call(stock.history, period="1y")
         if hist is None or hist.empty: return None
@@ -211,7 +213,6 @@ def get_stock_data(ticker):
         is_oversold_bb = current_price <= (bb_lower * 1.01)
         is_overbought_bb = current_price >= (bb_upper * 0.99)
 
-        # FAST METADATA LOOKUP
         type_str = "(ETF)" if ticker in ETFS else "(Stock)"
         sector_str = SECTOR_MAP.get(ticker, "Unknown Sector")
 
@@ -227,17 +228,15 @@ def get_stock_data(ticker):
 # --- TRADE LOGIC ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
     try:
-        # Retry options fetching
         try:
             exps = stock_obj.options
         except: 
-            time.sleep(1) # Tiny pause
+            time.sleep(1)
             exps = stock_obj.options
         if not exps: return None, "No Options Chain"
         
         min_days = 14 if dev_mode else 25
         max_days = 60 if dev_mode else 50
-        
         target_min_date = datetime.now() + timedelta(days=min_days)
         target_max_date = datetime.now() + timedelta(days=max_days)
         
@@ -368,6 +367,7 @@ with st.sidebar:
         st.rerun()
 
 # --- BATCH SCAN LOGIC ---
+# LIQUID_TICKERS IS DEFINED AT THE TOP NOW
 total_tickers = len(LIQUID_TICKERS)
 start_index = st.session_state.current_ticker_index
 batch_size = 10
@@ -403,7 +403,6 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
         status_text.text(f"Scanning {ticker}...")
         progress_bar.progress((i - start_index + 1) / batch_size)
         
-        # Human Jitter (Can be slightly faster now that heavy calls are gone)
         time.sleep(random.uniform(1.5, 2.5))
         
         data = get_stock_data(ticker)
@@ -431,6 +430,7 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
                  elif credit_ratio >= 0.25: score += 15
                  elif credit_ratio >= 0.15: score += 10
              if data['is_uptrend']: score += 10
+             
              if data['is_uptrend'] and data['is_oversold_bb']: score += 30
              elif data['is_uptrend'] and data['rsi'] < 45: score += 20
              elif data['rsi'] < 50: score += 10
@@ -495,7 +495,7 @@ if st.session_state.batch_complete and st.session_state.scan_results:
                 exit_str = exit_dt.strftime("%b %d, %Y")
                 
                 if d['is_uptrend'] and (d['is_oversold_bb'] or d['rsi'] < 45):
-                    signal_html = "<span style='color: #00FFAA; font-weight: bold; font-size: 14px;'>★ BUY NOW (DIP)</span>"
+                    signal_html = "<span style='color: #00FFAA; font-weight: bold; font-size: 14px;'>BUY NOW (DIP)</span>"
                 elif d['is_uptrend']:
                     signal_html = "<span style='color: #FFA726; font-weight: bold; font-size: 14px;'>WAIT (NEUTRAL)</span>"
                 else:
