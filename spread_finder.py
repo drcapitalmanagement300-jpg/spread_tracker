@@ -47,14 +47,12 @@ try:
 except Exception as e:
     finnhub_client = None
 
-# Load trades
 if "trades" not in st.session_state:
     st.session_state.trades = load_from_drive(drive_service) or [] if drive_service else []
 
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 
-# --- NEW: SCAN LOG STATE ---
 if "scan_log" not in st.session_state:
     st.session_state.scan_log = []
 
@@ -88,7 +86,6 @@ st.markdown("""
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
     .status-reject { font-size: 12px; color: #ff4b4b; font-style: italic; }
     .status-pulse { font-size: 12px; color: #00C853; font-weight: bold; }
-    /* Console Log Style */
     .stCodeBlock { font-family: 'Courier New', monospace; font-size: 12px; }
 </style>
 """, unsafe_allow_html=True)
@@ -101,17 +98,18 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-# --- SMART RETRY LOGIC (SIMPLIFIED) ---
+# --- SMART RETRY LOGIC (IMPROVED) ---
 def safe_yfinance_call(func, *args, **kwargs):
-    max_retries = 3
-    base_wait = 2 
+    max_retries = 4 # Increased to 4
+    base_wait = 3 # Increased base wait
     for attempt in range(max_retries):
         try:
             return func(*args, **kwargs)
         except Exception as e:
             err_msg = str(e).lower()
             if "429" in err_msg or "too many requests" in err_msg:
-                wait_time = base_wait * (2 ** attempt) + random.uniform(0.1, 1.0)
+                # Exponential backoff: 3s, 6s, 12s, 24s
+                wait_time = base_wait * (2 ** attempt) + random.uniform(0.5, 1.5)
                 time.sleep(wait_time)
             else:
                 if attempt == max_retries - 1: return None
@@ -143,22 +141,25 @@ def is_safe_from_earnings(ticker, expiration_date_str):
         if "429" in str(e): time.sleep(5)
         return True, "Error"
 
-# --- MARKET HEALTH CHECK ---
+# --- MARKET HEALTH CHECK (ROBUST) ---
 def get_market_health():
     try:
         spy = yf.Ticker("SPY")
-        hist = spy.history(period="1y") 
-        if hist.empty or len(hist) < 200: return True, 0, 0 
+        # Use safe call here too!
+        hist = safe_yfinance_call(spy.history, period="1y")
+        
+        if hist is None or hist.empty or len(hist) < 200: 
+            return True, 0, 0 
+            
         current_price = hist['Close'].iloc[-1]
         sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
         return current_price > sma_200, current_price, sma_200
     except: return True, 0, 0
 
-# --- DATA FETCHING (STANDARD) ---
+# --- DATA FETCHING ---
 @st.cache_data(ttl=3600)
 def get_stock_data(ticker):
     try:
-        # Standard Ticker call - avoid fancy session spoofing which can backfire
         stock = yf.Ticker(ticker)
         
         # Retry wrapper
@@ -359,7 +360,13 @@ with st.sidebar:
 # --- SCAN BUTTON ---
 if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     st.session_state.scan_log = [] # Clear previous log
+    
+    # 1. WARM UP (Prevents cold-start rate limit)
     status = st.empty()
+    status.info("Initializing Scanner (Warming up API)...")
+    time.sleep(3) # Initial cooldown
+    
+    # 2. CHECK SPY (Now robust with retries)
     status.text("Checking Market Pulse...")
     market_healthy, spy_price, spy_sma = get_market_health()
     st.markdown(f"<div class='status-pulse'>Market Data Active | SPY: ${spy_price:.2f}</div>", unsafe_allow_html=True)
@@ -372,6 +379,7 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
         </div>""", unsafe_allow_html=True)
         st.stop()
 
+    # 3. START LOOP
     progress = st.progress(0)
     results = []
     
@@ -382,6 +390,9 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     st.markdown("### Scanner Execution Log")
     log_placeholder = st.empty() # Log will update here live
 
+    # Extra delay before first ticker
+    time.sleep(2)
+
     for i, ticker in enumerate(LIQUID_TICKERS):
         status.text(f"Scanning {ticker}...")
         progress.progress((i + 1) / len(LIQUID_TICKERS))
@@ -391,7 +402,7 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
         
         data = get_stock_data(ticker)
         if not data: 
-            st.session_state.scan_log.append(f"[{ticker}] Failed to fetch data")
+            st.session_state.scan_log.append(f"[{ticker}] Failed to fetch data (Rate Limit or Invalid)")
             continue
         
         spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
