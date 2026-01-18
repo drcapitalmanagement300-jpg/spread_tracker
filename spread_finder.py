@@ -98,8 +98,10 @@ if "scan_results" not in st.session_state:
 if "scan_log" not in st.session_state:
     st.session_state.scan_log = []
 
-if "scan_complete" not in st.session_state:
-    st.session_state.scan_complete = False
+if "current_ticker_index" not in st.session_state:
+    st.session_state.current_ticker_index = 0
+if "batch_complete" not in st.session_state:
+    st.session_state.batch_complete = False
 
 # --- TECHNICAL ANALYSIS HELPER ---
 def calculate_rsi(series, period=14):
@@ -109,21 +111,31 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-# --- SMART RETRY LOGIC ---
-def safe_yfinance_call(func, *args, **kwargs):
+# --- SMART RETRY LOGIC (BLOCKING) ---
+def blocking_retry(func, *args, **kwargs):
+    """
+    Retries a function if it hits a Rate Limit.
+    Waits 45 seconds if a 429 is detected.
+    """
     max_retries = 3
-    base_wait = 2 
+    
     for attempt in range(max_retries):
         try:
             return func(*args, **kwargs)
         except Exception as e:
             err_msg = str(e).lower()
             if "429" in err_msg or "too many requests" in err_msg:
-                wait_time = base_wait * (2 ** attempt) + random.uniform(0.5, 1.5)
-                time.sleep(wait_time)
+                # RATE LIMIT HIT: PAUSE SCRIPT
+                placeholder = st.empty()
+                for i in range(45, 0, -1):
+                    placeholder.warning(f"Rate Limit Hit. Cooling down: {i}s...")
+                    time.sleep(1)
+                placeholder.empty()
+                # Retry loop will continue now
             else:
+                # Other error, simple retry
                 if attempt == max_retries - 1: return None
-                time.sleep(1)
+                time.sleep(2)
     return None
 
 # --- EARNINGS SAFETY CHECK ---
@@ -154,7 +166,7 @@ def get_market_health():
             current_price = 0
 
         spy = yf.Ticker("SPY")
-        hist = safe_yfinance_call(spy.history, period="1y")
+        hist = blocking_retry(spy.history, period="1y")
         
         if hist is None or hist.empty: return True, current_price, 0
         
@@ -231,15 +243,16 @@ def process_bulk_data(df, ticker):
     except Exception as e:
         return None
 
-# --- TRADE LOGIC ---
+# --- TRADE LOGIC (WITH BLOCKING RETRY) ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
     try:
-        try:
-            exps = stock_obj.options
-        except: 
-            time.sleep(1) # Tiny pause
-            exps = stock_obj.options
-        if not exps: return None, "No Options Chain"
+        # 1. Fetch Options (Blocking Retry)
+        # We access .options property. If it fails, blocking_retry catches it.
+        def get_options_list():
+            return stock_obj.options
+            
+        exps = blocking_retry(get_options_list)
+        if not exps: return None, "No Options Chain (or Blocked)"
         
         min_days = 14 if dev_mode else 25
         max_days = 60 if dev_mode else 50
@@ -258,7 +271,8 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         best_exp = max(valid_exps) 
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
 
-        chain = safe_yfinance_call(stock_obj.option_chain, best_exp)
+        # 2. Fetch Chain (Blocking Retry)
+        chain = blocking_retry(stock_obj.option_chain, best_exp)
         if not chain: return None, "Failed to fetch Chain"
         
         puts = chain.puts
@@ -357,7 +371,6 @@ st.markdown("""
     .price-pill-red { background-color: rgba(255, 75, 75, 0.15); color: #ff4b4b; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
     .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
     
-    /* REMOVED UGLY BOX FROM BADGE, NOW CLEAN TEXT */
     .strategy-badge { 
         color: #d4ac0d; 
         padding: 2px 8px; 
@@ -393,9 +406,10 @@ with st.sidebar:
     if dev_mode: st.warning("DEV MODE ACTIVE: Safety Filters Disabled.")
     
     if st.button("Reset Scanner"):
+        st.session_state.current_ticker_index = 0
         st.session_state.scan_results = []
         st.session_state.scan_log = []
-        st.session_state.scan_complete = False
+        st.session_state.batch_complete = False
         st.rerun()
 
 # --- SCAN BUTTON (AUTO BATCH LOOP) ---
@@ -407,7 +421,6 @@ if st.button("Scan Market (Full Run)"):
     status = st.empty()
     status.info("Initializing Scanner...")
     
-    # Market Health
     market_healthy, spy_price, spy_sma = get_market_health()
     if not market_healthy and not dev_mode:
         st.error(f"BEAR REGIME DETECTED: SPY ${spy_price:.2f} < SMA ${spy_sma:.2f}")
@@ -418,8 +431,8 @@ if st.button("Scan Market (Full Run)"):
     st.markdown("---") 
     log_placeholder = st.empty()
     
-    # BATCHING LOGIC (10 at a time)
-    batch_size = 10
+    # BATCHING LOGIC (REDUCED TO 5)
+    batch_size = 5
     total_tickers = len(LIQUID_TICKERS)
     
     for start_idx in range(0, total_tickers, batch_size):
@@ -428,14 +441,12 @@ if st.button("Scan Market (Full Run)"):
         
         status_text.text(f"Scanning Batch {start_idx}-{end_idx} of {total_tickers}...")
         
-        # 1. Bulk Download for this batch
         try:
             bulk_data = yf.download(batch, period="1y", group_by='ticker', progress=False)
             st.session_state.scan_log.append(f"[BATCH] Data acquired for {len(batch)} tickers")
         except:
             bulk_data = None
             
-        # 2. Analyze Each
         for i, ticker in enumerate(batch):
             progress_val = (start_idx + i) / total_tickers
             progress_bar.progress(progress_val)
@@ -449,15 +460,13 @@ if st.button("Scan Market (Full Run)"):
                 st.session_state.scan_log.append(f"[{ticker}] No Data")
                 continue
             
-            # Tiny sleep per ticker to save options API
-            time.sleep(random.uniform(0.5, 1.5))
+            # SLOW AND STEADY
+            time.sleep(random.uniform(3.0, 6.0))
             
             spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
             
             if spread:
                 st.session_state.scan_log.append(f"[{ticker}] FOUND TRADE | Credit: ${spread['credit']:.2f}")
-                
-                # Scoring
                 score = 0
                 if spread['iv'] > (data['hv'] + 5.0): score += 30
                 elif spread['iv'] > data['hv']: score += 15
@@ -476,13 +485,12 @@ if st.button("Scan Market (Full Run)"):
             else:
                 st.session_state.scan_log.append(f"[{ticker}] Skipped: {reject_reason}")
                 
-            # Update Log
             log_text = "\n".join(st.session_state.scan_log[-8:])
             log_placeholder.code(log_text, language="text")
             
-        # Batch cooldown to prevent IP Ban
+        # EXTRA BATCH COOLDOWN
         if end_idx < total_tickers:
-            time.sleep(5) 
+            time.sleep(10) 
 
     st.session_state.scan_complete = True
     progress_bar.empty()
@@ -505,7 +513,6 @@ if st.session_state.scan_complete and st.session_state.scan_results:
                 pill_class = "price-pill-red" if d['change_pct'] < 0 else "price-pill-green"
                 badge_text = "ELITE EDGE" if res['display_score'] >= 80 else "SOLID SETUP"
                 
-                # Signal
                 if d['is_uptrend'] and (d['is_oversold_bb'] or d['rsi'] < 45):
                     signal_html = "<span style='color: #00FFAA; font-weight: bold; font-size: 14px;'>BUY NOW (DIP)</span>"
                 elif d['is_uptrend']:
