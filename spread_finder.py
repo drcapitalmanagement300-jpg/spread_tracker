@@ -25,7 +25,7 @@ st.set_page_config(layout="wide", page_title="Spread Finder")
 try:
     FINNHUB_API_KEY = st.secrets["general"]["FINNHUB_API_KEY"]
 except (FileNotFoundError, KeyError):
-    st.error("⚠️ FINNHUB_API_KEY not found in .streamlit/secrets.toml")
+    st.error("FINNHUB_API_KEY not found in .streamlit/secrets.toml")
     st.stop()
 
 # --- CONSTANTS & COLORS ---
@@ -34,13 +34,6 @@ WARNING_COLOR = "#d32f2f"
 BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
-
-# --- BROWSER SPOOFING (USER AGENTS) ---
-USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0'
-]
 
 # --- INITIALIZE SERVICES ---
 drive_service = None
@@ -108,7 +101,7 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-# --- SMART RETRY LOGIC ---
+# --- SMART RETRY LOGIC (SIMPLIFIED) ---
 def safe_yfinance_call(func, *args, **kwargs):
     max_retries = 3
     base_wait = 2 
@@ -161,13 +154,14 @@ def get_market_health():
         return current_price > sma_200, current_price, sma_200
     except: return True, 0, 0
 
-# --- DATA FETCHING (ROBUST) ---
+# --- DATA FETCHING (STANDARD) ---
 @st.cache_data(ttl=3600)
 def get_stock_data(ticker):
     try:
-        session = requests.Session()
-        session.headers.update({'User-Agent': random.choice(USER_AGENTS)})
-        stock = yf.Ticker(ticker, session=session)
+        # Standard Ticker call - avoid fancy session spoofing which can backfire
+        stock = yf.Ticker(ticker)
+        
+        # Retry wrapper
         hist = safe_yfinance_call(stock.history, period="1y")
         
         if hist is None or hist.empty: return None
@@ -359,8 +353,8 @@ with header_col2:
 
 with st.sidebar:
     st.header("Scanner Settings")
-    dev_mode = st.checkbox("🛠 Dev Mode (Bypass Filters)", value=False, help="Check this to test in bear markets.")
-    if dev_mode: st.warning("⚠️ DEV MODE ACTIVE: Safety Filters Disabled.")
+    dev_mode = st.checkbox("Dev Mode (Bypass Filters)", value=False, help="Check this to test in bear markets.")
+    if dev_mode: st.warning("DEV MODE ACTIVE: Safety Filters Disabled.")
 
 # --- SCAN BUTTON ---
 if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
@@ -373,7 +367,7 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     if not market_healthy and not dev_mode:
         st.markdown(f"""
         <div class="warning-box">
-            <h3 style="color: #d32f2f; margin-bottom: 0px;">🚫 MARKET CAUTION: BEAR REGIME DETECTED</h3>
+            <h3 style="color: #d32f2f; margin-bottom: 0px;">MARKET CAUTION: BEAR REGIME DETECTED</h3>
             <p style="color: white; font-size: 16px;">SPY is trading at <b>${spy_price:.2f}</b>, below the 200 SMA (<b>${spy_sma:.2f}</b>).</p>
         </div>""", unsafe_allow_html=True)
         st.stop()
@@ -385,25 +379,25 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     st.markdown("---") # Divider before results
     results_container = st.container() # Place results here
     
-    st.markdown("### 📟 Scanner Execution Log")
+    st.markdown("### Scanner Execution Log")
     log_placeholder = st.empty() # Log will update here live
 
     for i, ticker in enumerate(LIQUID_TICKERS):
         status.text(f"Scanning {ticker}...")
         progress.progress((i + 1) / len(LIQUID_TICKERS))
         
-        # Human Jitter
-        time.sleep(random.uniform(1.5, 3.0))
+        # Human Jitter (Increased)
+        time.sleep(random.uniform(2.0, 4.0))
         
         data = get_stock_data(ticker)
         if not data: 
-            st.session_state.scan_log.append(f"[{ticker}] ❌ Failed to fetch data")
+            st.session_state.scan_log.append(f"[{ticker}] Failed to fetch data")
             continue
         
         spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
         
         if spread:
-             st.session_state.scan_log.append(f"[{ticker}] ✅ FOUND TRADE | Credit: ${spread['credit']:.2f}")
+             st.session_state.scan_log.append(f"[{ticker}] FOUND TRADE | Credit: ${spread['credit']:.2f}")
              
              # Scoring
              score = 0
@@ -431,7 +425,7 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
                  results.append({"ticker": ticker, "data": data, "spread": spread, "score": score, "display_score": display_score})
         else:
             # Append rejection to log
-            st.session_state.scan_log.append(f"[{ticker}] ⚠️ Skipped: {reject_reason}")
+            st.session_state.scan_log.append(f"[{ticker}] Skipped: {reject_reason}")
         
         # UPDATE LOG LIVE
         log_text = "\n".join(st.session_state.scan_log[-10:]) # Show last 10 lines
@@ -481,10 +475,10 @@ if st.session_state.scan_results is not None:
                         exit_dt = exp_dt - timedelta(days=21)
                         exit_str = exit_dt.strftime("%b %d, %Y")
                         
-                        trend_txt = "⬆ UPTREND" if d['is_uptrend'] else "⬇ DOWNTREND"
-                        if d['is_oversold_bb']: tech_status = "<span style='color: #00FFAA; font-weight: bold;'>⚡ OVERSOLD (BB Low)</span>"
-                        elif d['rsi'] < 45: tech_status = "<span style='color: #00C853;'>✅ HEALTHY DIP</span>"
-                        elif d['is_overbought_bb'] or d['rsi'] > 70: tech_status = "<span style='color: #FF5252;'>⚠️ OVERBOUGHT</span>"
+                        trend_txt = "UPTREND" if d['is_uptrend'] else "DOWNTREND"
+                        if d['is_oversold_bb']: tech_status = "<span style='color: #00FFAA; font-weight: bold;'>OVERSOLD (BB Low)</span>"
+                        elif d['rsi'] < 45: tech_status = "<span style='color: #00C853;'>HEALTHY DIP</span>"
+                        elif d['is_overbought_bb'] or d['rsi'] > 70: tech_status = "<span style='color: #FF5252;'>OVERBOUGHT</span>"
                         else: tech_status = "<span style='color: gray;'>NEUTRAL</span>"
 
                         c1, c2 = st.columns(2)
@@ -536,7 +530,7 @@ if st.session_state.scan_results is not None:
                             num = st.number_input(f"Contracts", min_value=1, value=1, key=f"c_{t}_{i}")
                             cc1, cc2 = st.columns(2)
                             with cc1:
-                                if st.button("✅", key=f"ok_{t}_{i}"):
+                                if st.button("OK", key=f"ok_{t}_{i}"):
                                     new_trade = {
                                         "id": f"{t}-{s['short']}-{s['expiration_raw']}",
                                         "ticker": t, "contracts": num, 
@@ -551,7 +545,7 @@ if st.session_state.scan_results is not None:
                                     del st.session_state[add_key]
                                     st.rerun()
                             with cc2:
-                                if st.button("❌", key=f"no_{t}_{i}"):
+                                if st.button("X", key=f"no_{t}_{i}"):
                                     del st.session_state[add_key]
                                     st.rerun()
 
