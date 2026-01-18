@@ -23,7 +23,7 @@ st.set_page_config(layout="wide", page_title="Spread Finder")
 try:
     FINNHUB_API_KEY = st.secrets["general"]["FINNHUB_API_KEY"]
 except (FileNotFoundError, KeyError):
-    st.error("⚠️ FINNHUB_API_KEY not found. Please add it to .streamlit/secrets.toml")
+    st.error("⚠️ FINNHUB_API_KEY not found in .streamlit/secrets.toml")
     st.stop()
 
 # --- CONSTANTS & COLORS ---
@@ -88,15 +88,23 @@ st.markdown("""
     .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
     .warning-box { background-color: rgba(211, 47, 47, 0.1); border: 1px solid #d32f2f; border-radius: 8px; padding: 15px; margin-bottom: 20px; text-align: center; }
     .status-pulse { font-size: 12px; color: #00C853; font-weight: bold; }
+    .status-reject { font-size: 12px; color: #ff4b4b; font-style: italic; }
 </style>
 """, unsafe_allow_html=True)
+
+# --- TECHNICAL ANALYSIS HELPER ---
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
 # --- EARNINGS SAFETY CHECK (DYNAMIC) ---
 def is_safe_from_earnings(ticker, expiration_date_str):
     """
-    Returns (True, msg) if:
-    1. It is an ETF (Always safe)
-    2. No earnings found between TODAY and EXPIRATION_DATE
+    Returns (True, msg) if safe.
+    Returns (False, date_str) if unsafe.
     """
     if ticker in ETFS:
         return True, "ETF"
@@ -118,7 +126,7 @@ def is_safe_from_earnings(ticker, expiration_date_str):
         if earnings and 'earningsCalendar' in earnings:
             if len(earnings['earningsCalendar']) > 0:
                 report_date = earnings['earningsCalendar'][0]['date']
-                return False, report_date # UNSAFE: Earnings detected before expiry
+                return False, report_date # UNSAFE
         
         return True, "Clear" 
         
@@ -145,19 +153,29 @@ def get_market_health():
 def get_stock_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="6mo") 
+        hist = stock.history(period="1y") # Need 1y for SMA200
         if hist.empty: return None
         
         current_price = hist['Close'].iloc[-1]
         prev_price = hist['Close'].iloc[-2]
         change_pct = ((current_price - prev_price) / prev_price) * 100
         
+        # Volatility
         hist['Returns'] = hist['Close'].pct_change()
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
         current_hv = hist['HV'].iloc[-1] if not pd.isna(hist['HV'].iloc[-1]) else 0
 
-        sma_100 = hist['Close'].rolling(window=100).mean().iloc[-1] if len(hist) >= 100 else current_price
+        # Technicals
+        hist['SMA_100'] = hist['Close'].rolling(window=100).mean()
+        hist['SMA_200'] = hist['Close'].rolling(window=200).mean()
+        hist['RSI'] = calculate_rsi(hist['Close'])
+
+        sma_100 = hist['SMA_100'].iloc[-1] if len(hist) >= 100 else current_price
+        sma_200 = hist['SMA_200'].iloc[-1] if len(hist) >= 200 else current_price
+        current_rsi = hist['RSI'].iloc[-1] if len(hist) >= 14 else 50
+
         is_above_sma = current_price > sma_100
+        is_uptrend = current_price > sma_200 # Long term trend
 
         # --- SECTOR & TYPE FETCH ---
         try:
@@ -180,17 +198,25 @@ def get_stock_data(ticker):
             "change_pct": change_pct,
             "hv": current_hv,
             "is_above_sma": is_above_sma,
+            "is_uptrend": is_uptrend,
+            "rsi": current_rsi,
+            "sma_200": sma_200,
             "type_str": type_str,
             "sector_str": sector_str,
             "hist": hist
         }
     except: return None
 
-# --- TRADE LOGIC (BIFURCATED) ---
+# --- TRADE LOGIC (BIFURCATED + REJECTION REASONS) ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
+    """
+    Returns: (spread_dict, rejection_reason_string)
+    If success, rejection_reason_string is None.
+    If failure, spread_dict is None.
+    """
     try:
         exps = stock_obj.options
-        if not exps: return None
+        if not exps: return None, "No Options Chain"
         
         # 1. DTE TUNING
         min_days = 14 if dev_mode else 25
@@ -207,16 +233,15 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
                     valid_exps.append(e)
             except: pass
             
-        if not valid_exps: return None
-        best_exp = max(valid_exps) # Chosen monthly expiration
+        if not valid_exps: return None, "No Valid Expiry (25-50 days)"
+        best_exp = max(valid_exps) 
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
 
         # --- DYNAMIC EARNINGS CHECK ---
-        # We only check if THIS specific expiration is safe.
         if not dev_mode:
             is_safe, msg = is_safe_from_earnings(ticker, best_exp)
             if not is_safe:
-                return None # Skip unsafe trade
+                return None, f"Earnings on {msg}" # <--- RETURNS REASON
 
         chain = stock_obj.option_chain(best_exp)
         puts = chain.puts
@@ -237,19 +262,20 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
                 target_short_fallback = current_price * 0.95
                 otm_puts = puts[puts['strike'] <= target_short_fallback].sort_values('strike', ascending=False)
 
-        if otm_puts.empty: return None
+        if otm_puts.empty: return None, "No Strikes Found"
 
         # 4. BIFURCATED FILTERING
         width = 5.0
         
         if ticker in ETFS:
-            min_credit = 0.50 # ETF Strategy (Income Focus)
+            min_credit = 0.50 
         else:
-            min_credit = 0.70 # Stock Strategy (Premium Focus)
+            min_credit = 0.70 
             
         if dev_mode: min_credit = 0.05
 
         best_spread = None
+        rejection_reason = "Credit Too Low"
 
         for index, short_row in otm_puts.iterrows():
             short_strike = short_row['strike']
@@ -262,7 +288,9 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
             slippage_pct = spread_width / ask
             is_liquid = dev_mode or (spread_width <= 0.05) or (slippage_pct <= 0.20)
             
-            if not is_liquid: continue
+            if not is_liquid: 
+                rejection_reason = "Illiquid Strikes"
+                continue
 
             long_strike_target = short_strike - width
             long_leg = puts[abs(puts['strike'] - long_strike_target) < 0.2] 
@@ -290,9 +318,12 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
                 }
                 break 
         
-        return best_spread
+        if best_spread:
+            return best_spread, None
+        else:
+            return None, rejection_reason
 
-    except: return None
+    except Exception as e: return None, f"Error: {str(e)}"
 
 # --- PLOTTING FUNCTION ---
 def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike):
@@ -375,14 +406,14 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
     
     for i, ticker in enumerate(LIQUID_TICKERS):
         
-        status.caption(f"Analyzing {ticker}...")
+        status.text(f"Scanning {ticker}...")
         progress.progress((i + 1) / len(LIQUID_TICKERS))
         
         data = get_stock_data(ticker)
         if not data: continue
         
         # Pass Ticker name to apply bifurcated logic
-        spread = find_optimal_spread(
+        spread, reject_reason = find_optimal_spread(
             ticker, 
             yf.Ticker(ticker), 
             data['price'], 
@@ -390,19 +421,38 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
             dev_mode=dev_mode
         )
         
+        # VISIBILITY: Show why it was skipped if it failed
+        if not spread and reject_reason:
+            status.markdown(f"<span style='color: #777;'>Skipping <b>{ticker}</b>: {reject_reason}</span>", unsafe_allow_html=True)
+            time.sleep(0.05) # Tiny pause so human eye can register the skip message
+        
         if spread:
-            # Score Logic
+            # --- SCORING LOGIC (UPDATED WITH PRICE ACTION) ---
             score = 0
-            if spread['iv'] > (data['hv'] + 5.0): score += 40
-            elif spread['iv'] > data['hv']: score += 20
-            score += 30 # Safety passed
+            
+            # 1. Volatility Edge
+            if spread['iv'] > (data['hv'] + 5.0): score += 30
+            elif spread['iv'] > data['hv']: score += 15
+            
+            # 2. Credit Quality
             width = spread['short'] - spread['long']
             if width > 0:
                 credit_ratio = spread['credit'] / width
                 if credit_ratio >= 0.30: score += 20
                 elif credit_ratio >= 0.25: score += 15
                 elif credit_ratio >= 0.15: score += 10
-            if data['is_above_sma']: score += 10
+            
+            # 3. Trend Alignment (Buy the Dip in Uptrend)
+            if data['is_uptrend']: 
+                score += 10 # Price > SMA 200
+                
+            # 4. Dip Logic (RSI)
+            rsi = data['rsi']
+            if rsi < 30: score += 25 # Oversold (Great entry)
+            elif rsi < 50: score += 15 # Healthy Dip (Good entry)
+            elif rsi > 70: score -= 15 # Overbought (Bad entry)
+            
+            score += 20 # Baseline for passing filters
             
             display_score = min(score, 100.0)
             
@@ -454,6 +504,10 @@ if st.session_state.scan_results is not None:
                     exp_dt = datetime.strptime(s['expiration_raw'], "%Y-%m-%d")
                     exit_dt = exp_dt - timedelta(days=21)
                     exit_str = exit_dt.strftime("%b %d, %Y")
+                    
+                    # Trend Context
+                    rsi_color = "#00C853" if d['rsi'] < 50 else "#FFA726"
+                    trend_txt = "⬆ UPTREND" if d['is_uptrend'] else "⬇ DOWNTREND"
 
                     c1, c2 = st.columns(2)
                     with c1:
@@ -477,10 +531,10 @@ if st.session_state.scan_results is not None:
                         <div class="metric-label">Expiry</div>
                         <div class="metric-value">{s['dte']} Days</div>
                         <div style="font-size: 10px; color: gray;">{s['expiration']}</div>
-                        <div style="font-size: 10px; color: #FFA726; margin-top: 2px;">Exit: {exit_str}</div>
                         <div style="height: 8px;"></div>
-                        <div class="metric-label">Implied Vol</div>
-                        <div class="metric-value">{s['iv']:.1f}%</div>
+                        <div class="metric-label">Tech Context</div>
+                        <div style="font-size: 12px; color: #ccc;">{trend_txt}</div>
+                        <div style="font-size: 12px; color: {rsi_color};">RSI: {d['rsi']:.0f}</div>
                         """, unsafe_allow_html=True)
                     
                     st.markdown("---")
