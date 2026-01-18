@@ -21,6 +21,24 @@ from persistence import (
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Finder")
 
+# --- 1. SESSION STATE INITIALIZATION (MUST BE FIRST) ---
+if "trades" not in st.session_state:
+    # Try loading from drive, else empty list
+    try:
+        drive_service = build_drive_service_from_session()
+        st.session_state.trades = load_from_drive(drive_service) or []
+    except:
+        st.session_state.trades = []
+
+if "scan_results" not in st.session_state:
+    st.session_state.scan_results = [] 
+
+if "scan_log" not in st.session_state:
+    st.session_state.scan_log = []
+
+if "scan_complete" not in st.session_state:
+    st.session_state.scan_complete = False
+
 # --- API KEYS ---
 try:
     FINNHUB_API_KEY = st.secrets["general"]["FINNHUB_API_KEY"]
@@ -28,7 +46,7 @@ except (FileNotFoundError, KeyError):
     st.error("FINNHUB_API_KEY not found in .streamlit/secrets.toml")
     st.stop()
 
-# --- CONSTANTS & COLORS ---
+# --- CONSTANTS ---
 SUCCESS_COLOR = "#00C853"
 WARNING_COLOR = "#d32f2f"
 BG_COLOR = '#0E1117'
@@ -77,8 +95,7 @@ ETFS = [
     "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS"
 ]
 
-# --- INITIALIZE SERVICES ---
-drive_service = None
+# --- SERVICES ---
 try:
     drive_service = build_drive_service_from_session()
 except Exception:
@@ -88,20 +105,6 @@ try:
     finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
 except Exception as e:
     finnhub_client = None
-
-if "trades" not in st.session_state:
-    st.session_state.trades = load_from_drive(drive_service) or [] if drive_service else []
-
-if "scan_results" not in st.session_state:
-    st.session_state.scan_results = [] 
-
-if "scan_log" not in st.session_state:
-    st.session_state.scan_log = []
-
-if "current_ticker_index" not in st.session_state:
-    st.session_state.current_ticker_index = 0
-if "batch_complete" not in st.session_state:
-    st.session_state.batch_complete = False
 
 # --- TECHNICAL ANALYSIS HELPER ---
 def calculate_rsi(series, period=14):
@@ -113,27 +116,20 @@ def calculate_rsi(series, period=14):
 
 # --- SMART RETRY LOGIC (BLOCKING) ---
 def blocking_retry(func, *args, **kwargs):
-    """
-    Retries a function if it hits a Rate Limit.
-    Waits 45 seconds if a 429 is detected.
-    """
     max_retries = 3
-    
     for attempt in range(max_retries):
         try:
             return func(*args, **kwargs)
         except Exception as e:
             err_msg = str(e).lower()
             if "429" in err_msg or "too many requests" in err_msg:
-                # RATE LIMIT HIT: PAUSE SCRIPT
+                # PAUSE SCRIPT ON RATE LIMIT
                 placeholder = st.empty()
                 for i in range(45, 0, -1):
                     placeholder.warning(f"Rate Limit Hit. Cooling down: {i}s...")
                     time.sleep(1)
                 placeholder.empty()
-                # Retry loop will continue now
             else:
-                # Other error, simple retry
                 if attempt == max_retries - 1: return None
                 time.sleep(2)
     return None
@@ -143,7 +139,7 @@ def is_safe_from_earnings(ticker, expiration_date_str):
     if ticker in ETFS: return True, "ETF"
     if not finnhub_client: return True, "No API"
     try:
-        time.sleep(0.5) 
+        time.sleep(0.2) 
         today = datetime.now().date()
         exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
         earnings = finnhub_client.earnings_calendar(_from=today.strftime("%Y-%m-%d"), to=exp_date.strftime("%Y-%m-%d"), symbol=ticker)
@@ -181,7 +177,6 @@ def get_market_health():
 def process_bulk_data(df, ticker):
     try:
         hist = pd.DataFrame()
-        
         if isinstance(df.columns, pd.MultiIndex):
             try:
                 ticker_df = df[ticker].copy()
@@ -190,22 +185,18 @@ def process_bulk_data(df, ticker):
         else:
             ticker_df = df.copy()
 
-        if 'Close' not in ticker_df.columns:
-            return None
+        if 'Close' not in ticker_df.columns: return None
             
         hist['Close'] = ticker_df['Close']
         hist['Open'] = ticker_df['Open'] if 'Open' in ticker_df.columns else hist['Close']
-        
         hist = hist.dropna()
         if hist.empty: return None
 
         current_price = hist['Close'].iloc[-1]
-        
+        change_pct = 0.0
         if len(hist) > 1:
-            prev_price = hist['Close'].iloc[-2]
-            change_pct = ((current_price - prev_price) / prev_price) * 100
-        else:
-            change_pct = 0.0
+            prev = hist['Close'].iloc[-2]
+            change_pct = ((current_price - prev) / prev) * 100
         
         hist['Returns'] = hist['Close'].pct_change()
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
@@ -240,40 +231,35 @@ def process_bulk_data(df, ticker):
             "is_oversold_bb": is_oversold_bb, "is_overbought_bb": is_overbought_bb,
             "type_str": type_str, "sector_str": sector_str, "hist": hist
         }
-    except Exception as e:
-        return None
+    except Exception: return None
 
-# --- TRADE LOGIC (WITH BLOCKING RETRY) ---
+# --- TRADE LOGIC ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
     try:
-        # 1. Fetch Options (Blocking Retry)
-        # We access .options property. If it fails, blocking_retry catches it.
-        def get_options_list():
-            return stock_obj.options
-            
-        exps = blocking_retry(get_options_list)
-        if not exps: return None, "No Options Chain (or Blocked)"
+        # 1. Fetch Options List
+        def get_opts(): return stock_obj.options
+        exps = blocking_retry(get_opts)
+        if not exps: return None, "No Options"
         
         min_days = 14 if dev_mode else 25
         max_days = 60 if dev_mode else 50
         
-        target_min_date = datetime.now() + timedelta(days=min_days)
-        target_max_date = datetime.now() + timedelta(days=max_days)
-        
         valid_exps = []
+        now = datetime.now()
         for e in exps:
             try:
                 edate = datetime.strptime(e, "%Y-%m-%d")
-                if target_min_date <= edate <= target_max_date:
+                if (now + timedelta(days=min_days)) <= edate <= (now + timedelta(days=max_days)):
                     valid_exps.append(e)
             except: pass
+            
         if not valid_exps: return None, "No Valid Expiry"
         best_exp = max(valid_exps) 
-        dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
+        dte = (datetime.strptime(best_exp, "%Y-%m-%d") - now).days
 
-        # 2. Fetch Chain (Blocking Retry)
+        # 2. Fetch Chain
         chain = blocking_retry(stock_obj.option_chain, best_exp)
-        if not chain: return None, "Failed to fetch Chain"
+        if not chain: return None, "Chain Error"
         
         puts = chain.puts
         atm_puts = puts[abs(puts['strike'] - current_price) == abs(puts['strike'] - current_price).min()]
@@ -287,13 +273,12 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         if otm_puts.empty:
             if dev_mode: otm_puts = puts[puts['strike'] < current_price].sort_values('strike', ascending=False)
             else:
-                target_short_fallback = current_price * 0.95
-                otm_puts = puts[puts['strike'] <= target_short_fallback].sort_values('strike', ascending=False)
+                target_fallback = current_price * 0.95
+                otm_puts = puts[puts['strike'] <= target_fallback].sort_values('strike', ascending=False)
         if otm_puts.empty: return None, "No Safe Strikes"
 
         width = 5.0
-        if ticker in ETFS: min_credit = 0.50 
-        else: min_credit = 0.70 
+        min_credit = 0.50 if ticker in ETFS else 0.70
         if dev_mode: min_credit = 0.05
 
         best_spread = None
@@ -309,11 +294,11 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
             slippage_pct = spread_width / ask
             is_liquid = dev_mode or (spread_width <= 0.05) or (slippage_pct <= 0.20)
             if not is_liquid: 
-                rejection_reason = "Illiquid Strikes"
+                rejection_reason = "Illiquid"
                 continue
 
-            long_strike_target = short_strike - width
-            long_leg = puts[abs(puts['strike'] - long_strike_target) < 0.2] 
+            long_target = short_strike - width
+            long_leg = puts[abs(puts['strike'] - long_target) < 0.2] 
             if long_leg.empty: continue 
             long_row = long_leg.iloc[0]
             mid_credit = bid - long_row['ask']
@@ -323,11 +308,10 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
                 roi = (mid_credit / max_loss) * 100 if max_loss > 0 else 0
                 iv = short_row['impliedVolatility'] * 100
                 
-                exp_date_obj = datetime.strptime(best_exp, "%Y-%m-%d")
-                exp_date_str = exp_date_obj.strftime("%b %d, %Y")
+                exp_str = datetime.strptime(best_exp, "%Y-%m-%d").strftime("%b %d, %Y")
 
                 best_spread = {
-                    "expiration_raw": best_exp, "expiration": exp_date_str, "dte": dte, 
+                    "expiration_raw": best_exp, "expiration": exp_str, "dte": dte, 
                     "short": short_strike, "long": long_row['strike'],
                     "credit": mid_credit, "max_loss": max_loss, 
                     "iv": iv, "roi": roi, "em": expected_move
@@ -336,7 +320,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         
         if best_spread and not dev_mode:
             is_safe, msg = is_safe_from_earnings(ticker, best_exp)
-            if not is_safe: return None, f"Earnings on {msg}"
+            if not is_safe: return None, f"Earnings: {msg}"
         
         if best_spread: return best_spread, None
         else: return None, rejection_reason
@@ -406,10 +390,9 @@ with st.sidebar:
     if dev_mode: st.warning("DEV MODE ACTIVE: Safety Filters Disabled.")
     
     if st.button("Reset Scanner"):
-        st.session_state.current_ticker_index = 0
         st.session_state.scan_results = []
         st.session_state.scan_log = []
-        st.session_state.batch_complete = False
+        st.session_state.scan_complete = False
         st.rerun()
 
 # --- SCAN BUTTON (AUTO BATCH LOOP) ---
@@ -431,7 +414,7 @@ if st.button("Scan Market (Full Run)"):
     st.markdown("---") 
     log_placeholder = st.empty()
     
-    # BATCHING LOGIC (REDUCED TO 5)
+    # BATCHING LOGIC (5 at a time)
     batch_size = 5
     total_tickers = len(LIQUID_TICKERS)
     
@@ -461,7 +444,7 @@ if st.button("Scan Market (Full Run)"):
                 continue
             
             # SLOW AND STEADY
-            time.sleep(random.uniform(3.0, 6.0))
+            time.sleep(random.uniform(2.0, 4.0))
             
             spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
             
@@ -488,17 +471,17 @@ if st.button("Scan Market (Full Run)"):
             log_text = "\n".join(st.session_state.scan_log[-8:])
             log_placeholder.code(log_text, language="text")
             
-        # EXTRA BATCH COOLDOWN
+        # BATCH COOLDOWN
         if end_idx < total_tickers:
-            time.sleep(10) 
+            time.sleep(5) 
 
     st.session_state.scan_complete = True
     progress_bar.empty()
     status_text.empty()
-    st.rerun()
+    # NO ST.RERUN() HERE - Just fall through to display logic
 
 # --- DISPLAY LOGIC ---
-if st.session_state.scan_complete and st.session_state.scan_results:
+if st.session_state.get('scan_complete', False) and st.session_state.scan_results:
     sorted_results = sorted(st.session_state.scan_results, key=lambda x: x['score'], reverse=True)
     st.success(f"Scan Complete: Found {len(sorted_results)} Opportunities")
     
