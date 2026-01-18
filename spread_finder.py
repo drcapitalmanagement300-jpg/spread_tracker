@@ -21,7 +21,7 @@ from persistence import (
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Finder")
 
-# --- API KEYS (SECURE) ---
+# --- API KEYS ---
 try:
     FINNHUB_API_KEY = st.secrets["general"]["FINNHUB_API_KEY"]
 except (FileNotFoundError, KeyError):
@@ -35,7 +35,7 @@ BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
 
-# --- 1. GLOBAL LISTS & MAPS (DEFINED FIRST) ---
+# --- SECTOR MAP ---
 SECTOR_MAP = {
     "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "IWM": "Russell 2000 ETF", "DIA": "Dow Jones ETF",
     "GLD": "Gold Trust", "SLV": "Silver Trust", "TLT": "20+ Yr Treasury Bond", "XLK": "Technology ETF",
@@ -103,7 +103,7 @@ if "current_ticker_index" not in st.session_state:
 if "batch_complete" not in st.session_state:
     st.session_state.batch_complete = False
 
-# Use Global Session for Connection Reuse
+# Global Session
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -147,50 +147,61 @@ def is_safe_from_earnings(ticker, expiration_date_str):
             return False, earnings['earningsCalendar'][0]['date']
         return True, "Clear" 
     except Exception as e:
-        if "429" in str(e): time.sleep(5)
         return True, "Error"
 
 # --- MARKET HEALTH CHECK ---
 def get_market_health():
     try:
-        # Use Finnhub for price (safe)
-        if finnhub_client:
-            try:
-                quote = finnhub_client.quote("SPY")
-                current_price = quote['c']
-            except:
-                current_price = 0
+        # Use simple single download for SPY
+        df = yf.download("SPY", period="1y", progress=False)
+        if df is None or df.empty: return True, 0, 0
+        
+        # Handle MultiIndex if present
+        if isinstance(df.columns, pd.MultiIndex):
+            close_col = df['Close']['SPY']
         else:
-            current_price = 0
-
-        # Use Yahoo for SMA
-        spy = yf.Ticker("SPY", session=session)
-        hist = safe_yfinance_call(spy.history, period="1y")
-        
-        if hist is None or hist.empty: return True, current_price, 0
-        
-        if current_price == 0:
-            current_price = hist['Close'].iloc[-1]
+            close_col = df['Close']
             
-        sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
+        current_price = close_col.iloc[-1]
+        sma_200 = close_col.rolling(window=200).mean().iloc[-1]
         return current_price > sma_200, current_price, sma_200
     except: return True, 0, 0
 
-# --- DATA FETCHING (OPTIMIZED) ---
-@st.cache_data(ttl=3600)
-def get_stock_data(ticker):
+# --- BULK DATA PROCESSING (NEW) ---
+def process_bulk_data(df, ticker):
+    """
+    Extracts single ticker data from the bulk DataFrame and calculates indicators.
+    """
     try:
-        stock = yf.Ticker(ticker, session=session)
+        # yfinance bulk download returns MultiIndex columns: (PriceType, Ticker)
+        # We need to extract the slice for THIS ticker.
         
-        # WE REMOVED STOCK.INFO TO PREVENT RATE LIMITS
-        
-        hist = safe_yfinance_call(stock.history, period="1y")
-        if hist is None or hist.empty: return None
-        
+        # Create a clean single-index DataFrame for the ticker
+        hist = pd.DataFrame()
+        try:
+            hist['Close'] = df['Close'][ticker]
+            # Handle Open if available, or fill
+            if 'Open' in df.columns:
+                hist['Open'] = df['Open'][ticker]
+            else:
+                hist['Open'] = hist['Close']
+        except KeyError:
+            return None # Ticker not in bulk data
+
+        # Drop NaNs at the end
+        hist = hist.dropna()
+        if hist.empty: return None
+
         current_price = hist['Close'].iloc[-1]
-        prev_price = hist['Close'].iloc[-2]
-        change_pct = ((current_price - prev_price) / prev_price) * 100
         
+        # Check prev price for change pct
+        if len(hist) > 1:
+            prev_price = hist['Close'].iloc[-2]
+            change_pct = ((current_price - prev_price) / prev_price) * 100
+        else:
+            change_pct = 0.0
+        
+        # Indicators
         hist['Returns'] = hist['Close'].pct_change()
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
         current_hv = hist['HV'].iloc[-1] if not pd.isna(hist['HV'].iloc[-1]) else 0
@@ -199,6 +210,7 @@ def get_stock_data(ticker):
         hist['SMA_200'] = hist['Close'].rolling(window=200).mean()
         hist['RSI'] = calculate_rsi(hist['Close'])
 
+        # BB
         hist['SMA_20'] = hist['Close'].rolling(window=20).mean()
         hist['STD_20'] = hist['Close'].rolling(window=20).std()
         hist['BB_Upper'] = hist['SMA_20'] + (hist['STD_20'] * 2)
@@ -223,11 +235,14 @@ def get_stock_data(ticker):
             "is_oversold_bb": is_oversold_bb, "is_overbought_bb": is_overbought_bb,
             "type_str": type_str, "sector_str": sector_str, "hist": hist
         }
-    except: return None
+    except Exception as e:
+        # st.write(f"Error processing {ticker}: {e}")
+        return None
 
 # --- TRADE LOGIC ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
     try:
+        # Retry options fetching
         try:
             exps = stock_obj.options
         except: 
@@ -237,6 +252,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         
         min_days = 14 if dev_mode else 25
         max_days = 60 if dev_mode else 50
+        
         target_min_date = datetime.now() + timedelta(days=min_days)
         target_max_date = datetime.now() + timedelta(days=max_days)
         
@@ -367,7 +383,6 @@ with st.sidebar:
         st.rerun()
 
 # --- BATCH SCAN LOGIC ---
-# LIQUID_TICKERS IS DEFINED AT THE TOP NOW
 total_tickers = len(LIQUID_TICKERS)
 start_index = st.session_state.current_ticker_index
 batch_size = 10
@@ -383,8 +398,7 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
     
     if start_index == 0:
         status = st.empty()
-        status.info("Initializing Scanner (Warming up API)...")
-        time.sleep(2) 
+        status.info("Initializing Scanner...")
         market_healthy, spy_price, spy_sma = get_market_health()
         status.empty()
         
@@ -396,25 +410,36 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
     status_text = st.empty()
     st.markdown("---") 
     log_placeholder = st.empty()
-    fail_count = 0 
+    
+    # --- 1. BULK DOWNLOAD STEP (The Fix) ---
+    current_batch_tickers = LIQUID_TICKERS[start_index:end_index]
+    status_text.text(f"Fetching Bulk Data for {len(current_batch_tickers)} tickers...")
+    
+    # Bulk Download! (1 API Call for 10 tickers)
+    try:
+        bulk_data = yf.download(current_batch_tickers, period="1y", group_by='ticker', progress=False)
+        st.session_state.scan_log.append(f"[BATCH] Bulk download successful for {len(current_batch_tickers)} tickers")
+    except Exception as e:
+        bulk_data = None
+        st.session_state.scan_log.append(f"[BATCH] Bulk download failed: {e}")
 
-    for i in range(start_index, end_index):
-        ticker = LIQUID_TICKERS[i]
-        status_text.text(f"Scanning {ticker}...")
-        progress_bar.progress((i - start_index + 1) / batch_size)
+    # --- 2. LOOP FOR OPTIONS (Reduced Calls) ---
+    for i, ticker in enumerate(current_batch_tickers):
+        status_text.text(f"Analyzing {ticker}...")
+        progress_bar.progress((i + 1) / len(current_batch_tickers))
         
-        time.sleep(random.uniform(1.5, 2.5))
-        
-        data = get_stock_data(ticker)
+        # Use data from Bulk Dataframe
+        if bulk_data is not None and not bulk_data.empty:
+            data = process_bulk_data(bulk_data, ticker)
+        else:
+            data = None # Fallback failed
+            
         if not data: 
-            st.session_state.scan_log.append(f"[{ticker}] Failed to fetch data")
-            fail_count += 1
-            if fail_count >= 3:
-                st.session_state.scan_log.append("!!! CIRCUIT BREAKER TRIPPED. Pause.")
-                break
+            st.session_state.scan_log.append(f"[{ticker}] Data Unavailable (Check connection)")
             continue
         
-        fail_count = 0
+        # Only call API for options
+        time.sleep(random.uniform(1.0, 2.0))
         spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker, session=session), data['price'], data['hv'], dev_mode=dev_mode)
         
         if spread:
@@ -450,7 +475,7 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
         log_text = "\n".join(st.session_state.scan_log[-10:])
         log_placeholder.code(log_text, language="text")
 
-    st.session_state.current_ticker_index = i + 1
+    st.session_state.current_ticker_index = end_index
     st.session_state.batch_complete = True 
     progress_bar.empty()
     status_text.empty()
