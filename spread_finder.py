@@ -71,7 +71,7 @@ LIQUID_TICKERS = [
     "LLY", "UNH", "JNJ", "PFE", "MRK", "ABBV", "BMY", "AMGN", "GILD", "MRNA"
 ]
 
-# ETF LIST (To skip earnings checks and apply lower credit threshold)
+# ETF LIST (To skip earnings checks)
 ETFS = [
     "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX",
     "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS"
@@ -100,7 +100,7 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-# --- EARNINGS SAFETY CHECK (DYNAMIC) ---
+# --- EARNINGS SAFETY CHECK (DYNAMIC + THROTTLED) ---
 def is_safe_from_earnings(ticker, expiration_date_str):
     """
     Returns (True, msg) if safe.
@@ -113,10 +113,12 @@ def is_safe_from_earnings(ticker, expiration_date_str):
         return True, "No API"
 
     try:
+        # THROTTLE: Sleep 1s before calling API to respect 60 calls/min limit
+        time.sleep(1.0) 
+        
         today = datetime.now().date()
         exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
         
-        # Ask Finnhub: "Any earnings between NOW and EXPIRATION?"
         earnings = finnhub_client.earnings_calendar(
             _from=today.strftime("%Y-%m-%d"),
             to=exp_date.strftime("%Y-%m-%d"),
@@ -132,6 +134,9 @@ def is_safe_from_earnings(ticker, expiration_date_str):
         
     except Exception as e:
         print(f"Finnhub Error for {ticker}: {e}")
+        # If rate limit hit (429), force sleep and retry or skip.
+        if "429" in str(e):
+            time.sleep(5) # Cooldown
         return True, "Error"
 
 # --- MARKET HEALTH CHECK ---
@@ -153,7 +158,7 @@ def get_market_health():
 def get_stock_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="1y") # Need 1y for SMA200
+        hist = stock.history(period="1y")
         if hist.empty: return None
         
         current_price = hist['Close'].iloc[-1]
@@ -175,7 +180,7 @@ def get_stock_data(ticker):
         current_rsi = hist['RSI'].iloc[-1] if len(hist) >= 14 else 50
 
         is_above_sma = current_price > sma_100
-        is_uptrend = current_price > sma_200 # Long term trend
+        is_uptrend = current_price > sma_200
 
         # --- SECTOR & TYPE FETCH ---
         try:
@@ -207,12 +212,11 @@ def get_stock_data(ticker):
         }
     except: return None
 
-# --- TRADE LOGIC (BIFURCATED + REJECTION REASONS) ---
+# --- TRADE LOGIC (OPTIMIZED ORDER) ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
     """
     Returns: (spread_dict, rejection_reason_string)
-    If success, rejection_reason_string is None.
-    If failure, spread_dict is None.
+    OPTIMIZATION: Checks Math FIRST, then API.
     """
     try:
         exps = stock_obj.options
@@ -233,15 +237,9 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
                     valid_exps.append(e)
             except: pass
             
-        if not valid_exps: return None, "No Valid Expiry (25-50 days)"
+        if not valid_exps: return None, "No Valid Expiry"
         best_exp = max(valid_exps) 
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
-
-        # --- DYNAMIC EARNINGS CHECK ---
-        if not dev_mode:
-            is_safe, msg = is_safe_from_earnings(ticker, best_exp)
-            if not is_safe:
-                return None, f"Earnings on {msg}" # <--- RETURNS REASON
 
         chain = stock_obj.option_chain(best_exp)
         puts = chain.puts
@@ -277,6 +275,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         best_spread = None
         rejection_reason = "Credit Too Low"
 
+        # MATH FIRST: Find a spread that works financially
         for index, short_row in otm_puts.iterrows():
             short_strike = short_row['strike']
             bid = short_row['bid']
@@ -317,6 +316,12 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
                     "em": expected_move
                 }
                 break 
+        
+        # API CHECK LAST: Only check earnings if the math worked!
+        if best_spread and not dev_mode:
+            is_safe, msg = is_safe_from_earnings(ticker, best_exp)
+            if not is_safe:
+                return None, f"Earnings on {msg}"
         
         if best_spread:
             return best_spread, None
@@ -424,7 +429,8 @@ if st.button(f"Scan Market {'(Dev Mode)' if dev_mode else '(Strict)'}"):
         # VISIBILITY: Show why it was skipped if it failed
         if not spread and reject_reason:
             status.markdown(f"<span style='color: #777;'>Skipping <b>{ticker}</b>: {reject_reason}</span>", unsafe_allow_html=True)
-            time.sleep(0.05) # Tiny pause so human eye can register the skip message
+            # Sleep tiny amount so the human eye can see the reject reason flash
+            time.sleep(0.01)
         
         if spread:
             # --- SCORING LOGIC (UPDATED WITH PRICE ACTION) ---
