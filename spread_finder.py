@@ -152,56 +152,67 @@ def is_safe_from_earnings(ticker, expiration_date_str):
 # --- MARKET HEALTH CHECK ---
 def get_market_health():
     try:
-        # Use simple single download for SPY
-        df = yf.download("SPY", period="1y", progress=False)
-        if df is None or df.empty: return True, 0, 0
-        
-        # Handle MultiIndex if present
-        if isinstance(df.columns, pd.MultiIndex):
-            close_col = df['Close']['SPY']
+        # Use Finnhub for price (safe)
+        if finnhub_client:
+            try:
+                quote = finnhub_client.quote("SPY")
+                current_price = quote['c']
+            except:
+                current_price = 0
         else:
-            close_col = df['Close']
+            current_price = 0
+
+        # Use Yahoo for SMA
+        spy = yf.Ticker("SPY", session=session)
+        hist = safe_yfinance_call(spy.history, period="1y")
+        
+        if hist is None or hist.empty: return True, current_price, 0
+        
+        if current_price == 0:
+            current_price = hist['Close'].iloc[-1]
             
-        current_price = close_col.iloc[-1]
-        sma_200 = close_col.rolling(window=200).mean().iloc[-1]
+        sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
         return current_price > sma_200, current_price, sma_200
     except: return True, 0, 0
 
-# --- BULK DATA PROCESSING (NEW) ---
+# --- BULK DATA PROCESSING (FIXED) ---
 def process_bulk_data(df, ticker):
     """
-    Extracts single ticker data from the bulk DataFrame and calculates indicators.
+    Extracts single ticker data from the bulk DataFrame.
     """
     try:
-        # yfinance bulk download returns MultiIndex columns: (PriceType, Ticker)
-        # We need to extract the slice for THIS ticker.
-        
-        # Create a clean single-index DataFrame for the ticker
         hist = pd.DataFrame()
-        try:
-            hist['Close'] = df['Close'][ticker]
-            # Handle Open if available, or fill
-            if 'Open' in df.columns:
-                hist['Open'] = df['Open'][ticker]
-            else:
-                hist['Open'] = hist['Close']
-        except KeyError:
-            return None # Ticker not in bulk data
+        
+        # KEY FIX: Handle the MultiIndex correctly based on group_by='ticker'
+        if isinstance(df.columns, pd.MultiIndex):
+            # If ticker is top level
+            try:
+                ticker_df = df[ticker].copy()
+            except KeyError:
+                return None
+        else:
+            # If flat (single ticker downloaded), columns are OHLC directly
+            # This happens if batch size is 1 or only 1 succeeded
+            ticker_df = df.copy()
 
-        # Drop NaNs at the end
+        # Normalize Columns
+        if 'Close' not in ticker_df.columns:
+            return None
+            
+        hist['Close'] = ticker_df['Close']
+        hist['Open'] = ticker_df['Open'] if 'Open' in ticker_df.columns else hist['Close']
+        
         hist = hist.dropna()
         if hist.empty: return None
 
         current_price = hist['Close'].iloc[-1]
         
-        # Check prev price for change pct
         if len(hist) > 1:
             prev_price = hist['Close'].iloc[-2]
             change_pct = ((current_price - prev_price) / prev_price) * 100
         else:
             change_pct = 0.0
         
-        # Indicators
         hist['Returns'] = hist['Close'].pct_change()
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
         current_hv = hist['HV'].iloc[-1] if not pd.isna(hist['HV'].iloc[-1]) else 0
@@ -236,17 +247,15 @@ def process_bulk_data(df, ticker):
             "type_str": type_str, "sector_str": sector_str, "hist": hist
         }
     except Exception as e:
-        # st.write(f"Error processing {ticker}: {e}")
         return None
 
 # --- TRADE LOGIC ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
     try:
-        # Retry options fetching
         try:
             exps = stock_obj.options
         except: 
-            time.sleep(1)
+            time.sleep(1) # Tiny pause
             exps = stock_obj.options
         if not exps: return None, "No Options Chain"
         
@@ -399,6 +408,7 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
     if start_index == 0:
         status = st.empty()
         status.info("Initializing Scanner...")
+        time.sleep(2) 
         market_healthy, spy_price, spy_sma = get_market_health()
         status.empty()
         
@@ -411,19 +421,19 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
     st.markdown("---") 
     log_placeholder = st.empty()
     
-    # --- 1. BULK DOWNLOAD STEP (The Fix) ---
+    # --- 1. BULK DOWNLOAD ---
     current_batch_tickers = LIQUID_TICKERS[start_index:end_index]
     status_text.text(f"Fetching Bulk Data for {len(current_batch_tickers)} tickers...")
     
-    # Bulk Download! (1 API Call for 10 tickers)
     try:
+        # group_by='ticker' ensures data is structured as df[Ticker][Close]
         bulk_data = yf.download(current_batch_tickers, period="1y", group_by='ticker', progress=False)
         st.session_state.scan_log.append(f"[BATCH] Bulk download successful for {len(current_batch_tickers)} tickers")
     except Exception as e:
         bulk_data = None
         st.session_state.scan_log.append(f"[BATCH] Bulk download failed: {e}")
 
-    # --- 2. LOOP FOR OPTIONS (Reduced Calls) ---
+    # --- 2. LOOP ---
     for i, ticker in enumerate(current_batch_tickers):
         status_text.text(f"Analyzing {ticker}...")
         progress_bar.progress((i + 1) / len(current_batch_tickers))
@@ -432,13 +442,12 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
         if bulk_data is not None and not bulk_data.empty:
             data = process_bulk_data(bulk_data, ticker)
         else:
-            data = None # Fallback failed
+            data = None 
             
         if not data: 
             st.session_state.scan_log.append(f"[{ticker}] Data Unavailable (Check connection)")
             continue
         
-        # Only call API for options
         time.sleep(random.uniform(1.0, 2.0))
         spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker, session=session), data['price'], data['hv'], dev_mode=dev_mode)
         
