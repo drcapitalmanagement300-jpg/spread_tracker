@@ -51,7 +51,7 @@ if "trades" not in st.session_state:
     st.session_state.trades = load_from_drive(drive_service) or [] if drive_service else []
 
 if "scan_results" not in st.session_state:
-    st.session_state.scan_results = [] # Initialize as list
+    st.session_state.scan_results = [] 
 
 if "scan_log" not in st.session_state:
     st.session_state.scan_log = []
@@ -59,6 +59,8 @@ if "scan_log" not in st.session_state:
 # --- BATCH SCAN STATE ---
 if "current_ticker_index" not in st.session_state:
     st.session_state.current_ticker_index = 0
+if "batch_complete" not in st.session_state:
+    st.session_state.batch_complete = False
 
 # 1. EXPANDED UNIVERSE
 LIQUID_TICKERS = [
@@ -111,11 +113,9 @@ def safe_yfinance_call(func, *args, **kwargs):
             return func(*args, **kwargs)
         except Exception as e:
             err_msg = str(e).lower()
-            # If 429, we are banned. Don't hammer. Wait long or fail.
             if "429" in err_msg or "too many requests" in err_msg:
-                if attempt == 0: time.sleep(5) # First hit, wait 5s
-                elif attempt == 1: time.sleep(10) # Second hit, wait 10s
-                else: return None # Give up
+                wait_time = base_wait * (2 ** attempt) + random.uniform(0.5, 1.5)
+                time.sleep(wait_time)
             else:
                 if attempt == max_retries - 1: return None
                 time.sleep(1)
@@ -125,22 +125,13 @@ def safe_yfinance_call(func, *args, **kwargs):
 def is_safe_from_earnings(ticker, expiration_date_str):
     if ticker in ETFS: return True, "ETF"
     if not finnhub_client: return True, "No API"
-
     try:
         time.sleep(0.5) 
         today = datetime.now().date()
         exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
-        
-        earnings = finnhub_client.earnings_calendar(
-            _from=today.strftime("%Y-%m-%d"),
-            to=exp_date.strftime("%Y-%m-%d"),
-            symbol=ticker
-        )
-        
-        if earnings and 'earningsCalendar' in earnings:
-            if len(earnings['earningsCalendar']) > 0:
-                report_date = earnings['earningsCalendar'][0]['date']
-                return False, report_date
+        earnings = finnhub_client.earnings_calendar(_from=today.strftime("%Y-%m-%d"), to=exp_date.strftime("%Y-%m-%d"), symbol=ticker)
+        if earnings and 'earningsCalendar' in earnings and len(earnings['earningsCalendar']) > 0:
+            return False, earnings['earningsCalendar'][0]['date']
         return True, "Clear" 
     except Exception as e:
         if "429" in str(e): time.sleep(5)
@@ -173,7 +164,6 @@ def get_stock_data(ticker):
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
         current_hv = hist['HV'].iloc[-1] if not pd.isna(hist['HV'].iloc[-1]) else 0
 
-        # Technicals
         hist['SMA_100'] = hist['Close'].rolling(window=100).mean()
         hist['SMA_200'] = hist['Close'].rolling(window=200).mean()
         hist['RSI'] = calculate_rsi(hist['Close'])
@@ -223,12 +213,10 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
         except: 
             time.sleep(1)
             exps = stock_obj.options
-            
         if not exps: return None, "No Options Chain"
         
         min_days = 14 if dev_mode else 25
         max_days = 60 if dev_mode else 50
-        
         target_min_date = datetime.now() + timedelta(days=min_days)
         target_max_date = datetime.now() + timedelta(days=max_days)
         
@@ -239,7 +227,6 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
                 if target_min_date <= edate <= target_max_date:
                     valid_exps.append(e)
             except: pass
-            
         if not valid_exps: return None, "No Valid Expiry"
         best_exp = max(valid_exps) 
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - datetime.now()).days
@@ -261,7 +248,6 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
             else:
                 target_short_fallback = current_price * 0.95
                 otm_puts = puts[puts['strike'] <= target_short_fallback].sort_values('strike', ascending=False)
-
         if otm_puts.empty: return None, "No Safe Strikes"
 
         width = 5.0
@@ -317,7 +303,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
     except Exception as e: return None, f"Error: {str(e)}"
 
 # --- PLOTTING ---
-def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike, bb_lower, bb_upper):
+def plot_clean_sparkline(hist, short_strike, long_strike):
     fig, ax = plt.subplots(figsize=(4, 1.3)) 
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(BG_COLOR)
@@ -328,8 +314,7 @@ def plot_sparkline_cone(hist, current_price, iv, short_strike, long_strike, bb_l
     heights = last_60['Close'] - last_60['Open']
     bottoms = last_60['Open']
     ax.bar(dates, heights, bottom=bottoms, color=bar_colors, width=0.8, align='center', alpha=0.9)
-    ax.plot(dates, last_60['BB_Upper'], color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
-    ax.plot(dates, last_60['BB_Lower'], color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
+    # Clean chart: No BB lines, just price and strikes
     ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, alpha=0.9)
     ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
     ax.fill_between(dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.1)
@@ -355,11 +340,11 @@ with st.sidebar:
     dev_mode = st.checkbox("Dev Mode (Bypass Filters)", value=False, help="Check this to test in bear markets.")
     if dev_mode: st.warning("DEV MODE ACTIVE: Safety Filters Disabled.")
     
-    # Reset Button
-    if st.button("Reset Scanner Progress"):
+    if st.button("Reset Scanner"):
         st.session_state.current_ticker_index = 0
         st.session_state.scan_results = []
         st.session_state.scan_log = []
+        st.session_state.batch_complete = False
         st.rerun()
 
 # --- BATCH SCAN LOGIC ---
@@ -368,58 +353,51 @@ start_index = st.session_state.current_ticker_index
 batch_size = 10
 end_index = min(start_index + batch_size, total_tickers)
 
-# Progress Display
 st.caption(f"Scanner Progress: {start_index}/{total_tickers} tickers scanned")
 st.progress(start_index / total_tickers)
 
 # --- SCAN BUTTON ---
 btn_label = "Scan Next 10 Tickers" if start_index < total_tickers else "Scan Complete (Reset to Restart)"
 if st.button(btn_label, disabled=(start_index >= total_tickers)):
+    st.session_state.batch_complete = False # Reset for this run
     
-    # Market Health (Run only on first batch)
     if start_index == 0:
         status = st.empty()
-        status.text("Checking Market Pulse...")
+        status.info("Initializing Scanner (Warming up API)...")
+        time.sleep(3) 
         market_healthy, spy_price, spy_sma = get_market_health()
+        status.empty()
         
         if not market_healthy and not dev_mode:
             st.error(f"BEAR REGIME DETECTED: SPY ${spy_price:.2f} < SMA ${spy_sma:.2f}")
             st.stop()
     
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    # --- COMMAND LINE LOG CONTAINER ---
+    # --- LOG CONTAINER ---
     st.markdown("---") 
-    results_container = st.container()
-    
-    st.markdown("### Scanner Execution Log")
     log_placeholder = st.empty()
-
-    # Circuit Breaker Counter
+    
     fail_count = 0 
 
     for i in range(start_index, end_index):
         ticker = LIQUID_TICKERS[i]
-        
+        status_text.text(f"Scanning {ticker}...")
         progress_bar.progress((i - start_index + 1) / batch_size)
         
-        # Human Jitter (Keep it randomized)
         time.sleep(random.uniform(2.0, 3.5))
         
         data = get_stock_data(ticker)
-        
         if not data: 
             st.session_state.scan_log.append(f"[{ticker}] Failed to fetch data")
             fail_count += 1
-            # CIRCUIT BREAKER: If 3 fails in a row, stop to protect IP
             if fail_count >= 3:
-                st.session_state.scan_log.append("!!! CIRCUIT BREAKER TRIPPED: Stopping to protect IP. Wait 60s.")
+                st.session_state.scan_log.append("!!! CIRCUIT BREAKER TRIPPED. Pause.")
                 break
             continue
         
-        # Reset fail count on success
         fail_count = 0
-        
         spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
         
         if spread:
@@ -435,6 +413,8 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
                  elif credit_ratio >= 0.25: score += 15
                  elif credit_ratio >= 0.15: score += 10
              if data['is_uptrend']: score += 10
+             
+             # Dip Logic
              if data['is_uptrend'] and data['is_oversold_bb']: score += 30
              elif data['is_uptrend'] and data['rsi'] < 45: score += 20
              elif data['rsi'] < 50: score += 10
@@ -444,7 +424,6 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
              display_score = min(score, 100.0)
              
              if dev_mode or display_score >= 50:
-                 # Add to persistent results
                  st.session_state.scan_results.append({
                      "ticker": ticker, "data": data, "spread": spread, 
                      "score": score, "display_score": display_score
@@ -452,26 +431,29 @@ if st.button(btn_label, disabled=(start_index >= total_tickers)):
         else:
             st.session_state.scan_log.append(f"[{ticker}] Skipped: {reject_reason}")
         
-        # Live Log Update
         log_text = "\n".join(st.session_state.scan_log[-10:])
         log_placeholder.code(log_text, language="text")
 
-    # Update Global Index
     st.session_state.current_ticker_index = i + 1
+    st.session_state.batch_complete = True # Trigger display
     progress_bar.empty()
-    st.rerun() # Refresh to show new results
+    status_text.empty()
+    st.rerun() 
 
-# --- DISPLAY LOGIC ---
-if st.session_state.scan_results:
-    # Sort by score descending
+# --- DISPLAY LOGIC (ONLY SHOW WHEN BATCH DONE) ---
+if st.session_state.batch_complete and st.session_state.scan_results:
+    
+    # SORT BY BEST SCORE FIRST
     sorted_results = sorted(st.session_state.scan_results, key=lambda x: x['score'], reverse=True)
     
     st.success(f"Total Opportunities Found: {len(sorted_results)}")
     cols = st.columns(3)
+    
     for i, res in enumerate(sorted_results):
         t = res['ticker']
         d = res['data']
         s = res['spread']
+        
         with cols[i % 3]:
             with st.container(border=True):
                 pill_class = "price-pill-red" if d['change_pct'] < 0 else "price-pill-green"
@@ -499,11 +481,13 @@ if st.session_state.scan_results:
                 exit_dt = exp_dt - timedelta(days=21)
                 exit_str = exit_dt.strftime("%b %d, %Y")
                 
-                trend_txt = "UPTREND" if d['is_uptrend'] else "DOWNTREND"
-                if d['is_oversold_bb']: tech_status = "<span style='color: #00FFAA; font-weight: bold;'>OVERSOLD (BB Low)</span>"
-                elif d['rsi'] < 45: tech_status = "<span style='color: #00C853;'>HEALTHY DIP</span>"
-                elif d['is_overbought_bb'] or d['rsi'] > 70: tech_status = "<span style='color: #FF5252;'>OVERBOUGHT</span>"
-                else: tech_status = "<span style='color: gray;'>NEUTRAL</span>"
+                # SIMPLIFIED SIGNAL
+                if d['is_uptrend'] and (d['is_oversold_bb'] or d['rsi'] < 45):
+                    signal_html = "<span style='color: #00FFAA; font-weight: bold; font-size: 14px;'>★ BUY NOW (DIP)</span>"
+                elif d['is_uptrend']:
+                    signal_html = "<span style='color: #FFA726; font-weight: bold; font-size: 14px;'>WAIT (NEUTRAL)</span>"
+                else:
+                    signal_html = "<span style='color: #FF5252; font-weight: bold; font-size: 14px;'>PASS (TREND)</span>"
 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -527,15 +511,14 @@ if st.session_state.scan_results:
                     <div class="metric-label">Expiry</div>
                     <div class="metric-value">{s['dte']} Days</div>
                     <div style="height: 8px;"></div>
-                    <div class="metric-label">Tech Context</div>
-                    <div style="font-size: 11px; color: #ccc;">{trend_txt}</div>
-                    <div style="font-size: 12px;">{tech_status}</div>
-                    <div style="font-size: 10px; color: #888;">RSI: {d['rsi']:.0f} | LowBB: ${d['bb_lower']:.2f}</div>
+                    <div class="metric-label">Action Signal</div>
+                    <div>{signal_html}</div>
                     """, unsafe_allow_html=True)
                 
                 st.markdown("---")
                 vc1, vc2 = st.columns([2, 1])
-                with vc1: st.pyplot(plot_sparkline_cone(d['hist'], d['price'], s['iv'], s['short'], s['long'], d['bb_lower'], d['bb_upper']), use_container_width=True)
+                # Clean Sparkline (No BB lines)
+                with vc1: st.pyplot(plot_clean_sparkline(d['hist'], s['short'], s['long']), use_container_width=True)
                 with vc2:
                     st.markdown(f"""
                     <div class="metric-label" style="text-align: right;">Edge Score</div>
