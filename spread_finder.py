@@ -21,7 +21,7 @@ from persistence import (
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Finder")
 
-# --- 1. ROBUST SESSION STATE INITIALIZATION (MUST BE AT TOP) ---
+# --- 1. ROBUST SESSION STATE INITIALIZATION ---
 if "init_done" not in st.session_state:
     st.session_state.init_done = True
     st.session_state.scan_results = []
@@ -30,7 +30,6 @@ if "init_done" not in st.session_state:
     st.session_state.current_ticker_index = 0
     st.session_state.batch_complete = False
     
-    # Load trades from Drive
     try:
         drive_service = build_drive_service_from_session()
         st.session_state.trades = load_from_drive(drive_service) or []
@@ -121,7 +120,6 @@ def blocking_retry(func, *args, **kwargs):
         except Exception as e:
             err_msg = str(e).lower()
             if "429" in err_msg or "too many requests" in err_msg:
-                # PAUSE SCRIPT ON RATE LIMIT
                 placeholder = st.empty()
                 for i in range(45, 0, -1):
                     placeholder.warning(f"Rate Limit Hit. Cooling down: {i}s...")
@@ -204,7 +202,7 @@ def process_bulk_data(df, ticker):
         hist['SMA_200'] = hist['Close'].rolling(window=200).mean()
         hist['RSI'] = calculate_rsi(hist['Close'])
 
-        # BB
+        # BB (Used for historical context context)
         hist['SMA_20'] = hist['Close'].rolling(window=20).mean()
         hist['STD_20'] = hist['Close'].rolling(window=20).std()
         hist['BB_Upper'] = hist['SMA_20'] + (hist['STD_20'] * 2)
@@ -231,10 +229,9 @@ def process_bulk_data(df, ticker):
         }
     except Exception: return None
 
-# --- TRADE LOGIC (WITH VARIABLE WIDTH) ---
-def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_width_target=10.0, dev_mode=False):
+# --- TRADE LOGIC ---
+def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
     try:
-        # 1. Fetch Options List
         def get_opts(): return stock_obj.options
         exps = blocking_retry(get_opts)
         if not exps: return None, "No Options"
@@ -255,7 +252,6 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
         best_exp = max(valid_exps) 
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - now).days
 
-        # 2. Fetch Chain
         chain = blocking_retry(stock_obj.option_chain, best_exp)
         if not chain: return None, "Chain Error"
         
@@ -275,7 +271,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
                 otm_puts = puts[puts['strike'] <= target_fallback].sort_values('strike', ascending=False)
         if otm_puts.empty: return None, "No Safe Strikes"
 
-        # USE USER-SELECTED WIDTH (Default 10)
+        # Width default is 5.0
         width = float(spread_width_target)
         
         min_credit = 0.50 if ticker in ETFS else 0.70
@@ -290,7 +286,6 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
             ask = short_row['ask']
             if ask <= 0: continue
             
-            # RELAXED LIQUIDITY FILTER (0.15)
             spread_width = ask - bid
             slippage_pct = spread_width / ask
             is_liquid = dev_mode or (spread_width <= 0.15) or (slippage_pct <= 0.20)
@@ -299,7 +294,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
                 continue
 
             long_target = short_strike - width
-            long_leg = puts[abs(puts['strike'] - long_target) < 0.5] # Allow 0.5 drift
+            long_leg = puts[abs(puts['strike'] - long_target) < 0.5] 
             if long_leg.empty: continue 
             long_row = long_leg.iloc[0]
             mid_credit = bid - long_row['ask']
@@ -328,8 +323,8 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
 
     except Exception as e: return None, f"Error: {str(e)}"
 
-# --- PLOTTING ---
-def plot_clean_sparkline(hist, short_strike, long_strike):
+# --- PLOTTING (PROJECTION CONE RESTORED) ---
+def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte):
     fig, ax = plt.subplots(figsize=(4, 1.3)) 
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(BG_COLOR)
@@ -339,10 +334,38 @@ def plot_clean_sparkline(hist, short_strike, long_strike):
     bar_colors = np.where(last_60['Close'] >= last_60['Open'], SUCCESS_COLOR, WARNING_COLOR)
     heights = last_60['Close'] - last_60['Open']
     bottoms = last_60['Open']
+    
+    # 1. Historical Bars
     ax.bar(dates, heights, bottom=bottoms, color=bar_colors, width=0.8, align='center', alpha=0.9)
+    
+    # 2. Forward Projection Cone (The "Forecast")
+    if iv > 0 and dte > 0:
+        last_date = dates[-1]
+        future_days = np.arange(1, dte + 5) # Go a bit past expiry
+        # Simple date array
+        future_dates = [last_date + timedelta(days=int(d)) for d in future_days]
+        
+        # Expected Move = Price * (IV/100) * sqrt(days/365)
+        # Using 1 Standard Deviation (68% probability bounds)
+        std_move = current_price * (iv / 100.0) * np.sqrt(future_days / 365.0)
+        
+        upper_cone = current_price + std_move
+        lower_cone = current_price - std_move
+        
+        # Plot the Cone
+        ax.plot(future_dates, upper_cone, color='gray', linestyle=':', linewidth=1, alpha=0.6)
+        ax.plot(future_dates, lower_cone, color='gray', linestyle=':', linewidth=1, alpha=0.6)
+        ax.fill_between(future_dates, lower_cone, upper_cone, color='gray', alpha=0.15)
+
+    # 3. Strikes lines across both history and forecast
     ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, alpha=0.9)
     ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
-    ax.fill_between(dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.1)
+    
+    # Extend strike fill
+    full_dates = list(dates) 
+    if iv > 0: full_dates.extend(future_dates)
+    ax.fill_between(full_dates, long_strike, short_strike, color=STRIKE_COLOR, alpha=0.1)
+
     ax.grid(True, which='major', linestyle=':', color=GRID_COLOR, alpha=0.3)
     ax.axis('off') 
     plt.tight_layout(pad=0.1)
@@ -389,8 +412,8 @@ with st.sidebar:
     st.header("Scanner Settings")
     dev_mode = st.checkbox("Dev Mode (Bypass Filters)", value=False, help="Check this to test in bear markets.")
     
-    # SLIDER UPDATED TO DEFAULT TO 10
-    width_target = st.slider("Target Spread Width ($)", min_value=1, max_value=25, value=10, step=1, help="Wider spreads = Higher Probability but more Buying Power.")
+    # SLIDER DEFAULT 5
+    width_target = st.slider("Target Spread Width ($)", min_value=1, max_value=25, value=5, step=1, help="Wider spreads = Higher Probability but more Buying Power.")
     
     if dev_mode: st.warning("DEV MODE ACTIVE: Safety Filters Disabled.")
     
@@ -420,7 +443,6 @@ if st.button("Scan Market (Full Run)"):
     st.markdown("---") 
     log_placeholder = st.empty()
     
-    # BATCHING LOGIC (5 at a time)
     batch_size = 5
     total_tickers = len(LIQUID_TICKERS)
     
@@ -449,10 +471,8 @@ if st.button("Scan Market (Full Run)"):
                 st.session_state.scan_log.append(f"[{ticker}] No Data")
                 continue
             
-            # SLOW AND STEADY
             time.sleep(random.uniform(2.0, 4.0))
             
-            # PASS THE WIDTH TARGET HERE
             spread, reject_reason = find_optimal_spread(
                 ticker, 
                 yf.Ticker(ticker), 
@@ -485,17 +505,16 @@ if st.button("Scan Market (Full Run)"):
             log_text = "\n".join(st.session_state.scan_log[-8:])
             log_placeholder.code(log_text, language="text")
             
-        # BATCH COOLDOWN
         if end_idx < total_tickers:
             time.sleep(5) 
 
     st.session_state.scan_complete = True
     progress_bar.empty()
     status_text.empty()
-    # NO ST.RERUN() HERE - Just fall through to display logic
 
 # --- DISPLAY LOGIC ---
-if st.session_state.scan_complete and st.session_state.scan_results:
+if st.session_state.get('scan_complete', False) and st.session_state.scan_results:
+    # STRICT SORT: SCORE DESCENDING
     sorted_results = sorted(st.session_state.scan_results, key=lambda x: x['score'], reverse=True)
     st.success(f"Scan Complete: Found {len(sorted_results)} Opportunities")
     
@@ -562,7 +581,15 @@ if st.session_state.scan_complete and st.session_state.scan_results:
                     """, unsafe_allow_html=True)
                 
                 st.markdown("---")
-                st.pyplot(plot_clean_sparkline(d['hist'], s['short'], s['long']), use_container_width=True)
+                # PLOT WITH CONE (Updated arguments)
+                st.pyplot(plot_sparkline_cone(
+                    d['hist'], 
+                    s['short'], 
+                    s['long'], 
+                    d['price'], 
+                    s['iv'], 
+                    s['dte']
+                ), use_container_width=True)
                 
                 st.markdown(f"""<div class="roc-box"><span style="font-size:11px; color: #00c864; text-transform: uppercase;">Return on Capital</span><br><span style="font-size:18px; font-weight:800; color: #00c864;">{s['roi']:.2f}%</span></div>""", unsafe_allow_html=True)
                 
