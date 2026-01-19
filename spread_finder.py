@@ -229,12 +229,27 @@ def process_bulk_data(df, ticker):
         }
     except Exception: return None
 
-# --- TRADE LOGIC (SMART LIQUIDITY ADJUSTMENT) ---
+# --- TRADE LOGIC (WITH EMPTY OPTIONS RETRY) ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
     try:
-        def get_opts(): return stock_obj.options
-        exps = blocking_retry(get_opts)
-        if not exps: return None, "No Options"
+        # 1. ROBUST OPTIONS FETCHING
+        # Yahoo often returns empty tuple () instead of error when rate limited
+        exps = None
+        max_ops_retries = 3
+        
+        for attempt in range(max_ops_retries):
+            try:
+                exps = stock_obj.options
+                if exps and len(exps) > 0:
+                    break
+                else:
+                    # Received empty options, treat as soft ban
+                    time.sleep(2 * (attempt + 1))
+            except Exception:
+                time.sleep(2)
+        
+        if not exps or len(exps) == 0: 
+            return None, "No Options (Data Error)"
         
         min_days = 14 if dev_mode else 25
         max_days = 60 if dev_mode else 50
@@ -252,6 +267,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
         best_exp = max(valid_exps) 
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - now).days
 
+        # 2. FETCH CHAIN (With Blocking Retry)
         chain = blocking_retry(stock_obj.option_chain, best_exp)
         if not chain: return None, "Chain Error"
         
@@ -287,7 +303,6 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
             if ask <= 0: continue
             
             # --- SMART LIQUIDITY FILTER ---
-            # ETFs stay strict (0.15), Stocks get room to breathe (0.50)
             max_spread_allowed = 0.50
             if ticker in ETFS: max_spread_allowed = 0.15
             
@@ -477,7 +492,7 @@ if st.button("Scan Market (Full Run)"):
                 st.session_state.scan_log.append(f"[{ticker}] No Data")
                 continue
             
-            time.sleep(random.uniform(2.0, 4.0))
+            time.sleep(random.uniform(2.5, 5.0))
             
             spread, reject_reason = find_optimal_spread(
                 ticker, 
@@ -512,7 +527,7 @@ if st.button("Scan Market (Full Run)"):
             log_placeholder.code(log_text, language="text")
             
         if end_idx < total_tickers:
-            time.sleep(5) 
+            time.sleep(10) 
 
     st.session_state.scan_complete = True
     progress_bar.empty()
