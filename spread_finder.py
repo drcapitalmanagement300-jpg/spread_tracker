@@ -21,23 +21,21 @@ from persistence import (
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Finder")
 
-# --- 1. SESSION STATE INITIALIZATION (MUST BE FIRST) ---
-if "trades" not in st.session_state:
-    # Try loading from drive, else empty list
+# --- 1. ROBUST SESSION STATE INITIALIZATION (MUST BE AT TOP) ---
+if "init_done" not in st.session_state:
+    st.session_state.init_done = True
+    st.session_state.scan_results = []
+    st.session_state.scan_log = []
+    st.session_state.scan_complete = False
+    st.session_state.current_ticker_index = 0
+    st.session_state.batch_complete = False
+    
+    # Load trades from Drive
     try:
         drive_service = build_drive_service_from_session()
         st.session_state.trades = load_from_drive(drive_service) or []
     except:
         st.session_state.trades = []
-
-if "scan_results" not in st.session_state:
-    st.session_state.scan_results = [] 
-
-if "scan_log" not in st.session_state:
-    st.session_state.scan_log = []
-
-if "scan_complete" not in st.session_state:
-    st.session_state.scan_complete = False
 
 # --- API KEYS ---
 try:
@@ -233,8 +231,8 @@ def process_bulk_data(df, ticker):
         }
     except Exception: return None
 
-# --- TRADE LOGIC ---
-def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=False):
+# --- TRADE LOGIC (WITH VARIABLE WIDTH) ---
+def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_width_target=10.0, dev_mode=False):
     try:
         # 1. Fetch Options List
         def get_opts(): return stock_obj.options
@@ -277,7 +275,9 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
                 otm_puts = puts[puts['strike'] <= target_fallback].sort_values('strike', ascending=False)
         if otm_puts.empty: return None, "No Safe Strikes"
 
-        width = 5.0
+        # USE USER-SELECTED WIDTH (Default 10)
+        width = float(spread_width_target)
+        
         min_credit = 0.50 if ticker in ETFS else 0.70
         if dev_mode: min_credit = 0.05
 
@@ -290,15 +290,16 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, dev_mode=F
             ask = short_row['ask']
             if ask <= 0: continue
             
+            # RELAXED LIQUIDITY FILTER (0.15)
             spread_width = ask - bid
             slippage_pct = spread_width / ask
-            is_liquid = dev_mode or (spread_width <= 0.05) or (slippage_pct <= 0.20)
+            is_liquid = dev_mode or (spread_width <= 0.15) or (slippage_pct <= 0.20)
             if not is_liquid: 
                 rejection_reason = "Illiquid"
                 continue
 
             long_target = short_strike - width
-            long_leg = puts[abs(puts['strike'] - long_target) < 0.2] 
+            long_leg = puts[abs(puts['strike'] - long_target) < 0.5] # Allow 0.5 drift
             if long_leg.empty: continue 
             long_row = long_leg.iloc[0]
             mid_credit = bid - long_row['ask']
@@ -387,12 +388,17 @@ with header_col2:
 with st.sidebar:
     st.header("Scanner Settings")
     dev_mode = st.checkbox("Dev Mode (Bypass Filters)", value=False, help="Check this to test in bear markets.")
+    
+    # SLIDER UPDATED TO DEFAULT TO 10
+    width_target = st.slider("Target Spread Width ($)", min_value=1, max_value=25, value=10, step=1, help="Wider spreads = Higher Probability but more Buying Power.")
+    
     if dev_mode: st.warning("DEV MODE ACTIVE: Safety Filters Disabled.")
     
     if st.button("Reset Scanner"):
+        st.session_state.current_ticker_index = 0
         st.session_state.scan_results = []
         st.session_state.scan_log = []
-        st.session_state.scan_complete = False
+        st.session_state.batch_complete = False
         st.rerun()
 
 # --- SCAN BUTTON (AUTO BATCH LOOP) ---
@@ -446,7 +452,15 @@ if st.button("Scan Market (Full Run)"):
             # SLOW AND STEADY
             time.sleep(random.uniform(2.0, 4.0))
             
-            spread, reject_reason = find_optimal_spread(ticker, yf.Ticker(ticker), data['price'], data['hv'], dev_mode=dev_mode)
+            # PASS THE WIDTH TARGET HERE
+            spread, reject_reason = find_optimal_spread(
+                ticker, 
+                yf.Ticker(ticker), 
+                data['price'], 
+                data['hv'], 
+                spread_width_target=width_target, 
+                dev_mode=dev_mode
+            )
             
             if spread:
                 st.session_state.scan_log.append(f"[{ticker}] FOUND TRADE | Credit: ${spread['credit']:.2f}")
@@ -481,7 +495,7 @@ if st.button("Scan Market (Full Run)"):
     # NO ST.RERUN() HERE - Just fall through to display logic
 
 # --- DISPLAY LOGIC ---
-if st.session_state.get('scan_complete', False) and st.session_state.scan_results:
+if st.session_state.scan_complete and st.session_state.scan_results:
     sorted_results = sorted(st.session_state.scan_results, key=lambda x: x['score'], reverse=True)
     st.success(f"Scan Complete: Found {len(sorted_results)} Opportunities")
     
