@@ -120,10 +120,10 @@ def blocking_retry(func, *args, **kwargs):
         except Exception as e:
             err_msg = str(e).lower()
             if "429" in err_msg or "too many requests" in err_msg:
+                # NUCLEAR OPTION: Wait 60s if rate limited
                 placeholder = st.empty()
-                for i in range(45, 0, -1):
-                    placeholder.warning(f"Rate Limit Hit. Cooling down: {i}s...")
-                    time.sleep(1)
+                placeholder.error(f"⚠️ Yahoo Rate Limit Hit. Pausing 60s to cool down IP...")
+                time.sleep(60) 
                 placeholder.empty()
             else:
                 if attempt == max_retries - 1: return None
@@ -229,11 +229,10 @@ def process_bulk_data(df, ticker):
         }
     except Exception: return None
 
-# --- TRADE LOGIC (WITH EMPTY OPTIONS RETRY) ---
+# --- TRADE LOGIC (ANTI-BAN) ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
     try:
-        # 1. ROBUST OPTIONS FETCHING
-        # Yahoo often returns empty tuple () instead of error when rate limited
+        # 1. ROBUST OPTIONS FETCHING (NUCLEAR RETRY)
         exps = None
         max_ops_retries = 3
         
@@ -243,8 +242,12 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
                 if exps and len(exps) > 0:
                     break
                 else:
-                    # Received empty options, treat as soft ban
-                    time.sleep(2 * (attempt + 1))
+                    # If Major ETF returns nothing, it's a BAN.
+                    if ticker in ETFS:
+                        st.toast(f"Soft Ban detected on {ticker}. Cooling down...")
+                        time.sleep(30 + (attempt * 10)) # 30s, 40s, 50s wait
+                    else:
+                        time.sleep(2)
             except Exception:
                 time.sleep(2)
         
@@ -304,7 +307,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
             
             # --- SMART LIQUIDITY FILTER ---
             max_spread_allowed = 0.50
-            if ticker in ETFS: max_spread_allowed = 0.15
+            if ticker in ETFS: max_spread_allowed = 0.20 # Slightly relaxed for ETFs too
             
             spread_width = ask - bid
             slippage_pct = spread_width / ask
@@ -476,7 +479,8 @@ if st.button("Scan Market (Full Run)"):
         try:
             bulk_data = yf.download(batch, period="1y", group_by='ticker', progress=False)
             st.session_state.scan_log.append(f"[BATCH] Data acquired for {len(batch)} tickers")
-        except:
+        except Exception as e:
+            st.session_state.scan_log.append(f"[BATCH] Download Error: {e}")
             bulk_data = None
             
         for i, ticker in enumerate(batch):
@@ -492,6 +496,7 @@ if st.button("Scan Market (Full Run)"):
                 st.session_state.scan_log.append(f"[{ticker}] No Data")
                 continue
             
+            # Random wait to avoid pattern detection
             time.sleep(random.uniform(2.5, 5.0))
             
             spread, reject_reason = find_optimal_spread(
@@ -535,7 +540,6 @@ if st.button("Scan Market (Full Run)"):
 
 # --- DISPLAY LOGIC ---
 if st.session_state.get('scan_complete', False) and st.session_state.scan_results:
-    # STRICT SORT: SCORE DESCENDING
     sorted_results = sorted(st.session_state.scan_results, key=lambda x: x['score'], reverse=True)
     st.success(f"Scan Complete: Found {len(sorted_results)} Opportunities")
     
