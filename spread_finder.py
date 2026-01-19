@@ -202,7 +202,7 @@ def process_bulk_data(df, ticker):
         hist['SMA_200'] = hist['Close'].rolling(window=200).mean()
         hist['RSI'] = calculate_rsi(hist['Close'])
 
-        # BB
+        # BB (Used for historical context context)
         hist['SMA_20'] = hist['Close'].rolling(window=20).mean()
         hist['STD_20'] = hist['Close'].rolling(window=20).std()
         hist['BB_Upper'] = hist['SMA_20'] + (hist['STD_20'] * 2)
@@ -448,16 +448,11 @@ if st.button("Scan Market (Full Run)"):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Placeholder moved to bottom of block
-    st.write("") 
+    # --- LIVE LOG PLACEHOLDER (BOTTOM OF SCAN AREA) ---
+    live_log_container = st.empty()
     
     batch_size = 5
     total_tickers = len(LIQUID_TICKERS)
-    
-    # --- LOG PLACEHOLDER SETUP (LIVE FEED AT BOTTOM) ---
-    st.markdown("---")
-    with st.expander("Scanner Activity Log", expanded=True):
-        log_placeholder = st.empty()
     
     for start_idx in range(0, total_tickers, batch_size):
         end_idx = min(start_idx + batch_size, total_tickers)
@@ -516,8 +511,9 @@ if st.button("Scan Market (Full Run)"):
             else:
                 st.session_state.scan_log.append(f"[{ticker}] Skipped: {reject_reason}")
                 
-            log_text = "\n".join(st.session_state.scan_log[-12:]) 
-            log_placeholder.code(log_text, language="text")
+            # Update Live Log Container (Scrolls text)
+            log_text = "\n".join(st.session_state.scan_log[-8:]) 
+            live_log_container.code(log_text, language="text")
             
         if end_idx < total_tickers:
             time.sleep(10) 
@@ -525,6 +521,7 @@ if st.button("Scan Market (Full Run)"):
     st.session_state.scan_complete = True
     progress_bar.empty()
     status_text.empty()
+    live_log_container.empty() # Clear live log when done (moves to bottom)
 
 # --- DISPLAY LOGIC ---
 if st.session_state.get('scan_complete', False) and st.session_state.scan_results:
