@@ -117,16 +117,16 @@ def render_snp_performance():
 
 # --- Charting & Progress Bar Functions ---
 def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_strike):
-    bg_color = '#0E1117'    
-    card_color = '#262730'  
-    text_color = '#FAFAFA'  
-    grid_color = '#444444'  
+    bg_color = '#0E1117'     
+    card_color = '#262730'   
+    text_color = '#FAFAFA'   
+    grid_color = '#444444'   
     
     fig, ax = plt.subplots(figsize=(8, 3))
     fig.patch.set_facecolor(bg_color)
     ax.set_facecolor(bg_color)
 
-    width = 0.6  
+    width = 0.6   
     width2 = 0.05 
     
     up = df[df.Close >= df.Open]
@@ -540,6 +540,21 @@ else:
                 change_str = "0.00%"
 
             price_display = f"${current_price:.2f}" if current_price else "$-.--"
+            
+            # --- UPDATED THETA LOGIC ---
+            # Default style (Green)
+            theta_box_bg = "rgba(0, 200, 83, 0.1)"
+            theta_box_border = SUCCESS_COLOR
+            theta_box_text_color = SUCCESS_COLOR
+            
+            # Check if negative theta AND price below short strike
+            is_negative_theta_risk = False
+            if current_price is not None and current_price < t['short_strike'] and daily_theta_dollars < 0:
+                is_negative_theta_risk = True
+                theta_box_bg = "rgba(211, 47, 47, 0.1)"
+                theta_box_border = WARNING_COLOR
+                theta_box_text_color = WARNING_COLOR
+
             theta_text = f"+${daily_theta_dollars:.2f} Today" if daily_theta_dollars >= 0 else f"-${abs(daily_theta_dollars):.2f} Today"
             
             left_card_html = (
@@ -554,7 +569,7 @@ else:
                     f"</h3>"
                     f"<div style='display:flex; flex-direction:column; align-items:flex-end; gap:2px;'>"
                         f"<span style='font-size:10px; color:gray; text-transform:uppercase; letter-spacing:0.5px;'>Daily Theta Gain</span>"
-                        f"<div style='background-color: rgba(0, 200, 83, 0.1); border: 1px solid {SUCCESS_COLOR}; color: {SUCCESS_COLOR}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;'>"
+                        f"<div style='background-color: {theta_box_bg}; border: 1px solid {theta_box_border}; color: {theta_box_text_color}; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; white-space: nowrap;'>"
                         f"{theta_text}"
                         f"</div>"
                     f"</div>"
