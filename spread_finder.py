@@ -342,7 +342,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
 
     except Exception as e: return None, f"Error: {str(e)}"
 
-# --- PLOTTING ---
+# --- PLOTTING (GREEN CONE) ---
 def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte):
     fig, ax = plt.subplots(figsize=(4, 1.3)) 
     fig.patch.set_facecolor(BG_COLOR)
@@ -364,9 +364,10 @@ def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte)
         upper_cone = current_price + std_move
         lower_cone = current_price - std_move
         
-        ax.plot(future_dates, upper_cone, color='gray', linestyle=':', linewidth=1, alpha=0.6)
-        ax.plot(future_dates, lower_cone, color='gray', linestyle=':', linewidth=1, alpha=0.6)
-        ax.fill_between(future_dates, lower_cone, upper_cone, color='gray', alpha=0.15)
+        # GREEN CONE
+        ax.plot(future_dates, upper_cone, color=SUCCESS_COLOR, linestyle=':', linewidth=1, alpha=0.6)
+        ax.plot(future_dates, lower_cone, color=SUCCESS_COLOR, linestyle=':', linewidth=1, alpha=0.6)
+        ax.fill_between(future_dates, lower_cone, upper_cone, color=SUCCESS_COLOR, alpha=0.1)
 
     ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, alpha=0.9)
     ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
@@ -447,13 +448,16 @@ if st.button("Scan Market (Full Run)"):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # --- LIVE LOG EXPANDER ---
-    st.markdown("---") 
-    with st.expander("Live Scanner Feed", expanded=False):
-        log_placeholder = st.empty()
+    # Placeholder moved to bottom of block
+    st.write("") 
     
     batch_size = 5
     total_tickers = len(LIQUID_TICKERS)
+    
+    # --- LOG PLACEHOLDER SETUP (LIVE FEED AT BOTTOM) ---
+    st.markdown("---")
+    with st.expander("Scanner Activity Log", expanded=True):
+        log_placeholder = st.empty()
     
     for start_idx in range(0, total_tickers, batch_size):
         end_idx = min(start_idx + batch_size, total_tickers)
@@ -512,7 +516,7 @@ if st.button("Scan Market (Full Run)"):
             else:
                 st.session_state.scan_log.append(f"[{ticker}] Skipped: {reject_reason}")
                 
-            log_text = "\n".join(st.session_state.scan_log[-12:]) # Show last 12 lines
+            log_text = "\n".join(st.session_state.scan_log[-12:]) 
             log_placeholder.code(log_text, language="text")
             
         if end_idx < total_tickers:
