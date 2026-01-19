@@ -229,7 +229,7 @@ def process_bulk_data(df, ticker):
         }
     except Exception: return None
 
-# --- TRADE LOGIC ---
+# --- TRADE LOGIC (SMART LIQUIDITY ADJUSTMENT) ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
     try:
         def get_opts(): return stock_obj.options
@@ -286,11 +286,17 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
             ask = short_row['ask']
             if ask <= 0: continue
             
+            # --- SMART LIQUIDITY FILTER ---
+            # ETFs stay strict (0.15), Stocks get room to breathe (0.50)
+            max_spread_allowed = 0.50
+            if ticker in ETFS: max_spread_allowed = 0.15
+            
             spread_width = ask - bid
             slippage_pct = spread_width / ask
-            is_liquid = dev_mode or (spread_width <= 0.15) or (slippage_pct <= 0.20)
+            
+            is_liquid = dev_mode or (spread_width <= max_spread_allowed) or (slippage_pct <= 0.25)
             if not is_liquid: 
-                rejection_reason = "Illiquid"
+                rejection_reason = f"Illiquid ({spread_width:.2f})"
                 continue
 
             long_target = short_strike - width
