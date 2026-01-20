@@ -111,22 +111,24 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-# --- SESSION ROTATOR (ANTI-BAN KEY) ---
-def get_random_session():
-    """Generates a fresh requests session with a random User-Agent."""
-    session = requests.Session()
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
-    ]
-    session.headers.update({
-        "User-Agent": random.choice(user_agents),
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br"
-    })
-    return session
+# --- SMART RETRY LOGIC (BLOCKING) ---
+def blocking_retry(func, *args, **kwargs):
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "429" in err_msg or "too many requests" in err_msg:
+                placeholder = st.empty()
+                for i in range(45, 0, -1):
+                    placeholder.warning(f"Rate Limit Hit. Cooling down: {i}s...")
+                    time.sleep(1)
+                placeholder.empty()
+            else:
+                if attempt == max_retries - 1: return None
+                time.sleep(2)
+    return None
 
 # --- EARNINGS SAFETY CHECK ---
 def is_safe_from_earnings(ticker, expiration_date_str):
@@ -146,9 +148,7 @@ def is_safe_from_earnings(ticker, expiration_date_str):
 # --- MARKET HEALTH CHECK ---
 def get_market_health():
     try:
-        # Use a fresh session for the initial check
-        session = get_random_session()
-        spy = yf.Ticker("SPY", session=session)
+        spy = yf.Ticker("SPY")
         hist = spy.history(period="1y")
         
         if hist is None or hist.empty: 
@@ -219,20 +219,18 @@ def process_bulk_data(df, ticker):
         }
     except Exception: return None
 
-# --- TRADE LOGIC (WITH SESSION ROTATION) ---
+# --- TRADE LOGIC ---
 def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
     try:
         # 1. ROBUST OPTIONS FETCHING
         exps = None
         max_ops_retries = 3
-        
         for attempt in range(max_ops_retries):
             try:
                 exps = stock_obj.options
                 if exps and len(exps) > 0:
                     break
                 else:
-                    # If empty, it's a soft ban. Wait longer.
                     if ticker in ETFS:
                         time.sleep(10 + (attempt * 5)) 
                     else:
@@ -259,7 +257,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
         best_exp = max(valid_exps) 
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - now).days
 
-        # 2. FETCH CHAIN (Direct call since session is injected)
+        # 2. FETCH CHAIN
         try:
             chain = stock_obj.option_chain(best_exp)
         except Exception:
@@ -294,7 +292,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
             ask = short_row['ask']
             if ask <= 0: continue
             
-            # --- SMART LIQUIDITY FILTER ---
+            # Smart Liquidity
             max_spread_allowed = 0.50
             if ticker in ETFS: max_spread_allowed = 0.20
             
@@ -447,22 +445,13 @@ if st.button("Scan Market (Full Run)"):
     batch_size = 5
     total_tickers = len(LIQUID_TICKERS)
     
-    # Create ONE session for the whole run to start
-    session = get_random_session()
-    
     for start_idx in range(0, total_tickers, batch_size):
         end_idx = min(start_idx + batch_size, total_tickers)
         batch = LIQUID_TICKERS[start_idx:end_idx]
         
         status_text.text(f"Scanning Batch {start_idx}-{end_idx} of {total_tickers}...")
         
-        # Rotate session every 3 batches (15 tickers) to prevent tracking
-        if start_idx > 0 and start_idx % 15 == 0:
-            session = get_random_session()
-            time.sleep(2)
-        
         try:
-            # We can't pass session to download() anymore, but we can to Ticker()
             bulk_data = yf.download(batch, period="1y", group_by='ticker', progress=False)
             st.session_state.scan_log.append(f"[BATCH] Data acquired for {len(batch)} tickers")
         except Exception as e:
@@ -484,8 +473,8 @@ if st.button("Scan Market (Full Run)"):
             
             time.sleep(random.uniform(2.5, 5.0))
             
-            # PASS THE ROTATED SESSION HERE
-            ticker_obj = yf.Ticker(ticker, session=session)
+            # Simple instantiation (session handling handled by YF)
+            ticker_obj = yf.Ticker(ticker)
             
             spread, reject_reason = find_optimal_spread(
                 ticker, 
