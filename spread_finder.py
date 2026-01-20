@@ -225,6 +225,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
         # 1. ROBUST OPTIONS FETCHING
         exps = None
         max_ops_retries = 3
+        
         for attempt in range(max_ops_retries):
             try:
                 exps = stock_obj.options
@@ -232,7 +233,7 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
                     break
                 else:
                     if ticker in ETFS:
-                        time.sleep(10 + (attempt * 5)) 
+                        time.sleep(30 + (attempt * 10)) 
                     else:
                         time.sleep(2)
             except Exception:
@@ -258,10 +259,9 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - now).days
 
         # 2. FETCH CHAIN
-        try:
-            chain = stock_obj.option_chain(best_exp)
-        except Exception:
-            return None, "Chain Error"
+        # Note: Do not inject session here. Let YF handle it.
+        chain = blocking_retry(stock_obj.option_chain, best_exp)
+        if not chain: return None, "Chain Error"
         
         puts = chain.puts
         atm_puts = puts[abs(puts['strike'] - current_price) == abs(puts['strike'] - current_price).min()]
@@ -292,7 +292,6 @@ def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_wid
             ask = short_row['ask']
             if ask <= 0: continue
             
-            # Smart Liquidity
             max_spread_allowed = 0.50
             if ticker in ETFS: max_spread_allowed = 0.20
             
@@ -473,7 +472,7 @@ if st.button("Scan Market (Full Run)"):
             
             time.sleep(random.uniform(2.5, 5.0))
             
-            # Simple instantiation (session handling handled by YF)
+            # DEFAULT INSTANTIATION (NO SESSION INJECTION)
             ticker_obj = yf.Ticker(ticker)
             
             spread, reject_reason = find_optimal_spread(
