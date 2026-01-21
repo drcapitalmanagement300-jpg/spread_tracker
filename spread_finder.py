@@ -14,6 +14,16 @@ import yfinance as yf
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Finder")
 
+# --- SPEED OPTIMIZATION: CACHED RESOURCES ---
+# This function runs ONCE. Subsequent reloads use the saved connection instantly.
+@st.cache_resource
+def get_drive_connection():
+    from persistence import build_drive_service_from_session
+    try:
+        return build_drive_service_from_session()
+    except:
+        return None
+
 # --- AUTHENTICATION ---
 try:
     FINNHUB_API_KEY = st.secrets["general"]["FINNHUB_API_KEY"]
@@ -27,11 +37,14 @@ if "init_done" not in st.session_state:
     st.session_state.scan_results = []
     st.session_state.scan_log = []
     
-    # Load persistence
-    from persistence import build_drive_service_from_session, load_from_drive
+    # Load persistence using the CACHED service
+    from persistence import load_from_drive
+    drive_service = get_drive_connection()
     try:
-        drive_service = build_drive_service_from_session()
-        st.session_state.trades = load_from_drive(drive_service) or []
+        if drive_service:
+            st.session_state.trades = load_from_drive(drive_service) or []
+        else:
+            st.session_state.trades = []
     except:
         st.session_state.trades = []
 
@@ -251,8 +264,6 @@ def find_optimal_spread(ticker, current_price, current_hv, spread_width_target=5
     if not puts: return None, "No Puts"
     
     # 3. Process Puts
-    # Yahoo JSON structure: {'contractSymbol': '...', 'strike': 100.0, 'bid': 0.5, 'ask': 0.6, 'impliedVolatility': 0.2 ...}
-    
     # Sort Puts by Strike Descending
     puts.sort(key=lambda x: x['strike'], reverse=True)
     
@@ -592,9 +603,8 @@ if st.session_state.get('scan_complete', False) and st.session_state.scan_result
                                 "pnl_history": []
                             }
                             st.session_state.trades.append(new_trade)
-                            try:
-                                save_to_drive(drive_service, st.session_state.trades)
-                            except: pass
+                            # Using the cached service handle
+                            if drive_service: save_to_drive(drive_service, st.session_state.trades)
                             st.toast(f"Added {t}")
                             del st.session_state[add_key]
                             st.rerun()
