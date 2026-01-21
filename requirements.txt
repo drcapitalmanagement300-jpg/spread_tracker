@@ -16,3 +16,4 @@ matplotlib
 pyarrow
 duckduckgo-search
 finnhub-python
+curl_cffi
