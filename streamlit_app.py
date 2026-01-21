@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from streamlit_autorefresh import st_autorefresh
-import yfinance as yf # Imported for SNP fetch
+import yfinance as yf 
 
 # ---------------- Persistence ----------------
 from persistence import (
@@ -31,11 +31,16 @@ st_autorefresh(interval=60_000, key="ui_refresh")
 # ---------------- Auth / Drive ----------------
 ensure_logged_in()
 
-drive_service = None
-try:
-    drive_service = build_drive_service_from_session()
-except Exception:
-    drive_service = None
+# --- SPEED FIX: CACHE THE CONNECTION ---
+@st.cache_resource
+def get_drive_connection():
+    """Establishes the Drive connection only ONCE per session."""
+    try:
+        return build_drive_service_from_session()
+    except Exception:
+        return None
+
+drive_service = get_drive_connection()
 
 # ---------------- Header ----------------
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
@@ -82,6 +87,7 @@ def format_money(x):
 def render_snp_performance():
     """Fetches and displays S&P 500 daily performance."""
     try:
+        # Use simple Ticker call (session handling internal to YF is fine for simple price history)
         snp = yf.Ticker("^GSPC")
         hist = snp.history(period="2d")
         
@@ -226,10 +232,6 @@ def render_open_positions_grid(trades):
     if not trades:
         return
 
-    # UPDATES:
-    # 1. Height increased to 115px to fit 3 rows comfortably.
-    # 2. Status Row added at bottom.
-    # 3. P&L Row labeled "P&L".
     style_block = """
 <style>
 .grid-container {
@@ -241,7 +243,7 @@ def render_open_positions_grid(trades):
 .mini-card {
     border-radius: 6px;
     padding: 10px;
-    height: 115px; /* Increased Height */
+    height: 115px;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -280,7 +282,6 @@ def render_open_positions_grid(trades):
     gap: 2px;
     margin-top: auto;
 }
-/* Rows */
 .mc-row-spread {
     display: flex;
     justify-content: flex-end; 
@@ -330,7 +331,7 @@ def render_open_positions_grid(trades):
         if profit_pct is not None:
             pl_dollars = max_gain * (profit_pct / 100.0)
 
-        # --- Status Logic Calculation ---
+        # Status Logic
         card_status_msg = "Nominal"
         card_status_color = SUCCESS_COLOR
 
@@ -351,7 +352,7 @@ def render_open_positions_grid(trades):
                 card_status_msg = "Nominal"
                 card_status_color = SUCCESS_COLOR
 
-        # --- Color Logic ---
+        # Color Logic
         bg_color = "rgba(40, 40, 45, 0.8)" 
         border_color = "#333"
 
@@ -395,7 +396,6 @@ def render_open_positions_grid(trades):
         else:
             day_fmt = f"<span style='color:gray; font-size:12px;'>0.0%</span>"
 
-        # Card HTML
         cards_html += f"""
 <div class="mini-card" style="background-color: {bg_color}; border-color: {border_color};">
 <div class="mc-header">
@@ -441,16 +441,14 @@ else:
     if "trades" not in st.session_state:
         st.session_state.trades = []
 
-# ---------------- Open Positions Grid (NEW) ----------------
-# Only show if there are trades
+# ---------------- Open Positions Grid ----------------
 if st.session_state.trades:
-    render_snp_performance() # NEW: S&P 500 WIDGET
+    render_snp_performance() 
     render_open_positions_grid(st.session_state.trades)
     st.markdown(WHITE_DIVIDER_HTML, unsafe_allow_html=True)
 
 # ---------------- Display Detailed Trades ----------------
 if not st.session_state.trades:
-    # Still show SNP if no trades
     render_snp_performance()
     st.info("No active trades. Go to 'Spread Finder' to scan for new opportunities.")
 else:
@@ -542,12 +540,10 @@ else:
             price_display = f"${current_price:.2f}" if current_price else "$-.--"
             
             # --- UPDATED THETA LOGIC ---
-            # Default style (Green)
             theta_box_bg = "rgba(0, 200, 83, 0.1)"
             theta_box_border = SUCCESS_COLOR
             theta_box_text_color = SUCCESS_COLOR
             
-            # Check if negative theta AND price below short strike
             is_negative_theta_risk = False
             if current_price is not None and current_price < t['short_strike'] and daily_theta_dollars < 0:
                 is_negative_theta_risk = True
