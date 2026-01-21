@@ -1,275 +1,53 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import time
 import random
-import json
-import re
-
-# --- IMPERSONATION LIBRARY ---
-try:
-    from curl_cffi import requests as cffi_requests
-except ImportError:
-    st.error("⚠️ Library Missing: Please add `curl_cffi` to your requirements.txt")
-    st.stop()
 
 # --- CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Spread Finder")
+st.set_page_config(layout="wide", page_title="Spread Finder (Local)")
 
-# --- AUTHENTICATION ---
-try:
-    FINNHUB_API_KEY = st.secrets["general"]["FINNHUB_API_KEY"]
-except (FileNotFoundError, KeyError):
-    FINNHUB_API_KEY = None
+# --- PERSISTENCE (GOOGLE DRIVE) ---
+from persistence import (
+    build_drive_service_from_session,
+    save_to_drive,
+    load_from_drive
+)
 
-# --- INITIALIZE STATE ---
+# --- INIT STATE ---
 if "init_done" not in st.session_state:
     st.session_state.init_done = True
     st.session_state.scan_results = []
     st.session_state.scan_log = []
     
-    from persistence import build_drive_service_from_session, load_from_drive
+    # Connect to Drive immediately
     try:
         drive_service = build_drive_service_from_session()
         st.session_state.trades = load_from_drive(drive_service) or []
-    except:
+        st.toast("Connected to Cloud Database")
+    except Exception as e:
+        st.error(f"Drive Error: {e}")
         st.session_state.trades = []
 
 # --- CONSTANTS ---
 SUCCESS_COLOR = "#00C853"
 WARNING_COLOR = "#d32f2f"
 BG_COLOR = '#0E1117'
-GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
 
-SECTOR_MAP = {
-    "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "IWM": "Russell 2000 ETF", "DIA": "Dow Jones ETF",
-    "GLD": "Gold Trust", "SLV": "Silver Trust", "TLT": "20+ Yr Treasury Bond", "XLK": "Technology ETF",
-    "XLF": "Financials ETF", "XLE": "Energy ETF", "XLV": "Health Care ETF", "XLI": "Industrials ETF",
-    "XLP": "Cons. Staples ETF", "XLU": "Utilities ETF", "XLY": "Cons. Discret. ETF", "SMH": "Semiconductor ETF",
-    "ARKK": "Innovation ETF", "KRE": "Regional Banking ETF", "XBI": "Biotech ETF", "GDX": "Gold Miners ETF",
-    "EEM": "Emerging Markets", "FXI": "China Large-Cap", "EWZ": "Brazil Capped ETF", "HYG": "High Yield Bond",
-    "LQD": "Inv Grade Corp Bond", "UVXY": "Short-Term Futures", "BITO": "Bitcoin Strategy", "USO": "Oil Fund",
-    "UNG": "Natural Gas Fund", "TQQQ": "ProShares UltraPro QQQ", "SQQQ": "ProShares UltraPro Short",
-    "SOXL": "Direxion Daily Semi Bull", "SOXS": "Direxion Daily Semi Bear",
-    "NVDA": "Semiconductors", "TSLA": "Auto Manufacturers", "AAPL": "Consumer Electronics", "MSFT": "Software - Infra",
-    "AMD": "Semiconductors", "AMZN": "Internet Retail", "META": "Internet Content", "GOOGL": "Internet Content",
-    "NFLX": "Entertainment", "AVGO": "Semiconductors", "QCOM": "Semiconductors", "INTC": "Semiconductors",
-    "MU": "Semiconductors", "ARM": "Semiconductors", "TXN": "Semiconductors", "AMAT": "Semiconductor Equip",
-    "LRCX": "Semiconductor Equip", "ADI": "Semiconductors", "IBM": "IT Services", "CSCO": "Communication Equip",
-    "ORCL": "Software - Infra", "PLTR": "Software - App", "CRM": "Software - App", "ADBE": "Software - Infra",
-    "SNOW": "Software - App", "NOW": "Software - App", "WDAY": "Software - App", "PANW": "Software - Infra",
-    "CRWD": "Software - Infra", "DDOG": "Software - App", "NET": "Software - Infra", "COIN": "Software - Infra",
-    "MSTR": "Software - App", "HOOD": "Software - Infra", "SQ": "Software - Infra", "PYPL": "Credit Services",
-    "V": "Credit Services", "MA": "Credit Services", "AFRM": "Credit Services", "SOFI": "Credit Services",
-    "DKNG": "Gambling", "UBER": "Software - App", "ABNB": "Travel Services", "ROKU": "Entertainment",
-    "SHOP": "Software - App", "DIS": "Entertainment", "NKE": "Footwear & Accessories", "SBUX": "Restaurants",
-    "MCD": "Restaurants", "WMT": "Discount Stores", "TGT": "Discount Stores", "COST": "Discount Stores",
-    "HD": "Home Improvement", "LOW": "Home Improvement", "LULU": "Apparel Retail", "CMG": "Restaurants",
-    "JPM": "Banks - Diversified", "BAC": "Banks - Diversified", "WFC": "Banks - Diversified", "GS": "Capital Markets",
-    "MS": "Capital Markets", "C": "Banks - Diversified", "AXP": "Credit Services", "BLK": "Asset Management",
-    "BA": "Aerospace & Defense", "CAT": "Farm & Heavy Const", "GE": "Specialty Ind Mach", "F": "Auto Manufacturers",
-    "GM": "Auto Manufacturers", "XOM": "Oil & Gas Integrated", "CVX": "Oil & Gas Integrated", "COP": "Oil & Gas E&P",
-    "OXY": "Oil & Gas E&P", "SLB": "Oil & Gas Equip", "HAL": "Oil & Gas Equip", "LLY": "Drug Manufacturers",
-    "UNH": "Healthcare Plans", "JNJ": "Drug Manufacturers", "PFE": "Drug Manufacturers", "MRK": "Drug Manufacturers",
-    "ABBV": "Drug Manufacturers", "BMY": "Drug Manufacturers", "AMGN": "Drug Manufacturers", "GILD": "Drug Manufacturers",
-    "MRNA": "Biotechnology"
-}
-LIQUID_TICKERS = list(SECTOR_MAP.keys())
-ETFS = ["SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX", "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS"]
+# Top Liquid Tickers for Options
+LIQUID_TICKERS = [
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", 
+    "NVDA", "TSLA", "AAPL", "MSFT", "AMD", "AMZN", "META", "GOOGL", "NFLX", 
+    "AVGO", "QCOM", "INTC", "MU", "ARM", "TXN", "AMAT", "LRCX", "ADI", 
+    "PLTR", "COIN", "MSTR", "HOOD", "SQ", "PYPL", "V", "MA", "UBER", 
+    "SHOP", "DIS", "BA", "CAT", "GE", "F", "GM", "XOM", "CVX", "LLY", "UNH", "JNJ"
+]
 
-# --- FRONTEND SCRAPING ENGINE (NO API) ---
-@st.cache_resource
-def get_scraper_session():
-    return cffi_requests.Session()
-
-def scrape_yahoo_frontend(ticker, date_timestamp=None):
-    """
-    Loads the Yahoo Finance WEBPAGE (not API) and extracts embedded JSON data.
-    This is much harder to block because it looks like a user visiting the site.
-    """
-    # 1. Target the visual page URL
-    url = f"https://finance.yahoo.com/quote/{ticker}/options"
-    if date_timestamp:
-        url += f"?date={date_timestamp}"
-        
-    try:
-        # 2. Mimic Chrome loading the page
-        r = cffi_requests.get(
-            url,
-            impersonate="chrome110",
-            timeout=10
-        )
-        
-        if r.status_code != 200: return None
-        
-        # 3. Hunt for the "root.App.main" JSON blob in the HTML
-        # This contains all the data the page uses to render the table
-        html = r.text
-        
-        # Regex to find the JSON store
-        # Pattern: root.App.main = {...};
-        json_str = re.search(r'root\.App\.main\s*=\s*({.*?});', html)
-        
-        if not json_str:
-            # Fallback for new Yahoo layout: "context"
-            json_str = re.search(r'window\.YAHOO\.context\s*=\s*({.*?});', html)
-            
-        if not json_str:
-            return None
-            
-        data = json.loads(json_str.group(1))
-        
-        # 4. Navigate the massive JSON object to find the Option Chain
-        # The path changes occasionally, so we try a few common ones
-        try:
-            # Common path 1
-            stores = data['context']['dispatcher']['stores']
-            chain_store = stores.get('OptionChainStore')
-            if chain_store:
-                return chain_store
-        except: pass
-        
-        return None
-        
-    except Exception:
-        return None
-
-# --- TRADE LOGIC (SCRAPER BASED) ---
-def find_optimal_spread(ticker, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
-    
-    # 1. Initial Scrape (Gets Expirations)
-    data = scrape_yahoo_frontend(ticker)
-    
-    if not data: return None, "No Data (Blocked?)"
-    
-    expirations = data.get("expirationDates", [])
-    if not expirations: return None, "No Expirations"
-    
-    min_days = 14 if dev_mode else 25
-    max_days = 60 if dev_mode else 50
-    
-    valid_exps = []
-    now = datetime.now()
-    
-    for ts in expirations:
-        try:
-            edate = datetime.fromtimestamp(ts)
-            days_out = (edate - now).days
-            if min_days <= days_out <= max_days:
-                valid_exps.append(ts) 
-        except: pass
-        
-    if not valid_exps: return None, "No Valid DTE"
-    best_ts = max(valid_exps) 
-    best_date_obj = datetime.fromtimestamp(best_ts)
-    dte = (best_date_obj - now).days
-    
-    # 2. Targeted Scrape (Gets Chain for Date)
-    # If the first scrape didn't contain the specific date data, we scrape again
-    # Yahoo's initial load usually contains the nearest date. If best_ts is different, we reload.
-    
-    # Check if we already have the right data
-    # (The Store object usually contains 'options' list)
-    chain_data = data # Default to current data
-    
-    # If we need a specific date that isn't loaded
-    # NOTE: Scraping twice doubles the risk/time. Let's try to work with what we have first.
-    # Actually, Yahoo page loads with the *selected* date. We must reload if date differs.
-    
-    chain_data = scrape_yahoo_frontend(ticker, best_ts)
-    if not chain_data: return None, "Chain Fetch Failed"
-    
-    options = chain_data.get("options", [])
-    if not options: return None, "Empty Chain"
-    
-    puts = options[0].get("puts", [])
-    if not puts: return None, "No Puts"
-    
-    # 3. Process Puts
-    puts.sort(key=lambda x: x['strike'], reverse=True)
-    
-    raw_iv = current_hv / 100.0
-    for p in puts:
-        if p['strike'] <= current_price:
-            if 'impliedVolatility' in p:
-                raw_iv = p['impliedVolatility']
-            break
-            
-    expected_move = current_price * raw_iv * np.sqrt(dte/365) * 0.75
-    target_short_strike = current_price - expected_move
-    
-    candidates = [p for p in puts if p['strike'] <= target_short_strike]
-    
-    if not candidates:
-        if dev_mode: candidates = [p for p in puts if p['strike'] < current_price]
-        else:
-            target_fallback = current_price * 0.95
-            candidates = [p for p in puts if p['strike'] <= target_fallback]
-    
-    if not candidates: return None, "No Safe Strikes"
-
-    width = float(spread_width_target)
-    min_credit = 0.50 if ticker in ETFS else 0.70
-    if dev_mode: min_credit = 0.05
-
-    best_spread = None
-    rejection_reason = f"Credit < ${min_credit}"
-
-    for short_opt in candidates:
-        short_strike = float(short_opt['strike'])
-        bid = float(short_opt.get('bid', 0) or 0)
-        ask = float(short_opt.get('ask', 0) or 0)
-        
-        if ask <= 0: continue
-        
-        # Smart Liquidity
-        spread_width = ask - bid
-        slippage_pct = spread_width / ask
-        max_spread_allowed = 0.20 if ticker in ETFS else 0.50
-        
-        is_liquid = dev_mode or (spread_width <= max_spread_allowed) or (slippage_pct <= 0.25)
-        if not is_liquid: 
-            rejection_reason = f"Illiquid ({spread_width:.2f})"
-            continue
-
-        long_target = short_strike - width
-        long_leg = None
-        
-        for p in puts:
-            if abs(float(p['strike']) - long_target) < 0.5:
-                long_leg = p
-                break
-        
-        if not long_leg: continue
-        
-        long_ask = float(long_leg.get('ask', 0) or 0)
-        mid_credit = bid - long_ask
-        
-        if mid_credit >= min_credit:
-            max_loss = width - mid_credit
-            roi = (mid_credit / max_loss) * 100 if max_loss > 0 else 0
-            iv = short_opt.get('impliedVolatility', 0) * 100
-            
-            exp_str = best_date_obj.strftime("%b %d, %Y")
-            date_raw = best_date_obj.strftime("%Y-%m-%d")
-
-            best_spread = {
-                "expiration_raw": date_raw, "expiration": exp_str, "dte": dte, 
-                "short": short_strike, "long": float(long_leg['strike']),
-                "credit": mid_credit, "max_loss": max_loss, 
-                "iv": iv, "roi": roi, "em": expected_move
-            }
-            break
-            
-    if best_spread and not dev_mode:
-        is_safe, msg = is_safe_from_earnings(ticker, best_date_obj)
-        if not is_safe: return None, f"Earnings: {msg}"
-    
-    if best_spread: return best_spread, None
-    else: return None, rejection_reason
+ETFS = ["SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE"]
 
 # --- HELPER FUNCTIONS ---
 def calculate_rsi(series, period=14):
@@ -278,43 +56,6 @@ def calculate_rsi(series, period=14):
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
-
-import finnhub
-try:
-    finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
-except:
-    finnhub_client = None
-
-def is_safe_from_earnings(ticker, expiration_date_str):
-    if ticker in ETFS: return True, "ETF"
-    if not finnhub_client: return True, "No API"
-    try:
-        time.sleep(0.1) 
-        today = datetime.now().date()
-        if isinstance(expiration_date_str, datetime):
-            exp_date = expiration_date_str.date()
-        else:
-            exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
-            
-        earnings = finnhub_client.earnings_calendar(_from=today.strftime("%Y-%m-%d"), to=exp_date.strftime("%Y-%m-%d"), symbol=ticker)
-        if earnings and 'earningsCalendar' in earnings and len(earnings['earningsCalendar']) > 0:
-            return False, earnings['earningsCalendar'][0]['date']
-        return True, "Clear" 
-    except:
-        return True, "Error"
-
-# Use standard YFinance ONLY for chart history (less aggressively blocked)
-import yfinance as yf 
-@st.cache_data(ttl=600)
-def get_market_health():
-    try:
-        spy = yf.Ticker("SPY")
-        hist = spy.history(period="1y")
-        if hist.empty: return True, 0, 0
-        current_price = hist['Close'].iloc[-1]
-        sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
-        return current_price > sma_200, current_price, sma_200
-    except: return True, 0, 0
 
 def process_bulk_data(df, ticker):
     try:
@@ -331,19 +72,15 @@ def process_bulk_data(df, ticker):
         if hist.empty: return None
 
         current_price = hist['Close'].iloc[-1]
-        change_pct = 0.0
-        if len(hist) > 1:
-            prev = hist['Close'].iloc[-2]
-            change_pct = ((current_price - prev) / prev) * 100
         
         hist['Returns'] = hist['Close'].pct_change()
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252) * 100
         current_hv = hist['HV'].iloc[-1] if not pd.isna(hist['HV'].iloc[-1]) else 0
 
-        hist['SMA_100'] = hist['Close'].rolling(window=100).mean()
         hist['SMA_200'] = hist['Close'].rolling(window=200).mean()
         hist['RSI'] = calculate_rsi(hist['Close'])
         
+        # Bollinger Bands
         hist['SMA_20'] = hist['Close'].rolling(window=20).mean()
         hist['STD_20'] = hist['Close'].rolling(window=20).std()
         hist['BB_Upper'] = hist['SMA_20'] + (hist['STD_20'] * 2)
@@ -356,19 +93,107 @@ def process_bulk_data(df, ticker):
 
         is_uptrend = current_price > sma_200
         is_oversold_bb = current_price <= (bb_lower * 1.01)
-        is_overbought_bb = current_price >= (bb_upper * 0.99)
-
-        type_str = "(ETF)" if ticker in ETFS else "(Stock)"
-        sector_str = SECTOR_MAP.get(ticker, "Unknown Sector")
+        
+        change_pct = 0.0
+        if len(hist) > 1:
+            prev = hist['Close'].iloc[-2]
+            change_pct = ((current_price - prev) / prev) * 100
 
         return {
             "price": current_price, "change_pct": change_pct, "hv": current_hv,
             "is_uptrend": is_uptrend, "rsi": current_rsi,
-            "bb_lower": bb_lower, "bb_upper": bb_upper,
-            "is_oversold_bb": is_oversold_bb, "is_overbought_bb": is_overbought_bb,
-            "type_str": type_str, "sector_str": sector_str, "hist": hist
+            "is_oversold_bb": is_oversold_bb, "hist": hist
         }
     except: return None
+
+def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
+    try:
+        # Standard yfinance fetch - works reliably on home internet
+        exps = stock_obj.options
+        if not exps: return None, "No Options"
+        
+        min_days = 14 if dev_mode else 25
+        max_days = 60 if dev_mode else 50
+        
+        valid_exps = []
+        now = datetime.now()
+        for e in exps:
+            try:
+                edate = datetime.strptime(e, "%Y-%m-%d")
+                if (now + timedelta(days=min_days)) <= edate <= (now + timedelta(days=max_days)):
+                    valid_exps.append(e)
+            except: pass
+            
+        if not valid_exps: return None, "No Valid Expiry"
+        best_exp = max(valid_exps) 
+        dte = (datetime.strptime(best_exp, "%Y-%m-%d") - now).days
+
+        chain = stock_obj.option_chain(best_exp)
+        puts = chain.puts
+        
+        if puts.empty: return None, "No Puts"
+
+        atm_puts = puts[abs(puts['strike'] - current_price) == abs(puts['strike'] - current_price).min()]
+        imp_vol = atm_puts.iloc[0]['impliedVolatility'] if not atm_puts.empty else (current_hv / 100.0)
+
+        # Expected Move (0.75 SD)
+        expected_move = current_price * imp_vol * np.sqrt(dte/365) * 0.75
+        target_short_strike = current_price - expected_move
+        
+        otm_puts = puts[puts['strike'] <= target_short_strike].sort_values('strike', ascending=False)
+        
+        if otm_puts.empty:
+            if dev_mode: otm_puts = puts[puts['strike'] < current_price].sort_values('strike', ascending=False)
+            else:
+                target_fallback = current_price * 0.95
+                otm_puts = puts[puts['strike'] <= target_fallback].sort_values('strike', ascending=False)
+        
+        if otm_puts.empty: return None, "No Safe Strikes"
+
+        width = float(spread_width_target)
+        min_credit = 0.50 if ticker in ETFS else 0.70
+        if dev_mode: min_credit = 0.05
+
+        best_spread = None
+        rejection_reason = f"Credit < ${min_credit}"
+
+        for index, short_row in otm_puts.iterrows():
+            short_strike = short_row['strike']
+            bid = short_row['bid']
+            ask = short_row['ask']
+            if ask <= 0: continue
+            
+            # Liquidity
+            spread_width = ask - bid
+            is_liquid = dev_mode or (spread_width <= 0.50)
+            if not is_liquid: 
+                rejection_reason = f"Illiquid ({spread_width:.2f})"
+                continue
+
+            long_target = short_strike - width
+            long_leg = puts[abs(puts['strike'] - long_target) < 0.5] 
+            if long_leg.empty: continue 
+            long_row = long_leg.iloc[0]
+            mid_credit = bid - long_row['ask']
+            
+            if mid_credit >= min_credit:
+                max_loss = width - mid_credit
+                roi = (mid_credit / max_loss) * 100 if max_loss > 0 else 0
+                iv = short_row['impliedVolatility'] * 100
+                
+                exp_str = datetime.strptime(best_exp, "%Y-%m-%d").strftime("%b %d, %Y")
+
+                best_spread = {
+                    "expiration_raw": best_exp, "expiration": exp_str, "dte": dte, 
+                    "short": short_strike, "long": long_row['strike'],
+                    "credit": mid_credit, "max_loss": max_loss, 
+                    "iv": iv, "roi": roi, "em": expected_move
+                }
+                break 
+        
+        return (best_spread, None) if best_spread else (None, rejection_reason)
+
+    except Exception as e: return None, f"Error: {str(e)}"
 
 # --- PLOTTING ---
 def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte):
@@ -377,7 +202,6 @@ def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte)
     ax.set_facecolor(BG_COLOR)
     last_60 = hist.tail(60).copy()
     dates = last_60.index
-    if 'Open' not in last_60.columns: last_60['Open'] = last_60['Close']
     bar_colors = np.where(last_60['Close'] >= last_60['Open'], SUCCESS_COLOR, WARNING_COLOR)
     heights = last_60['Close'] - last_60['Open']
     bottoms = last_60['Open']
@@ -408,61 +232,39 @@ def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte)
     plt.tight_layout(pad=0.1)
     return fig
 
-# --- CSS ---
-st.markdown("""
-<style>
-    .metric-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px; }
-    .metric-value { font-size: 16px; font-weight: 700; color: #FFF; }
-    .price-pill-red { background-color: rgba(255, 75, 75, 0.15); color: #ff4b4b; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
-    .price-pill-green { background-color: rgba(0, 200, 100, 0.15); color: #00c864; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 13px; }
-    .strategy-badge { color: #d4ac0d; padding: 2px 8px; font-size: 12px; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; text-align: right; }
-    .roc-box { background-color: rgba(0, 255, 127, 0.05); border: 1px solid rgba(0, 255, 127, 0.2); border-radius: 6px; padding: 8px; text-align: center; margin-top: 12px; }
-    .stCodeBlock { font-family: 'Courier New', monospace; font-size: 12px; }
-</style>
-""", unsafe_allow_html=True)
-
-# --- HEADER ---
-header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
+# --- MAIN UI ---
+header_col1, header_col2 = st.columns([1.5, 8.5])
 with header_col1:
-    try: st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
-    except: st.write("**DR CAPITAL**")
+    st.write("## 🦇") 
 with header_col2:
-    st.markdown("""
-    <div style='text-align: left; padding-top: 10px;'>
-        <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Spread Finder</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Options Management System</p>
-    </div>""", unsafe_allow_html=True)
+    st.markdown("## Spread Finder (Local)")
+    st.caption("Running on Localhost • Connected to Google Drive Database")
 
 with st.sidebar:
-    st.header("Scanner Settings")
-    dev_mode = st.checkbox("Dev Mode (Bypass Filters)", value=False)
-    width_target = st.slider("Target Spread Width ($)", 1, 25, 5, 1)
-    if st.button("Reset Scanner"):
-        st.session_state.current_ticker_index = 0
+    st.header("Settings")
+    dev_mode = st.checkbox("Dev Mode", value=False)
+    width_target = st.slider("Width ($)", 1, 25, 5, 1)
+    if st.button("Reset"):
         st.session_state.scan_results = []
         st.session_state.scan_log = []
         st.session_state.batch_complete = False
         st.rerun()
 
 # --- SCANNER ---
-if st.button("Scan Market (Full Run)"):
+if st.button("Scan Market"):
     st.session_state.scan_results = []
     st.session_state.scan_log = []
     st.session_state.scan_complete = False
-    
-    status = st.empty()
-    status.info("Initializing Scanner...")
-    
-    market_healthy, spy_price, spy_sma = get_market_health()
-    if not market_healthy and not dev_mode:
-        st.error(f"BEAR REGIME DETECTED: SPY ${spy_price:.2f} < SMA ${spy_sma:.2f}")
-        st.stop()
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     live_log_container = st.empty()
     
-    from persistence import save_to_drive
+    try:
+        drive_service = build_drive_service_from_session()
+    except:
+        st.error("Drive Connection Failed. Check your secrets.")
+        st.stop()
     
     batch_size = 5
     total_tickers = len(LIQUID_TICKERS)
@@ -475,7 +277,7 @@ if st.button("Scan Market (Full Run)"):
         
         try:
             bulk_data = yf.download(batch, period="1y", group_by='ticker', progress=False)
-            st.session_state.scan_log.append(f"[BATCH] Data acquired for {len(batch)} tickers")
+            st.session_state.scan_log.append(f"[BATCH] Data for {len(batch)} tickers")
         except:
             bulk_data = None
             
@@ -492,10 +294,12 @@ if st.button("Scan Market (Full Run)"):
                 st.session_state.scan_log.append(f"[{ticker}] No Data")
                 continue
             
-            time.sleep(random.uniform(0.5, 1.5))
+            # Local run is fast, minimal sleep
+            time.sleep(0.5)
             
             spread, reject_reason = find_optimal_spread(
                 ticker, 
+                yf.Ticker(ticker), 
                 data['price'], 
                 data['hv'], 
                 spread_width_target=width_target, 
@@ -503,13 +307,12 @@ if st.button("Scan Market (Full Run)"):
             )
             
             if spread:
-                st.session_state.scan_log.append(f"[{ticker}] FOUND TRADE | Credit: ${spread['credit']:.2f}")
+                st.session_state.scan_log.append(f"[{ticker}] ✅ FOUND: Credit ${spread['credit']:.2f}")
                 score = 0
                 if spread['iv'] > (data['hv'] + 5.0): score += 30
                 elif spread['iv'] > data['hv']: score += 15
                 if data['is_uptrend']: score += 10
                 if data['is_uptrend'] and data['is_oversold_bb']: score += 30
-                elif data['is_uptrend'] and data['rsi'] < 45: score += 20
                 
                 score += 20 
                 display_score = min(score, 100.0)
@@ -520,7 +323,7 @@ if st.button("Scan Market (Full Run)"):
                         "score": score, "display_score": display_score
                     })
             else:
-                st.session_state.scan_log.append(f"[{ticker}] Skipped: {reject_reason}")
+                st.session_state.scan_log.append(f"[{ticker}] ⏭️ {reject_reason}")
             
             log_text = "\n".join(st.session_state.scan_log[-12:]) 
             live_log_container.code(log_text, language="text")
@@ -544,28 +347,16 @@ if st.session_state.get('scan_complete', False) and st.session_state.scan_result
         with cols[i % 3]:
             with st.container(border=True):
                 pill_class = "price-pill-red" if d['change_pct'] < 0 else "price-pill-green"
-                badge_text = "ELITE EDGE" if res['display_score'] >= 80 else "SOLID SETUP"
                 
-                if d['is_uptrend'] and (d['is_oversold_bb'] or d['rsi'] < 45):
-                    signal_html = "<span style='color: #00FFAA; font-weight: bold; font-size: 14px;'>BUY NOW (DIP)</span>"
-                elif d['is_uptrend']:
-                    signal_html = "<span style='color: #FFA726; font-weight: bold; font-size: 14px;'>WAIT (NEUTRAL)</span>"
-                else:
-                    signal_html = "<span style='color: #FF5252; font-weight: bold; font-size: 14px;'>PASS (TREND)</span>"
-
                 st.markdown(f"""
                 <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                     <div>
-                        <div style="font-size: 22px; font-weight: 900; color: white; line-height: 1;">
-                            {t} <span style="font-size: 12px; font-weight: 400; color: #aaa;">{d['type_str']}</span>
-                        </div>
-                        <div style="font-size: 11px; color: #888; margin-bottom: 4px;">{d['sector_str']}</div>
+                        <div style="font-size: 22px; font-weight: 900; color: white;">{t}</div>
                         <div style="margin-top: 2px;"><span class="{pill_class}">${d['price']:.2f} ({d['change_pct']:.2f}%)</span></div>
                     </div>
                     <div style="text-align: right;">
-                        <div class="strategy-badge">{badge_text}</div>
-                        <div style="font-size: 20px; font-weight: 900; color: #d4ac0d; margin-top: 4px;">{res['display_score']:.0f}</div>
-                        <div style="font-size: 9px; color: #666; text-transform: uppercase;">Edge Score</div>
+                        <div style="font-size: 20px; font-weight: 900; color: #d4ac0d;">{res['display_score']:.0f}</div>
+                        <div style="font-size: 9px; color: #666;">SCORE</div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -576,14 +367,13 @@ if st.session_state.get('scan_complete', False) and st.session_state.scan_result
                     st.markdown(f"""
                     <div class="metric-label">Strikes</div>
                     <div class="metric-value">${s['short']:.0f} / ${s['long']:.0f}</div>
-                    <div style="height: 8px;"></div>
-                    <div style="display: flex; gap: 15px;">
+                    <div style="display: flex; gap: 15px; margin-top:8px;">
                         <div>
                             <div class="metric-label">Credit</div>
                             <div class="metric-value" style="color:{SUCCESS_COLOR}">${s['credit']:.2f}</div>
                         </div>
                         <div>
-                            <div class="metric-label">Max Risk</div>
+                            <div class="metric-label">Risk</div>
                             <div class="metric-value" style="color:#FF5252">${s['max_loss']:.2f}</div>
                         </div>
                     </div>
@@ -593,13 +383,12 @@ if st.session_state.get('scan_complete', False) and st.session_state.scan_result
                     <div class="metric-label">Expiry</div>
                     <div class="metric-value">{s['dte']} Days</div>
                     <div style="height: 8px;"></div>
-                    <div class="metric-label">Action Signal</div>
-                    <div>{signal_html}</div>
+                    <div class="metric-label">Status</div>
+                    <div><span style='color: #00FFAA; font-weight: bold;'>ACTIVE</span></div>
                     """, unsafe_allow_html=True)
                 
                 st.markdown("---")
                 st.pyplot(plot_sparkline_cone(d['hist'], s['short'], s['long'], d['price'], s['iv'], s['dte']), use_container_width=True)
-                st.markdown(f"""<div class="roc-box"><span style="font-size:11px; color: #00c864; text-transform: uppercase;">Return on Capital</span><br><span style="font-size:18px; font-weight:800; color: #00c864;">{s['roi']:.2f}%</span></div>""", unsafe_allow_html=True)
                 
                 add_key = f"add_mode_{t}_{i}"
                 st.write("") 
@@ -607,32 +396,25 @@ if st.session_state.get('scan_complete', False) and st.session_state.scan_result
                     st.session_state[add_key] = True
 
                 if st.session_state.get(add_key, False):
-                    st.markdown("##### Size")
                     num = st.number_input(f"Contracts", min_value=1, value=1, key=f"c_{t}_{i}")
-                    cc1, cc2 = st.columns(2)
-                    with cc1:
-                        if st.button("Confirm Add", key=f"ok_{t}_{i}"):
-                            new_trade = {
-                                "id": f"{t}-{s['short']}-{s['expiration_raw']}",
-                                "ticker": t, "contracts": num, 
-                                "short_strike": s['short'], "long_strike": s['long'],
-                                "expiration": s['expiration_raw'], "credit": s['credit'],
-                                "entry_date": datetime.now().date().isoformat(),
-                                "pnl_history": []
-                            }
-                            st.session_state.trades.append(new_trade)
-                            try:
-                                save_to_drive(drive_service, st.session_state.trades)
-                            except: pass
-                            st.toast(f"Added {t}")
-                            del st.session_state[add_key]
-                            st.rerun()
-                    with cc2:
-                        if st.button("Cancel", key=f"no_{t}_{i}"):
-                            del st.session_state[add_key]
-                            st.rerun()
+                    if st.button("Confirm Add", key=f"ok_{t}_{i}"):
+                        new_trade = {
+                            "id": f"{t}-{s['short']}-{s['expiration_raw']}",
+                            "ticker": t, "contracts": num, 
+                            "short_strike": s['short'], "long_strike": s['long'],
+                            "expiration": s['expiration_raw'], "credit": s['credit'],
+                            "entry_date": datetime.now().date().isoformat(),
+                            "pnl_history": []
+                        }
+                        st.session_state.trades.append(new_trade)
+                        
+                        # --- THE MAGIC LINK: SAVES TO CLOUD ---
+                        save_to_drive(drive_service, st.session_state.trades)
+                        
+                        st.toast(f"Added {t} to Cloud Dashboard")
+                        del st.session_state[add_key]
+                        st.rerun()
 
-# --- BOTTOM LOG ---
 if st.session_state.scan_log:
-    with st.expander("Show Full Scanner Log", expanded=True):
+    with st.expander("Logs", expanded=True):
         st.code("\n".join(st.session_state.scan_log), language="text")
