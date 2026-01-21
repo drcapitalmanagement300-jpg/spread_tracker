@@ -1,14 +1,22 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import requests
+import scipy.stats as si
+from datetime import datetime, timedelta
+import finnhub
 import time
 import random
-from datetime import datetime, timedelta
+import os
 
-# --- LAZY IMPORTS ---
-import yfinance as yf 
+# Import persistence
+from persistence import (
+    build_drive_service_from_session,
+    save_to_drive,
+    load_from_drive,
+    logout 
+)
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Finder")
@@ -17,8 +25,8 @@ st.set_page_config(layout="wide", page_title="Spread Finder")
 try:
     FINNHUB_API_KEY = st.secrets["general"]["FINNHUB_API_KEY"]
 except (FileNotFoundError, KeyError):
-    st.error("FINNHUB_API_KEY not found in .streamlit/secrets.toml")
-    st.stop()
+    # Fallback for local run if secrets aren't set up
+    FINNHUB_API_KEY = None
 
 # --- INITIALIZE STATE ---
 if "init_done" not in st.session_state:
@@ -26,7 +34,6 @@ if "init_done" not in st.session_state:
     st.session_state.scan_results = []
     st.session_state.scan_log = []
     
-    from persistence import build_drive_service_from_session, load_from_drive
     try:
         drive_service = build_drive_service_from_session()
         st.session_state.trades = load_from_drive(drive_service) or []
@@ -76,122 +83,6 @@ SECTOR_MAP = {
 LIQUID_TICKERS = list(SECTOR_MAP.keys())
 ETFS = ["SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX", "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS"]
 
-# --- NASDAQ API FUNCTIONS (THE FIX) ---
-@st.cache_resource
-def get_nasdaq_session():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Origin": "https://www.nasdaq.com",
-        "Referer": "https://www.nasdaq.com/"
-    })
-    return session
-
-def fetch_nasdaq_options(ticker, min_dte=25, max_dte=50):
-    """Fetches option chain directly from NASDAQ API."""
-    session = get_nasdaq_session()
-    
-    # 1. Calculate Target Date Range
-    # Nasdaq requires specific dates, or it returns near-term. 
-    # We will just fetch the default "money" chain which usually covers near-term
-    # But strictly speaking, NASDAQ API is tricky with dates.
-    # STRATEGY: Fetch "The Money" chain for a specific expiry.
-    
-    # First, get Expirations? No, NASDAQ combines them sometimes. 
-    # Let's use the 'option-chain' endpoint with 'assetclass'
-    url = f"https://api.nasdaq.com/api/quote/{ticker}/option-chain?assetclass=stocks&limit=0" 
-    # limit=0 gets FULL chain (can be heavy, but we need dates)
-    
-    try:
-        # Nasdaq API is sometimes slow, give it 10s
-        response = session.get(url, timeout=10)
-        if response.status_code != 200: return None
-        
-        data = response.json()
-        if not data or 'data' not in data or not data['data']: return None
-        
-        table = data['data'].get('table', {})
-        rows = table.get('rows', [])
-        
-        if not rows: return None
-        
-        # NASDAQ returns rows with "expiryDate" (e.g., "Nov 17, 2023")
-        # We need to parse these
-        now = datetime.now()
-        
-        valid_rows = []
-        for r in rows:
-            try:
-                # "expiryDate" isn't always in the top level row, sometimes nested.
-                # Actually, NASDAQ rows ARE the strikes. The expiry is usually a filter.
-                # If we didn't specify date, it gives us the nearest expiry or a mix.
-                # Wait, querying without date often fails or gives just near term.
-                pass
-            except: pass
-            
-        # BETTER STRATEGY FOR NASDAQ:
-        # Get the Option Chain table. It usually contains columns: "expiryDate", "call", "put", "strike"
-        pass
-    except:
-        pass
-
-    # --- FALLBACK TO YAHOO QUERY2 (OFTEN UNBLOCKED COMPARED TO QUERY1) ---
-    # Since writing a full NASDAQ parser from scratch is complex, let's try the ONE Yahoo endpoint
-    # that usually survives bans: The "QuoteSummary" module.
-    
-    # If that fails, we return None (scan skip)
-    return fetch_yahoo_options_v2(ticker, min_dte, max_dte)
-
-def fetch_yahoo_options_v2(ticker, min_dte, max_dte):
-    """
-    Nuclear Fallback: Uses query2.finance.yahoo.com and manually navigates JSON.
-    """
-    session = get_nasdaq_session() # Reuse the robust header session
-    
-    # 1. Get Expirations
-    url = f"https://query2.finance.yahoo.com/v7/finance/options/{ticker}"
-    try:
-        r = session.get(url, timeout=5)
-        if r.status_code != 200: return None
-        data = r.json()
-        
-        # Check for error
-        if 'optionChain' not in data or 'result' not in data['optionChain']: return None
-        result = data['optionChain']['result'][0]
-        
-        expirations = result.get('expirationDates', [])
-        if not expirations: return None
-        
-        # Find best date
-        now = datetime.now()
-        valid_ts = []
-        for ts in expirations:
-            edate = datetime.fromtimestamp(ts)
-            days = (edate - now).days
-            if min_dte <= days <= max_dte:
-                valid_ts.append(ts)
-        
-        if not valid_ts: return None
-        target_ts = max(valid_ts) # Longest in range
-        
-        # 2. Get Chain for Target Date
-        url_chain = f"https://query2.finance.yahoo.com/v7/finance/options/{ticker}?date={target_ts}"
-        r_chain = session.get(url_chain, timeout=5)
-        if r_chain.status_code != 200: return None
-        
-        chain_data = r_chain.json()['optionChain']['result'][0]
-        puts = chain_data['options'][0]['puts']
-        
-        return {
-            "puts": puts,
-            "dte": (datetime.fromtimestamp(target_ts) - now).days,
-            "expiry_date": datetime.fromtimestamp(target_ts)
-        }
-        
-    except:
-        return None
-
 # --- HELPER FUNCTIONS ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -212,12 +103,7 @@ def is_safe_from_earnings(ticker, expiration_date_str):
     try:
         time.sleep(0.1) 
         today = datetime.now().date()
-        # Parse logic for datetime object or string
-        if isinstance(expiration_date_str, datetime):
-            exp_date = expiration_date_str.date()
-        else:
-            exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
-            
+        exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
         earnings = finnhub_client.earnings_calendar(_from=today.strftime("%Y-%m-%d"), to=exp_date.strftime("%Y-%m-%d"), symbol=ticker)
         if earnings and 'earningsCalendar' in earnings and len(earnings['earningsCalendar']) > 0:
             return False, earnings['earningsCalendar'][0]['date']
@@ -225,7 +111,7 @@ def is_safe_from_earnings(ticker, expiration_date_str):
     except:
         return True, "Error"
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def get_market_health():
     try:
         spy = yf.Ticker("SPY")
@@ -290,110 +176,101 @@ def process_bulk_data(df, ticker):
         }
     except: return None
 
-# --- TRADE LOGIC ---
-def find_optimal_spread(ticker, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
-    
-    min_days = 14 if dev_mode else 25
-    max_days = 60 if dev_mode else 50
-    
-    # Use the robust V2 fetcher
-    chain_data = fetch_yahoo_options_v2(ticker, min_days, max_days)
-    
-    if not chain_data: return None, "No Data (Connection)"
-    
-    puts = chain_data['puts']
-    dte = chain_data['dte']
-    expiry_obj = chain_data['expiry_date']
-    
-    if not puts: return None, "No Puts"
-    
-    # Process Puts
-    # Yahoo JSON keys: strike, bid, ask, impliedVolatility
-    # Convert to list of dicts if needed, usually it's already list of dicts
-    
-    # Sort by Strike Descending
-    puts.sort(key=lambda x: x['strike'], reverse=True)
-    
-    raw_iv = current_hv / 100.0
-    for p in puts:
-        if p['strike'] <= current_price:
-            if 'impliedVolatility' in p:
-                raw_iv = p['impliedVolatility']
-            break
+# --- TRADE LOGIC (CLEAN YFINANCE FOR LOCAL USE) ---
+def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
+    try:
+        # Standard yfinance fetch
+        exps = stock_obj.options
+        if not exps: return None, "No Options (Data)"
+        
+        min_days = 14 if dev_mode else 25
+        max_days = 60 if dev_mode else 50
+        
+        valid_exps = []
+        now = datetime.now()
+        for e in exps:
+            try:
+                edate = datetime.strptime(e, "%Y-%m-%d")
+                if (now + timedelta(days=min_days)) <= edate <= (now + timedelta(days=max_days)):
+                    valid_exps.append(e)
+            except: pass
             
-    expected_move = current_price * raw_iv * np.sqrt(dte/365) * 0.75
-    target_short_strike = current_price - expected_move
-    
-    candidates = [p for p in puts if p['strike'] <= target_short_strike]
-    
-    if not candidates:
-        if dev_mode: candidates = [p for p in puts if p['strike'] < current_price]
-        else:
-            target_fallback = current_price * 0.95
-            candidates = [p for p in puts if p['strike'] <= target_fallback]
-    
-    if not candidates: return None, "No Safe Strikes"
+        if not valid_exps: return None, "No Valid Expiry"
+        best_exp = max(valid_exps) 
+        dte = (datetime.strptime(best_exp, "%Y-%m-%d") - now).days
 
-    width = float(spread_width_target)
-    min_credit = 0.50 if ticker in ETFS else 0.70
-    if dev_mode: min_credit = 0.05
+        chain = stock_obj.option_chain(best_exp)
+        puts = chain.puts
+        
+        if puts.empty: return None, "No Puts"
 
-    best_spread = None
-    rejection_reason = f"Credit < ${min_credit}"
+        atm_puts = puts[abs(puts['strike'] - current_price) == abs(puts['strike'] - current_price).min()]
+        imp_vol = atm_puts.iloc[0]['impliedVolatility'] if not atm_puts.empty else (current_hv / 100.0)
 
-    for short_opt in candidates:
-        short_strike = float(short_opt['strike'])
-        bid = float(short_opt.get('bid', 0) or 0)
-        ask = float(short_opt.get('ask', 0) or 0)
+        expected_move = current_price * imp_vol * np.sqrt(dte/365) * 0.75
+        target_short_strike = current_price - expected_move
         
-        if ask <= 0: continue
+        otm_puts = puts[puts['strike'] <= target_short_strike].sort_values('strike', ascending=False)
         
-        # Smart Liquidity
-        spread_width = ask - bid
-        slippage_pct = spread_width / ask
-        max_spread_allowed = 0.20 if ticker in ETFS else 0.50
-        
-        is_liquid = dev_mode or (spread_width <= max_spread_allowed) or (slippage_pct <= 0.25)
-        if not is_liquid: 
-            rejection_reason = f"Illiquid ({spread_width:.2f})"
-            continue
+        if otm_puts.empty:
+            if dev_mode: otm_puts = puts[puts['strike'] < current_price].sort_values('strike', ascending=False)
+            else:
+                target_fallback = current_price * 0.95
+                otm_puts = puts[puts['strike'] <= target_fallback].sort_values('strike', ascending=False)
+        if otm_puts.empty: return None, "No Safe Strikes"
 
-        long_target = short_strike - width
-        long_leg = None
-        
-        # Find Long Leg
-        for p in puts:
-            if abs(float(p['strike']) - long_target) < 0.5:
-                long_leg = p
-                break
-        
-        if not long_leg: continue
-        
-        long_ask = float(long_leg.get('ask', 0) or 0)
-        mid_credit = bid - long_ask
-        
-        if mid_credit >= min_credit:
-            max_loss = width - mid_credit
-            roi = (mid_credit / max_loss) * 100 if max_loss > 0 else 0
-            iv = short_opt.get('impliedVolatility', 0) * 100
+        width = float(spread_width_target)
+        min_credit = 0.50 if ticker in ETFS else 0.70
+        if dev_mode: min_credit = 0.05
+
+        best_spread = None
+        rejection_reason = f"Credit < ${min_credit}"
+
+        for index, short_row in otm_puts.iterrows():
+            short_strike = short_row['strike']
+            bid = short_row['bid']
+            ask = short_row['ask']
+            if ask <= 0: continue
             
-            exp_str = expiry_obj.strftime("%b %d, %Y")
-            date_raw = expiry_obj.strftime("%Y-%m-%d")
-
-            best_spread = {
-                "expiration_raw": date_raw, "expiration": exp_str, "dte": dte, 
-                "short": short_strike, "long": float(long_leg['strike']),
-                "credit": mid_credit, "max_loss": max_loss, 
-                "iv": iv, "roi": roi, "em": expected_move
-            }
-            break
+            # Smart Liquidity
+            spread_width = ask - bid
+            slippage_pct = spread_width / ask
+            max_spread_allowed = 0.20 if ticker in ETFS else 0.50
             
-    if best_spread and not dev_mode:
-        is_safe, msg = is_safe_from_earnings(ticker, expiry_obj)
-        if not is_safe: return None, f"Earnings: {msg}"
-    
-    if best_spread: return best_spread, None
-    else: return None, rejection_reason
+            is_liquid = dev_mode or (spread_width <= max_spread_allowed) or (slippage_pct <= 0.25)
+            if not is_liquid: 
+                rejection_reason = f"Illiquid ({spread_width:.2f})"
+                continue
+
+            long_target = short_strike - width
+            long_leg = puts[abs(puts['strike'] - long_target) < 0.5] 
+            if long_leg.empty: continue 
+            long_row = long_leg.iloc[0]
+            mid_credit = bid - long_row['ask']
+            
+            if mid_credit >= min_credit:
+                max_loss = width - mid_credit
+                roi = (mid_credit / max_loss) * 100 if max_loss > 0 else 0
+                iv = short_row['impliedVolatility'] * 100
+                
+                exp_str = datetime.strptime(best_exp, "%Y-%m-%d").strftime("%b %d, %Y")
+
+                best_spread = {
+                    "expiration_raw": best_exp, "expiration": exp_str, "dte": dte, 
+                    "short": short_strike, "long": long_row['strike'],
+                    "credit": mid_credit, "max_loss": max_loss, 
+                    "iv": iv, "roi": roi, "em": expected_move
+                }
+                break 
+        
+        if best_spread and not dev_mode:
+            is_safe, msg = is_safe_from_earnings(ticker, best_exp)
+            if not is_safe: return None, f"Earnings: {msg}"
+        
+        if best_spread: return best_spread, None
+        else: return None, rejection_reason
+
+    except Exception as e: return None, f"Error: {str(e)}"
 
 # --- PLOTTING ---
 def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte):
@@ -417,6 +294,7 @@ def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte)
         upper_cone = current_price + std_move
         lower_cone = current_price - std_move
         
+        # GREEN CONE
         ax.plot(future_dates, upper_cone, color=SUCCESS_COLOR, linestyle=':', linewidth=1, alpha=0.6)
         ax.plot(future_dates, lower_cone, color=SUCCESS_COLOR, linestyle=':', linewidth=1, alpha=0.6)
         ax.fill_between(future_dates, lower_cone, upper_cone, color=SUCCESS_COLOR, alpha=0.1)
@@ -487,7 +365,10 @@ if st.button("Scan Market (Full Run)"):
     status_text = st.empty()
     live_log_container = st.empty()
     
-    from persistence import save_to_drive
+    # Check if running on Streamlit Cloud (heuristic)
+    if os.getenv("IS_STREAMLIT_CLOUD") or os.path.exists("/mount/src"):
+        st.error("⚠️ CRITICAL: You are running on Streamlit Cloud. Yahoo/Nasdaq APIs block cloud IPs. Please run this app locally (`streamlit run dashboard.py`) to get data.")
+        st.stop()
     
     batch_size = 5
     total_tickers = len(LIQUID_TICKERS)
@@ -517,10 +398,15 @@ if st.button("Scan Market (Full Run)"):
                 st.session_state.scan_log.append(f"[{ticker}] No Data")
                 continue
             
+            # Standard sleep for local run
             time.sleep(random.uniform(0.5, 1.5))
+            
+            # CLEAN INSTANTIATION
+            ticker_obj = yf.Ticker(ticker)
             
             spread, reject_reason = find_optimal_spread(
                 ticker, 
+                ticker_obj, 
                 data['price'], 
                 data['hv'], 
                 spread_width_target=width_target, 
