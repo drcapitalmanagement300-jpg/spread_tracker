@@ -8,21 +8,10 @@ import random
 from datetime import datetime, timedelta
 
 # --- LAZY IMPORTS ---
-# We use yfinance ONLY for historical charts (candles), not for options
 import yfinance as yf 
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Finder")
-
-# --- SPEED OPTIMIZATION: CACHED RESOURCES ---
-# This function runs ONCE. Subsequent reloads use the saved connection instantly.
-@st.cache_resource
-def get_drive_connection():
-    from persistence import build_drive_service_from_session
-    try:
-        return build_drive_service_from_session()
-    except:
-        return None
 
 # --- AUTHENTICATION ---
 try:
@@ -37,14 +26,11 @@ if "init_done" not in st.session_state:
     st.session_state.scan_results = []
     st.session_state.scan_log = []
     
-    # Load persistence using the CACHED service
-    from persistence import load_from_drive
-    drive_service = get_drive_connection()
+    # Load persistence
+    from persistence import build_drive_service_from_session, load_from_drive
     try:
-        if drive_service:
-            st.session_state.trades = load_from_drive(drive_service) or []
-        else:
-            st.session_state.trades = []
+        drive_service = build_drive_service_from_session()
+        st.session_state.trades = load_from_drive(drive_service) or []
     except:
         st.session_state.trades = []
 
@@ -55,8 +41,6 @@ BG_COLOR = '#0E1117'
 GRID_COLOR = '#444444'
 STRIKE_COLOR = '#FF5252'
 
-# --- TICKER MAP ---
-# Standard Liquid Tickers
 SECTOR_MAP = {
     "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "IWM": "Russell 2000 ETF", "DIA": "Dow Jones ETF",
     "GLD": "Gold Trust", "SLV": "Silver Trust", "TLT": "20+ Yr Treasury Bond", "XLK": "Technology ETF",
@@ -93,39 +77,68 @@ SECTOR_MAP = {
 LIQUID_TICKERS = list(SECTOR_MAP.keys())
 ETFS = ["SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX", "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS"]
 
-# --- DIRECT YAHOO API FUNCTIONS (NO LIBRARY) ---
-def get_headers():
-    """Spoof a real browser to bypass soft bans."""
-    user_agents = [
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    ]
-    return {
-        "User-Agent": random.choice(user_agents),
-        "Accept": "*/*",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive"
-    }
+# --- ADVANCED YAHOO SESSION HANDLER ---
+@st.cache_resource
+def get_yahoo_session():
+    """Establishes a session with valid cookies by visiting the homepage first."""
+    session = requests.Session()
+    
+    # 1. Spoof a real browser
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1"
+    })
+    
+    try:
+        # 2. Visit Homepage to get Cookies
+        # We start with a generic request to set the cookie jar
+        r = session.get("https://finance.yahoo.com", timeout=10)
+        # We don't actually need the crumb for query2 usually, just the cookie
+        return session
+    except:
+        return requests.Session() # Fallback to empty session
 
 def fetch_yahoo_options_data(ticker, date_timestamp=None):
     """
-    Directly hits the Yahoo Query API.
-    If date_timestamp is None, it fetches the summary (includes all expiration dates).
-    If date_timestamp is provided, it fetches the chain for that date.
+    Uses the PRIMED session to fetch data.
+    Uses query2 (Backup Server) which is often less strict.
     """
-    base_url = f"https://query1.finance.yahoo.com/v7/finance/options/{ticker}"
+    session = get_yahoo_session()
+    
+    # Use query2 instead of query1
+    base_url = f"https://query2.finance.yahoo.com/v7/finance/options/{ticker}"
+    
     params = {}
     if date_timestamp:
         params["date"] = date_timestamp
         
     try:
-        response = requests.get(base_url, headers=get_headers(), params=params, timeout=5)
+        # Increased timeout to 15s to handle connection lag
+        response = session.get(base_url, params=params, timeout=15)
+        
         if response.status_code == 200:
             data = response.json()
-            # Navigate the JSON structure
             result = data.get("optionChain", {}).get("result", [])
             if result and len(result) > 0:
                 return result[0]
+                
+        # If query2 fails, try query1 as backup
+        if response.status_code != 200:
+            base_url_v1 = f"https://query1.finance.yahoo.com/v7/finance/options/{ticker}"
+            response = session.get(base_url_v1, params=params, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                result = data.get("optionChain", {}).get("result", [])
+                if result and len(result) > 0:
+                    return result[0]
+                    
         return None
     except Exception:
         return None
@@ -225,8 +238,7 @@ def process_bulk_data(df, ticker):
 
 # --- TRADE LOGIC (MANUAL YAHOO FETCH) ---
 def find_optimal_spread(ticker, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
-    # 1. Fetch Expirations (Direct)
-    # Fetching the summary (no date) returns all expiration dates
+    # 1. Fetch Expirations
     data = fetch_yahoo_options_data(ticker)
     
     if not data: return None, "No Data (Connection)"
@@ -245,15 +257,15 @@ def find_optimal_spread(ticker, current_price, current_hv, spread_width_target=5
             edate = datetime.fromtimestamp(ts)
             days_out = (edate - now).days
             if min_days <= days_out <= max_days:
-                valid_exps.append(ts) # Keep as timestamp for next call
+                valid_exps.append(ts) 
         except: pass
         
     if not valid_exps: return None, "No Valid DTE"
-    best_ts = max(valid_exps) # Use the timestamp directly
+    best_ts = max(valid_exps) 
     best_date_obj = datetime.fromtimestamp(best_ts)
     dte = (best_date_obj - now).days
     
-    # 2. Fetch Chain for specific date (Direct)
+    # 2. Fetch Chain
     chain_data = fetch_yahoo_options_data(ticker, best_ts)
     if not chain_data: return None, "Chain Fetch Failed"
     
@@ -264,11 +276,8 @@ def find_optimal_spread(ticker, current_price, current_hv, spread_width_target=5
     if not puts: return None, "No Puts"
     
     # 3. Process Puts
-    # Sort Puts by Strike Descending
     puts.sort(key=lambda x: x['strike'], reverse=True)
     
-    # Estimate IV from ATM
-    # Use Chain IV if available
     raw_iv = current_hv / 100.0
     for p in puts:
         if p['strike'] <= current_price:
@@ -473,8 +482,8 @@ if st.button("Scan Market (Full Run)"):
                 st.session_state.scan_log.append(f"[{ticker}] No Data")
                 continue
             
-            # Direct API calls are fast, no massive sleep needed
-            time.sleep(random.uniform(0.5, 1.5))
+            # Use Random Sleep to avoid pattern detection
+            time.sleep(random.uniform(1.0, 3.0))
             
             spread, reject_reason = find_optimal_spread(
                 ticker, 
@@ -603,8 +612,9 @@ if st.session_state.get('scan_complete', False) and st.session_state.scan_result
                                 "pnl_history": []
                             }
                             st.session_state.trades.append(new_trade)
-                            # Using the cached service handle
-                            if drive_service: save_to_drive(drive_service, st.session_state.trades)
+                            try:
+                                save_to_drive(drive_service, st.session_state.trades)
+                            except: pass
                             st.toast(f"Added {t}")
                             del st.session_state[add_key]
                             st.rerun()
