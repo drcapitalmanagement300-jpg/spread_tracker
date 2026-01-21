@@ -1,22 +1,18 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import scipy.stats as si
 from datetime import datetime, timedelta
-import finnhub
 import time
 import random
-import os
+import json
 
-# Import persistence
-from persistence import (
-    build_drive_service_from_session,
-    save_to_drive,
-    load_from_drive,
-    logout 
-)
+# --- IMPERSONATION LIBRARY ---
+try:
+    from curl_cffi import requests as cffi_requests
+except ImportError:
+    st.error("⚠️ Library Missing: Please add `curl_cffi` to your requirements.txt")
+    st.stop()
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Spread Finder")
@@ -25,7 +21,6 @@ st.set_page_config(layout="wide", page_title="Spread Finder")
 try:
     FINNHUB_API_KEY = st.secrets["general"]["FINNHUB_API_KEY"]
 except (FileNotFoundError, KeyError):
-    # Fallback for local run if secrets aren't set up
     FINNHUB_API_KEY = None
 
 # --- INITIALIZE STATE ---
@@ -34,6 +29,7 @@ if "init_done" not in st.session_state:
     st.session_state.scan_results = []
     st.session_state.scan_log = []
     
+    from persistence import build_drive_service_from_session, load_from_drive
     try:
         drive_service = build_drive_service_from_session()
         st.session_state.trades = load_from_drive(drive_service) or []
@@ -83,7 +79,49 @@ SECTOR_MAP = {
 LIQUID_TICKERS = list(SECTOR_MAP.keys())
 ETFS = ["SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "TLT", "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "SMH", "ARKK", "KRE", "XBI", "GDX", "EEM", "FXI", "EWZ", "HYG", "LQD", "UVXY", "BITO", "USO", "UNG", "TQQQ", "SQQQ", "SOXL", "SOXS"]
 
-# --- HELPER FUNCTIONS ---
+# --- API CLIENTS ---
+import finnhub
+try:
+    finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
+except:
+    finnhub_client = None
+
+# --- BROWSER IMPERSONATION ENGINE ---
+@st.cache_resource
+def get_impersonation_session():
+    # Use a new session
+    return cffi_requests.Session()
+
+def fetch_yahoo_browser_scrape(ticker, date_timestamp=None):
+    """
+    Uses curl_cffi to mimic a real Chrome browser (TLS Fingerprinting).
+    This bypasses IP bans that target Python 'requests' or 'urllib'.
+    """
+    base_url = f"https://query2.finance.yahoo.com/v7/finance/options/{ticker}"
+    
+    params = {}
+    if date_timestamp:
+        params["date"] = date_timestamp
+        
+    try:
+        # IMPERSONATE CHROME 110+
+        response = cffi_requests.get(
+            base_url, 
+            params=params, 
+            impersonate="chrome110", # This is the magic key
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            result = data.get("optionChain", {}).get("result", [])
+            if result and len(result) > 0:
+                return result[0]
+        return None
+    except Exception:
+        return None
+
+# --- DATA PROCESSING ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
@@ -91,19 +129,17 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-import finnhub
-try:
-    finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
-except:
-    finnhub_client = None
-
 def is_safe_from_earnings(ticker, expiration_date_str):
     if ticker in ETFS: return True, "ETF"
     if not finnhub_client: return True, "No API"
     try:
         time.sleep(0.1) 
         today = datetime.now().date()
-        exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
+        if isinstance(expiration_date_str, datetime):
+            exp_date = expiration_date_str.date()
+        else:
+            exp_date = datetime.strptime(expiration_date_str, "%Y-%m-%d").date()
+            
         earnings = finnhub_client.earnings_calendar(_from=today.strftime("%Y-%m-%d"), to=exp_date.strftime("%Y-%m-%d"), symbol=ticker)
         if earnings and 'earningsCalendar' in earnings and len(earnings['earningsCalendar']) > 0:
             return False, earnings['earningsCalendar'][0]['date']
@@ -111,7 +147,9 @@ def is_safe_from_earnings(ticker, expiration_date_str):
     except:
         return True, "Error"
 
-@st.cache_data(ttl=3600)
+# Use standard YFinance ONLY for chart history (less aggressively blocked)
+import yfinance as yf 
+@st.cache_data(ttl=600)
 def get_market_health():
     try:
         spy = yf.Ticker("SPY")
@@ -176,101 +214,129 @@ def process_bulk_data(df, ticker):
         }
     except: return None
 
-# --- TRADE LOGIC (CLEAN YFINANCE FOR LOCAL USE) ---
-def find_optimal_spread(ticker, stock_obj, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
-    try:
-        # Standard yfinance fetch
-        exps = stock_obj.options
-        if not exps: return None, "No Options (Data)"
+# --- TRADE LOGIC (IMPERSONATION MODE) ---
+def find_optimal_spread(ticker, current_price, current_hv, spread_width_target=5.0, dev_mode=False):
+    
+    # 1. Fetch Summary to get Expirations (Impersonated)
+    data = fetch_yahoo_browser_scrape(ticker)
+    
+    if not data: return None, "No Data (Blocked?)"
+    
+    expirations = data.get("expirationDates", [])
+    if not expirations: return None, "No Expirations Found"
+    
+    min_days = 14 if dev_mode else 25
+    max_days = 60 if dev_mode else 50
+    
+    valid_exps = []
+    now = datetime.now()
+    
+    for ts in expirations:
+        try:
+            edate = datetime.fromtimestamp(ts)
+            days_out = (edate - now).days
+            if min_days <= days_out <= max_days:
+                valid_exps.append(ts) 
+        except: pass
         
-        min_days = 14 if dev_mode else 25
-        max_days = 60 if dev_mode else 50
-        
-        valid_exps = []
-        now = datetime.now()
-        for e in exps:
-            try:
-                edate = datetime.strptime(e, "%Y-%m-%d")
-                if (now + timedelta(days=min_days)) <= edate <= (now + timedelta(days=max_days)):
-                    valid_exps.append(e)
-            except: pass
+    if not valid_exps: return None, "No Valid DTE"
+    best_ts = max(valid_exps) 
+    best_date_obj = datetime.fromtimestamp(best_ts)
+    dte = (best_date_obj - now).days
+    
+    # 2. Fetch Specific Chain (Impersonated)
+    chain_data = fetch_yahoo_browser_scrape(ticker, best_ts)
+    if not chain_data: return None, "Chain Fetch Failed"
+    
+    options = chain_data.get("options", [])
+    if not options: return None, "Empty Chain"
+    
+    puts = options[0].get("puts", [])
+    if not puts: return None, "No Puts"
+    
+    # 3. Process
+    puts.sort(key=lambda x: x['strike'], reverse=True)
+    
+    raw_iv = current_hv / 100.0
+    for p in puts:
+        if p['strike'] <= current_price:
+            if 'impliedVolatility' in p:
+                raw_iv = p['impliedVolatility']
+            break
             
-        if not valid_exps: return None, "No Valid Expiry"
-        best_exp = max(valid_exps) 
-        dte = (datetime.strptime(best_exp, "%Y-%m-%d") - now).days
+    expected_move = current_price * raw_iv * np.sqrt(dte/365) * 0.75
+    target_short_strike = current_price - expected_move
+    
+    candidates = [p for p in puts if p['strike'] <= target_short_strike]
+    
+    if not candidates:
+        if dev_mode: candidates = [p for p in puts if p['strike'] < current_price]
+        else:
+            target_fallback = current_price * 0.95
+            candidates = [p for p in puts if p['strike'] <= target_fallback]
+    
+    if not candidates: return None, "No Safe Strikes"
 
-        chain = stock_obj.option_chain(best_exp)
-        puts = chain.puts
+    width = float(spread_width_target)
+    min_credit = 0.50 if ticker in ETFS else 0.70
+    if dev_mode: min_credit = 0.05
+
+    best_spread = None
+    rejection_reason = f"Credit < ${min_credit}"
+
+    for short_opt in candidates:
+        short_strike = float(short_opt['strike'])
+        bid = float(short_opt.get('bid', 0) or 0)
+        ask = float(short_opt.get('ask', 0) or 0)
         
-        if puts.empty: return None, "No Puts"
-
-        atm_puts = puts[abs(puts['strike'] - current_price) == abs(puts['strike'] - current_price).min()]
-        imp_vol = atm_puts.iloc[0]['impliedVolatility'] if not atm_puts.empty else (current_hv / 100.0)
-
-        expected_move = current_price * imp_vol * np.sqrt(dte/365) * 0.75
-        target_short_strike = current_price - expected_move
+        if ask <= 0: continue
         
-        otm_puts = puts[puts['strike'] <= target_short_strike].sort_values('strike', ascending=False)
+        # Smart Liquidity
+        spread_width = ask - bid
+        slippage_pct = spread_width / ask
+        max_spread_allowed = 0.20 if ticker in ETFS else 0.50
         
-        if otm_puts.empty:
-            if dev_mode: otm_puts = puts[puts['strike'] < current_price].sort_values('strike', ascending=False)
-            else:
-                target_fallback = current_price * 0.95
-                otm_puts = puts[puts['strike'] <= target_fallback].sort_values('strike', ascending=False)
-        if otm_puts.empty: return None, "No Safe Strikes"
+        is_liquid = dev_mode or (spread_width <= max_spread_allowed) or (slippage_pct <= 0.25)
+        if not is_liquid: 
+            rejection_reason = f"Illiquid ({spread_width:.2f})"
+            continue
 
-        width = float(spread_width_target)
-        min_credit = 0.50 if ticker in ETFS else 0.70
-        if dev_mode: min_credit = 0.05
-
-        best_spread = None
-        rejection_reason = f"Credit < ${min_credit}"
-
-        for index, short_row in otm_puts.iterrows():
-            short_strike = short_row['strike']
-            bid = short_row['bid']
-            ask = short_row['ask']
-            if ask <= 0: continue
+        long_target = short_strike - width
+        long_leg = None
+        
+        # Find Long Leg
+        for p in puts:
+            if abs(float(p['strike']) - long_target) < 0.5:
+                long_leg = p
+                break
+        
+        if not long_leg: continue
+        
+        long_ask = float(long_leg.get('ask', 0) or 0)
+        mid_credit = bid - long_ask
+        
+        if mid_credit >= min_credit:
+            max_loss = width - mid_credit
+            roi = (mid_credit / max_loss) * 100 if max_loss > 0 else 0
+            iv = short_opt.get('impliedVolatility', 0) * 100
             
-            # Smart Liquidity
-            spread_width = ask - bid
-            slippage_pct = spread_width / ask
-            max_spread_allowed = 0.20 if ticker in ETFS else 0.50
+            exp_str = best_date_obj.strftime("%b %d, %Y")
+            date_raw = best_date_obj.strftime("%Y-%m-%d")
+
+            best_spread = {
+                "expiration_raw": date_raw, "expiration": exp_str, "dte": dte, 
+                "short": short_strike, "long": float(long_leg['strike']),
+                "credit": mid_credit, "max_loss": max_loss, 
+                "iv": iv, "roi": roi, "em": expected_move
+            }
+            break
             
-            is_liquid = dev_mode or (spread_width <= max_spread_allowed) or (slippage_pct <= 0.25)
-            if not is_liquid: 
-                rejection_reason = f"Illiquid ({spread_width:.2f})"
-                continue
-
-            long_target = short_strike - width
-            long_leg = puts[abs(puts['strike'] - long_target) < 0.5] 
-            if long_leg.empty: continue 
-            long_row = long_leg.iloc[0]
-            mid_credit = bid - long_row['ask']
-            
-            if mid_credit >= min_credit:
-                max_loss = width - mid_credit
-                roi = (mid_credit / max_loss) * 100 if max_loss > 0 else 0
-                iv = short_row['impliedVolatility'] * 100
-                
-                exp_str = datetime.strptime(best_exp, "%Y-%m-%d").strftime("%b %d, %Y")
-
-                best_spread = {
-                    "expiration_raw": best_exp, "expiration": exp_str, "dte": dte, 
-                    "short": short_strike, "long": long_row['strike'],
-                    "credit": mid_credit, "max_loss": max_loss, 
-                    "iv": iv, "roi": roi, "em": expected_move
-                }
-                break 
-        
-        if best_spread and not dev_mode:
-            is_safe, msg = is_safe_from_earnings(ticker, best_exp)
-            if not is_safe: return None, f"Earnings: {msg}"
-        
-        if best_spread: return best_spread, None
-        else: return None, rejection_reason
-
-    except Exception as e: return None, f"Error: {str(e)}"
+    if best_spread and not dev_mode:
+        is_safe, msg = is_safe_from_earnings(ticker, best_date_obj)
+        if not is_safe: return None, f"Earnings: {msg}"
+    
+    if best_spread: return best_spread, None
+    else: return None, rejection_reason
 
 # --- PLOTTING ---
 def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte):
@@ -294,7 +360,6 @@ def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte)
         upper_cone = current_price + std_move
         lower_cone = current_price - std_move
         
-        # GREEN CONE
         ax.plot(future_dates, upper_cone, color=SUCCESS_COLOR, linestyle=':', linewidth=1, alpha=0.6)
         ax.plot(future_dates, lower_cone, color=SUCCESS_COLOR, linestyle=':', linewidth=1, alpha=0.6)
         ax.fill_between(future_dates, lower_cone, upper_cone, color=SUCCESS_COLOR, alpha=0.1)
@@ -365,10 +430,7 @@ if st.button("Scan Market (Full Run)"):
     status_text = st.empty()
     live_log_container = st.empty()
     
-    # Check if running on Streamlit Cloud (heuristic)
-    if os.getenv("IS_STREAMLIT_CLOUD") or os.path.exists("/mount/src"):
-        st.error("⚠️ CRITICAL: You are running on Streamlit Cloud. Yahoo/Nasdaq APIs block cloud IPs. Please run this app locally (`streamlit run dashboard.py`) to get data.")
-        st.stop()
+    from persistence import save_to_drive
     
     batch_size = 5
     total_tickers = len(LIQUID_TICKERS)
@@ -398,15 +460,11 @@ if st.button("Scan Market (Full Run)"):
                 st.session_state.scan_log.append(f"[{ticker}] No Data")
                 continue
             
-            # Standard sleep for local run
-            time.sleep(random.uniform(0.5, 1.5))
-            
-            # CLEAN INSTANTIATION
-            ticker_obj = yf.Ticker(ticker)
+            # Browser emulation requires very little delay, it's fast
+            time.sleep(random.uniform(0.1, 0.5))
             
             spread, reject_reason = find_optimal_spread(
                 ticker, 
-                ticker_obj, 
                 data['price'], 
                 data['hv'], 
                 spread_width_target=width_target, 
