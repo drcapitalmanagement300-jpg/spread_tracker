@@ -5,16 +5,21 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from streamlit_autorefresh import st_autorefresh
 import yfinance as yf 
+import numpy as np # Added for safety checks
 
 # ---------------- Persistence ----------------
-from persistence import (
-    ensure_logged_in,
-    build_drive_service_from_session,
-    save_to_drive,
-    load_from_drive,
-    log_completed_trade, 
-    logout,
-)
+try:
+    from persistence import (
+        ensure_logged_in,
+        build_drive_service_from_session,
+        save_to_drive,
+        load_from_drive,
+        log_completed_trade, 
+        logout,
+    )
+except ImportError:
+    st.error("Persistence module missing. Please check your file structure.")
+    st.stop()
 
 # ---------------- Page config ----------------
 st.set_page_config(page_title="Dashboard", layout="wide")
@@ -31,7 +36,6 @@ st_autorefresh(interval=60_000, key="ui_refresh")
 # ---------------- Auth / Drive ----------------
 ensure_logged_in()
 
-# --- SPEED FIX: CACHE THE CONNECTION ---
 @st.cache_resource
 def get_drive_connection():
     """Establishes the Drive connection only ONCE per session."""
@@ -87,12 +91,11 @@ def format_money(x):
 def render_snp_performance():
     """Fetches and displays S&P 500 daily performance."""
     try:
-        # Use simple Ticker call (session handling internal to YF is fine for simple price history)
         snp = yf.Ticker("^GSPC")
         hist = snp.history(period="2d")
         
         if len(hist) < 2:
-            return # Not enough data
+            return 
             
         current = hist['Close'].iloc[-1]
         prev = hist['Close'].iloc[-2]
@@ -119,7 +122,7 @@ def render_snp_performance():
         """, unsafe_allow_html=True)
         
     except Exception:
-        pass # Fail silently if YF is down
+        pass 
 
 # --- Charting & Progress Bar Functions ---
 def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_strike):
@@ -132,8 +135,8 @@ def plot_spread_chart(df, trade_start_date, expiration_date, short_strike, long_
     fig.patch.set_facecolor(bg_color)
     ax.set_facecolor(bg_color)
 
-    width = 0.6   
-    width2 = 0.05 
+    width = 0.6    
+    width2 = 0.05  
     
     up = df[df.Close >= df.Open]
     down = df[df.Close < df.Open]
@@ -359,11 +362,19 @@ def render_open_positions_grid(trades):
         pl_str = f"{'+' if pl_dollars > 0 else ''}${pl_dollars:.0f}"
         pl_dollar_color = "#ccc"
 
+        # --- SAFE PROFIT DISPLAY FIX ---
+        # This handles the case where profit_pct is None (New Trade)
         if pl_dollars >= 0:
-            ratio = min(profit_pct / 60.0, 1.0) if profit_pct else 0 
-            alpha = 0.1 + (ratio * 0.2) 
+            if profit_pct is not None:
+                ratio = min(profit_pct / 60.0, 1.0)
+                alpha = 0.1 + (ratio * 0.2) 
+                pl_text = f"+{profit_pct:.1f}%"
+            else:
+                ratio = 0
+                alpha = 0.1
+                pl_text = "0.0%"
+            
             bg_color = f"rgba(0, 200, 83, {alpha})"
-            pl_text = f"+{profit_pct:.1f}%"
             pl_color = SUCCESS_COLOR
             pl_dollar_color = SUCCESS_COLOR
         else:
@@ -375,10 +386,9 @@ def render_open_positions_grid(trades):
             pl_color = "#ff6b6b"
             pl_dollar_color = "#ff6b6b"
 
-        spread_val_str = f"{spread_value:.0f}%" if spread_value is not None else "-"
-        spread_color = "#ccc"
-        
+        # Safe Spread Value
         if spread_value is not None:
+            spread_val_str = f"{spread_value:.0f}%"
             if spread_value >= 400:
                 spread_color = WARNING_COLOR
                 border_color = WARNING_COLOR
@@ -386,6 +396,7 @@ def render_open_positions_grid(trades):
             else:
                 spread_color = SUCCESS_COLOR
         else:
+            spread_val_str = "-"
             spread_color = "#ccc"
 
         if day_change is None: day_change = 0.0
