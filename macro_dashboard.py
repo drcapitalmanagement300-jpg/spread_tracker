@@ -23,12 +23,13 @@ CARD_COLOR = "#262730"
 TEXT_COLOR = "#FAFAFA"
 FINNHUB_KEY = "d5mgc39r01ql1f2p69c0d5mgc39r01ql1f2p69cg" 
 
-# Name Mapping
+# Name Mapping (Expanded for Depth)
 TICKER_MAP = {
     'XLK': 'Technology', 'XLF': 'Financials', 'XLE': 'Energy',
-    'XLV': 'Healthcare', 'XLY': 'Cons. Discretionary', 'XLP': 'Cons. Staples',
-    'XLI': 'Industrials', 'XLU': 'Utilities', 'XLC': 'Communication',
+    'XLV': 'Healthcare', 'XLY': 'Discretionary', 'XLP': 'Staples',
+    'XLI': 'Industrials', 'XLU': 'Utilities', 'XLC': 'Comm.',
     'XLB': 'Materials', 'XLRE': 'Real Estate',
+    'SMH': 'Semis (Growth)', 'IBB': 'Biotech (Risk)', 'XHB': 'Homebuilders (Rates)', 'KRE': 'Regional Banks',
     'GLD': 'Gold', 'SLV': 'Silver', 'USO': 'Oil', 'TLT': '20Y Bonds',
     '^TNX': '10-Year Yield'
 }
@@ -48,32 +49,41 @@ st.markdown(f"""
         flex-direction: column;
         justify-content: space-between;
     }}
-    .metric-title {{ color: #888; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }}
-    .metric-value {{ color: #FFF; font-size: 26px; font-weight: 800; margin: 5px 0; }}
-    .metric-delta {{ font-size: 14px; font-weight: bold; }}
-    .interpretation {{ font-size: 13px; color: #BBB; margin-top: 10px; padding-top: 10px; border-top: 1px solid #444; line-height: 1.4; }}
-    .mini-stat-label {{ font-size: 12px; color: #888; }}
-    .mini-stat-val {{ font-size: 16px; font-weight: bold; color: #eee; }}
-    .news-item {{ padding: 10px; border-bottom: 1px solid #333; }}
-    .news-title {{ font-weight: bold; color: #58a6ff; text-decoration: none; }}
+    .metric-title {{ color: #888; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600; }}
+    .metric-value {{ color: #FFF; font-size: 28px; font-weight: 800; margin: 8px 0; }}
+    .sub-metric {{ font-size: 13px; color: #aaa; margin-bottom: 4px; }}
+    .interpretation {{ font-size: 13px; color: #BBB; margin-top: 15px; padding-top: 10px; border-top: 1px solid #444; line-height: 1.4; }}
+    .news-item {{ padding: 8px 0; border-bottom: 1px solid #333; font-size: 13px; }}
+    .news-link {{ color: #58a6ff; text-decoration: none; font-weight: 500; }}
+    .news-link:hover {{ text-decoration: underline; }}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------- DATA ENGINES ----------------
 
+@st.cache_data(ttl=60) # Fast update for live price
+def fetch_live_ticker(ticker):
+    try:
+        data = yf.Ticker(ticker).history(period="1d")
+        if not data.empty: return data['Close'].iloc[-1]
+        return 0.0
+    except: return 0.0
+
 @st.cache_data(ttl=300)
 def fetch_market_data():
-    """Fetches comprehensive market data"""
+    """Fetches comprehensive market data (Cached 5 mins)"""
     tickers = {
         "Main": ["SPY", "QQQ", "IWM"],
         "Vol": ["^VIX", "^VVIX"],
         "Rates": ["^TNX", "TLT"], 
-        "Sectors": ["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU", "XLC", "XLB", "XLRE"],
+        # Expanded Sector List for "Optimal" View
+        "Sectors": ["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU", "SMH", "IBB", "XHB", "KRE"],
         "Commodities": ["GLD", "SLV", "USO"]
     }
     all_ticks = [t for cat in tickers.values() for t in cat]
     
     try:
+        # Download 1 year for context
         data = yf.download(all_ticks, period="1y", interval="1d", progress=False)['Close']
         return data
     except Exception as e:
@@ -82,77 +92,68 @@ def fetch_market_data():
 
 @st.cache_data(ttl=3600)
 def fetch_economic_events():
-    """Fetches CPI and Fed Rate Decisions"""
+    """Robust Economic Event Fetcher (90 Day Window)"""
     try:
         finnhub_client = finnhub.Client(api_key=FINNHUB_KEY)
         
-        # Look back 2 months for CPI, forward 2 months for Fed
+        # Widen window to catch quarterly/monthly releases reliably
         today = datetime.now()
-        start_date = (today - timedelta(days=60)).strftime('%Y-%m-%d')
-        end_date = (today + timedelta(days=60)).strftime('%Y-%m-%d')
+        start_date = (today - timedelta(days=90)).strftime('%Y-%m-%d')
+        end_date = (today + timedelta(days=90)).strftime('%Y-%m-%d')
         
         calendar = finnhub_client.economic_calendar(_from=start_date, to=end_date)
         events = calendar.get('economicCalendar', [])
         
-        # 1. FIND CPI
-        cpi_data = {'val': 'N/A', 'status': 'Unknown', 'date': 'N/A'}
-        # Filter for US CPI YoY
-        cpi_events = [e for e in events if 'Consumer Price Index (YoY)' in e['event'] and e['country'] == 'US']
+        # 1. CPI LOGIC
+        cpi_data = {'val': 'N/A', 'status': 'No Data', 'date': '-'}
+        # Loose matching for robustness
+        cpi_events = [e for e in events if 'consumer price index' in e.get('event', '').lower() and 'yoy' in e.get('event', '').lower() and e['country'] == 'US']
         
-        # Get the latest COMPLETED event (has an 'actual' value)
-        completed_cpi = [e for e in cpi_events if e.get('actual') is not None]
+        # Filter for completed events
+        past_cpi = [e for e in cpi_events if e.get('actual') is not None]
         
-        if completed_cpi:
-            latest = sorted(completed_cpi, key=lambda x: x['date'], reverse=True)[0]
+        if past_cpi:
+            latest = sorted(past_cpi, key=lambda x: x['date'], reverse=True)[0]
             actual = latest.get('actual')
             estimate = latest.get('estimate')
             
-            status = "As Expected"
-            if estimate:
-                if actual > estimate: status = "Heating Up (Bearish)"
-                elif actual < estimate: status = "Cooling (Bullish)"
+            status = "In Line"
+            if estimate is not None and actual is not None:
+                if actual > estimate: status = "Hot (Bearish)"
+                elif actual < estimate: status = "Cool (Bullish)"
             
             cpi_data = {
-                'val': actual,
-                'prev': latest.get('prev'),
+                'val': f"{actual}%",
                 'status': status,
-                'date': latest['date'].split(' ')[0] # Remove time
+                'date': latest['date'].split(' ')[0]
             }
 
-        # 2. FIND FED DECISION
-        fed_data = {'date': 'N/A', 'expectation': 'Wait & See'}
-        # Look for Fed Rate Decision
-        fed_events = [e for e in events if 'Fed Interest Rate Decision' in e['event'] and e['country'] == 'US']
-        
-        # Find next FUTURE event
+        # 2. FED LOGIC
+        fed_data = {'date': 'TBD', 'expectation': 'Wait & See'}
+        fed_events = [e for e in events if 'fed interest rate decision' in e.get('event', '').lower() and e['country'] == 'US']
         future_fed = [e for e in fed_events if e['date'] >= today.strftime('%Y-%m-%d')]
         
         if future_fed:
             next_meeting = sorted(future_fed, key=lambda x: x['date'])[0]
+            fed_data['date'] = next_meeting['date'].split(' ')[0]
             
-            # Simple logic: Compare 'estimate' (consensus) vs 'prev'
-            est_rate = next_meeting.get('estimate')
-            prev_rate = next_meeting.get('prev')
-            
-            expectation = "Hold"
-            if est_rate and prev_rate:
-                if est_rate < prev_rate: expectation = "CUT Expected (Bullish)"
-                elif est_rate > prev_rate: expectation = "HIKE Expected (Bearish)"
-                
-            fed_data = {
-                'date': next_meeting['date'].split(' ')[0],
-                'expectation': expectation
-            }
+            # Rate Expectation Logic
+            est = next_meeting.get('estimate')
+            prev = next_meeting.get('prev')
+            if est and prev:
+                if est < prev: fed_data['expectation'] = "CUT Expected"
+                elif est > prev: fed_data['expectation'] = "HIKE Expected"
+                else: fed_data['expectation'] = "HOLD Expected"
             
         return {'cpi': cpi_data, 'fed': fed_data}
         
     except:
-        return {'cpi': {'val': 'N/A', 'status': 'Error', 'date': 'N/A'}, 'fed': {'date': 'N/A', 'expectation': 'Unknown'}}
+        return {'cpi': {'val': 'N/A', 'status': 'API Error', 'date': '-'}, 'fed': {'date': 'N/A', 'expectation': 'Unknown'}}
 
 @st.cache_data(ttl=1800)
 def fetch_news_headlines():
     try:
-        results = DDGS().news(keywords="financial markets news", region="wt-wt", safesearch="off", max_results=5)
+        results = DDGS().news(keywords="market news finance", region="wt-wt", safesearch="off", max_results=5)
         return results
     except:
         return []
@@ -178,17 +179,18 @@ def calculate_metrics(data, eco_data):
         
         trend_state = "Neutral"
         if price > sma200:
-            trend_state = "Bullish" if price > sma50 else "Bullish (Pullback)"
+            trend_state = "Bullish" if price > sma50 else "Bullish (Weak)"
         else:
-            trend_state = "Bearish" if price < sma50 else "Bearish (Correction)"
+            trend_state = "Bearish" if price < sma50 else "Bearish (Rally)"
             
         metrics['spy'] = {'price': price, 'sma200': sma200, 'sma50': sma50, 'state': trend_state}
     except:
         metrics['spy'] = {'price': 0, 'sma200': 0, 'sma50': 0, 'state': "Error"}
     
-    # 3. Risk
+    # 3. Risk (Enhanced with SMH/XLU)
     try:
-        offense = data['XLK'].pct_change(20).iloc[-1]
+        # Semi (Growth) vs Utilities (Safety) is the cleanest signal
+        offense = data['SMH'].pct_change(20).iloc[-1]
         defense = data['XLU'].pct_change(20).iloc[-1]
         metrics['risk_mode'] = "Risk On" if offense > defense else "Risk Off"
     except:
@@ -205,7 +207,6 @@ def calculate_metrics(data, eco_data):
             'fed': eco_data['fed']
         }
     except:
-        # Fallback if Yahoo fails
         metrics['macro'] = {
             'tnx': 0.0, 'tnx_chg': 0.0, 
             'cpi': eco_data['cpi'], 
@@ -223,8 +224,6 @@ def plot_spy_chart_mpl(data):
     # Prepare Data
     df = data['SPY'].reset_index()
     df.columns = ['Date', 'Close']
-    # Create synthetic OHLC for visualization purposes (approximation since we only have Close)
-    # Note: In a real scenario, fetching OHLC is better, but this keeps data load light
     df['SMA200'] = df['Close'].rolling(200).mean()
     df['SMA50'] = df['Close'].rolling(50).mean()
     
@@ -232,18 +231,16 @@ def plot_spy_chart_mpl(data):
     df = df.tail(126)
     
     # Setup Figure
-    fig, ax = plt.subplots(figsize=(8, 3))
+    fig, ax = plt.subplots(figsize=(8, 3.5)) # Slightly taller
     fig.patch.set_facecolor(CARD_COLOR)
     ax.set_facecolor(CARD_COLOR)
     
     # Plot SMAs
-    ax.plot(df['Date'], df['SMA200'], color=SUCCESS_COLOR, linestyle='--', linewidth=1, label='200 SMA', alpha=0.8)
-    ax.plot(df['Date'], df['SMA50'], color=NEUTRAL_COLOR, linestyle=':', linewidth=1, label='50 SMA', alpha=0.8)
+    ax.plot(df['Date'], df['SMA200'], color=SUCCESS_COLOR, linestyle='--', linewidth=1, label='200 SMA', alpha=0.9)
+    ax.plot(df['Date'], df['SMA50'], color=NEUTRAL_COLOR, linestyle=':', linewidth=1, label='50 SMA', alpha=0.9)
     
-    # Plot Price (White Line for clarity on macro view, cleaner than bars for 6m timeframe)
+    # Plot Price
     ax.plot(df['Date'], df['Close'], color='#FFF', linewidth=1.5, label='Price')
-    
-    # Fill area below price to simulate "mountain" chart
     ax.fill_between(df['Date'], df['Close'], df['Close'].min(), color='#FFF', alpha=0.05)
 
     # Styling
@@ -253,7 +250,7 @@ def plot_spy_chart_mpl(data):
     ax.spines['left'].set_color('#888')
     ax.tick_params(axis='x', colors='#888', labelsize=8)
     ax.tick_params(axis='y', colors='#888', labelsize=8)
-    ax.grid(True, which='major', linestyle=':', color='#444', alpha=0.3)
+    ax.grid(True, which='major', linestyle='-', color='#444', alpha=0.2)
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
     
     ax.legend(loc='upper left', fontsize=8, frameon=False, labelcolor='#ccc')
@@ -284,7 +281,7 @@ def draw_vix_gauge(val, rank):
 
 # ---------------- MAIN APP LAYOUT ----------------
 
-# 1. CONSISTENT HEADER
+# 1. HEADER
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 
 with header_col1:
@@ -321,107 +318,100 @@ with st.spinner("Analyzing Global Markets..."):
 # ---------------- ROW 1: THE BIG THREE ----------------
 c1, c2, c3 = st.columns(3)
 
-# 1. VOLATILITY CARD
+# 1. VOLATILITY COMMAND
 with c1:
     vix_val = metrics['vix']['value']
     vix_rank = metrics['vix']['rank']
     
     if vix_val < 13:
-        vix_msg = "Premiums are cheap. Low edge."
         vix_tag = "COMPLACENT"
         vix_col = WARNING_COLOR
+        vix_msg = "Premiums are cheap. Risk/Reward poor."
     elif 13 <= vix_val <= 22:
-        vix_msg = "Optimal zone. Premiums are fair."
         vix_tag = "OPTIMAL"
         vix_col = SUCCESS_COLOR
-    elif vix_val > 22:
-        vix_msg = "Fear is high. Size down."
+        vix_msg = "Goldilocks zone. Sell premium."
+    else:
         vix_tag = "ELEVATED"
         vix_col = NEUTRAL_COLOR
+        vix_msg = "High fear. Reduce size."
         
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-title">Volatility Regime (VIX)</div>
-        <div style="display:flex; justify-content:center;">
+        <div class="metric-title">Volatility Command</div>
+        <div style="display:flex; justify-content:center; margin-top:10px;">
     """, unsafe_allow_html=True)
     st.pyplot(draw_vix_gauge(vix_val, vix_rank), use_container_width=True)
     st.markdown(f"""
         </div>
-        <div style="text-align:center; font-weight:bold; color:{vix_col}; margin-bottom:5px;">{vix_tag}</div>
+        <div style="text-align:center; font-weight:bold; color:{vix_col}; font-size:18px;">{vix_tag}</div>
         <div class="interpretation">
-            <strong>What it means:</strong> {vix_msg}<br>
-            <span style="color:#666; font-size:11px;">IV Rank: {vix_rank:.0f}% (Higher = Expensive Options)</span>
+            <strong>Action:</strong> {vix_msg}<br>
+            <span style="color:#666; font-size:11px;">Implied Vol Rank: {vix_rank:.0f}%</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-# 2. TREND CARD
+# 2. TREND & CHART
 with c2:
     trend_state = metrics['spy']['state']
     spy_price = metrics['spy']['price']
-    sma200 = metrics['spy']['sma200']
     
-    if "Bullish" in trend_state:
-        t_col = SUCCESS_COLOR
-        t_msg = "Market is in an uptrend."
-    else:
-        t_col = WARNING_COLOR
-        t_msg = "Market is trending down."
-
+    t_col = SUCCESS_COLOR if "Bullish" in trend_state else WARNING_COLOR
+    
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-title">Market Trend (SPY)</div>
-        <div class="metric-value" style="color:{t_col}">{trend_state}</div>
-        <div style="font-size:14px; color:#ccc;">${spy_price:.2f}</div>
-        <div class="interpretation">
-            <strong>Structure:</strong> {t_msg}<br>
-            <span style="color:#666; font-size:11px;">Price vs 200 SMA: {"Above" if spy_price > sma200 else "Below"}</span>
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div class="metric-title">Market Trend (SPY)</div>
+            <div style="color:{t_col}; font-weight:bold;">{trend_state}</div>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    # Live Chart
+    st.pyplot(plot_spy_chart_mpl(raw_data), use_container_width=True)
+    
+    st.markdown(f"""
+        <div class="interpretation" style="margin-top:0;">
+            <span style="color:#666; font-size:11px;">Price vs 200 SMA determines Regime.</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
-    
-    # REPLACED ALTAIR WITH MATPLOTLIB
-    st.pyplot(plot_spy_chart_mpl(raw_data), use_container_width=True)
 
 # 3. MACRO BACKDROP
 with c3:
     m = metrics['macro']
-    tnx_color = WARNING_COLOR if m['tnx'] > 4.5 else NEUTRAL_COLOR
+    tnx_color = WARNING_COLOR if m['tnx'] > 4.5 else "#eee"
     
-    # CPI Color logic
-    cpi_status_color = NEUTRAL_COLOR
-    if "Cooling" in m['cpi']['status']: cpi_status_color = SUCCESS_COLOR
-    elif "Heating" in m['cpi']['status']: cpi_status_color = WARNING_COLOR
+    # Formatting Status Colors
+    cpi_status = m['cpi']['status']
+    cpi_color = SUCCESS_COLOR if "Cool" in cpi_status or "Line" in cpi_status else WARNING_COLOR
     
-    fed_status_color = NEUTRAL_COLOR
-    if "CUT" in m['fed']['expectation']: fed_status_color = SUCCESS_COLOR
-    elif "HIKE" in m['fed']['expectation']: fed_status_color = WARNING_COLOR
+    fed_status = m['fed']['expectation']
+    fed_color = SUCCESS_COLOR if "CUT" in fed_status else "#eee"
     
-    # NOTE: NO INDENTATION in HTML string to prevent markdown errors
-    macro_html = f"""<div class="metric-card">
-<div class="metric-title">Macro Backdrop</div>
-<div style="display:grid; grid-template-columns: 1fr 1fr; gap:15px; margin-top:15px;">
-<div>
-<div class="mini-stat-label">10-Year Yield</div>
-<div class="metric-value" style="font-size:22px; color:{tnx_color}">{m['tnx']:.2f}%</div>
-<div style="font-size:11px; color:#888;">{m['tnx_chg']:+.2f}% change</div>
-</div>
-<div>
-<div class="mini-stat-label">Inflation (CPI)</div>
-<div class="metric-value" style="font-size:22px; color:#eee">{m['cpi']['val']}</div>
-<div style="font-size:11px; color:{cpi_status_color}; font-weight:bold;">{m['cpi']['status']}</div>
-</div>
-</div>
-<hr style="border-top:1px solid #444; margin:10px 0;">
-<div>
-<div class="mini-stat-label">Next Fed Decision: <span style="color:#eee; font-weight:bold;">{m['fed']['date']}</span></div>
-<div style="font-size:14px; margin-top:2px;">Outlook: <span style="color:{fed_status_color}; font-weight:bold;">{m['fed']['expectation']}</span></div>
-</div>
-<div class="interpretation" style="border:0; padding-top:5px;">
-<span style="color:#666; font-size:11px;">CPI Date: {m['cpi']['date']}</span>
-</div>
-</div>"""
-    st.markdown(macro_html, unsafe_allow_html=True)
+    # Clean HTML (No Indentation to prevent raw code render)
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-title">Macro Backdrop</div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:15px; margin-top:20px;">
+            <div>
+                <div class="sub-metric">10-Year Yield</div>
+                <div style="font-size:22px; font-weight:bold; color:{tnx_color}">{m['tnx']:.2f}%</div>
+                <div style="font-size:11px; color:#888;">{m['tnx_chg']:+.2f}% change</div>
+            </div>
+            <div>
+                <div class="sub-metric">Inflation (CPI)</div>
+                <div style="font-size:22px; font-weight:bold; color:#eee">{m['cpi']['val']}</div>
+                <div style="font-size:11px; font-weight:bold; color:{cpi_color}">{cpi_status}</div>
+            </div>
+        </div>
+        <hr style="border-top:1px solid #444; margin:15px 0;">
+        <div>
+            <div class="sub-metric">Next Fed Decision: <span style="color:#eee; font-weight:bold;">{m['fed']['date']}</span></div>
+            <div style="font-size:16px; margin-top:4px; font-weight:bold; color:{fed_color}">{fed_status}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ---------------- ROW 2: PLAYBOOK & NEWS ----------------
 r2_col1, r2_col2 = st.columns([2, 1])
@@ -447,9 +437,9 @@ with r2_col1:
         strategy_color = NEUTRAL_COLOR
 
     st.markdown(f"""
-    <div style="background-color: {strategy_color}20; border-left: 5px solid {strategy_color}; padding: 15px; border-radius: 4px; height: 100%;">
-        <h3 style="margin:0; color: {strategy_color};">{strategy_title}</h3>
-        <p style="margin:10px 0 0 0; color: #ddd;">{strategy_body}</p>
+    <div style="background-color: {strategy_color}15; border-left: 4px solid {strategy_color}; padding: 15px; border-radius: 4px;">
+        <h3 style="margin:0; color: {strategy_color}; font-size:18px;">{strategy_title}</h3>
+        <p style="margin:8px 0 0 0; color: #ccc; font-size:14px;">{strategy_body}</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -458,8 +448,8 @@ with r2_col2:
     if news:
         for n in news[:3]: 
             st.markdown(f"""
-            <div style="font-size:12px; margin-bottom:8px; border-left: 2px solid #444; padding-left:8px;">
-                <a href="{n['url']}" target="_blank" style="color:#58a6ff; text-decoration:none;">{n['title']}</a>
+            <div class="news-item">
+                <a href="{n['url']}" target="_blank" class="news-link">{n['title']}</a>
             </div>
             """, unsafe_allow_html=True)
     else:
@@ -468,12 +458,12 @@ with r2_col2:
 st.divider()
 
 # ---------------- ROW 3: DETAILED TABLES ----------------
-with st.expander("📊 View Raw Sector Performance Data"):
-    st.caption("20-Day Performance (Identifying Rotation)")
+with st.expander("📊 View Raw Sector Performance Data (Rotation Analysis)"):
     
     try:
-        sector_list = ['XLK', 'XLF', 'XLE', 'XLV', 'XLY', 'XLP', 'XLI', 'XLU', 'XLC', 'XLB', 'XLRE']
-        commodity_list = ['GLD', 'SLV', 'USO', 'TLT', '^TNX']
+        # Define fields we want to track
+        sector_list = ['SMH', 'XLK', 'XLF', 'XLE', 'XLV', 'XLY', 'XLP', 'XLI', 'XLU', 'IBB', 'XHB', 'KRE']
+        commodity_list = ['GLD', 'SLV', 'USO', 'TLT']
         
         full_list = sector_list + commodity_list
         available = [t for t in full_list if t in raw_data.columns]
@@ -483,7 +473,11 @@ with st.expander("📊 View Raw Sector Performance Data"):
         
         perf_df = pd.DataFrame(perf).reset_index()
         perf_df.columns = ['Ticker', '20d Return %']
+        
+        # Add friendly names
         perf_df['Name'] = perf_df['Ticker'].map(TICKER_MAP).fillna(perf_df['Ticker'])
+        
+        # Reorder columns
         perf_df = perf_df[['Name', 'Ticker', '20d Return %']]
         perf_df = perf_df.sort_values('20d Return %', ascending=False)
         
