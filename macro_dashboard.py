@@ -7,6 +7,9 @@ import matplotlib.patches as patches
 import altair as alt
 from scipy import stats
 from duckduckgo_search import DDGS
+import finnhub
+import os
+from datetime import datetime, timedelta
 
 # ---------------- CONFIGURATION ----------------
 st.set_page_config(layout="wide", page_title="Macro Intelligence", page_icon="⚡")
@@ -18,8 +21,19 @@ NEUTRAL_COLOR = "#FFA726"  # Orange
 BG_COLOR = "#0E1117"
 CARD_COLOR = "#262730"
 TEXT_COLOR = "#FAFAFA"
+FINNHUB_KEY = "d5mgc39r01ql1f2p69c0d5mgc39r01ql1f2p69cg" # Your Key
 
-# Custom CSS for "Cards"
+# Name Mapping
+TICKER_MAP = {
+    'XLK': 'Technology', 'XLF': 'Financials', 'XLE': 'Energy',
+    'XLV': 'Healthcare', 'XLY': 'Cons. Discretionary', 'XLP': 'Cons. Staples',
+    'XLI': 'Industrials', 'XLU': 'Utilities', 'XLC': 'Communication',
+    'XLB': 'Materials', 'XLRE': 'Real Estate',
+    'GLD': 'Gold', 'SLV': 'Silver', 'USO': 'Oil', 'TLT': '20Y Bonds',
+    '^TNX': '10-Year Yield'
+}
+
+# Custom CSS
 st.markdown(f"""
 <style>
     .stApp {{ background-color: {BG_COLOR}; }}
@@ -29,11 +43,17 @@ st.markdown(f"""
         padding: 20px;
         border-radius: 8px;
         margin-bottom: 15px;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
     }}
     .metric-title {{ color: #888; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }}
     .metric-value {{ color: #FFF; font-size: 26px; font-weight: 800; margin: 5px 0; }}
     .metric-delta {{ font-size: 14px; font-weight: bold; }}
     .interpretation {{ font-size: 13px; color: #BBB; margin-top: 10px; padding-top: 10px; border-top: 1px solid #444; line-height: 1.4; }}
+    .mini-stat-label {{ font-size: 12px; color: #888; }}
+    .mini-stat-val {{ font-size: 16px; font-weight: bold; color: #eee; }}
     .news-item {{ padding: 10px; border-bottom: 1px solid #333; }}
     .news-title {{ font-weight: bold; color: #58a6ff; text-decoration: none; }}
 </style>
@@ -48,64 +68,109 @@ def fetch_market_data():
         "Main": ["SPY", "QQQ", "IWM"],
         "Vol": ["^VIX", "^VVIX"],
         "Rates": ["^TNX", "TLT"], 
-        "Sectors": ["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU"]
+        "Sectors": ["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU", "XLC", "XLB", "XLRE"],
+        "Commodities": ["GLD", "SLV", "USO"]
     }
     all_ticks = [t for cat in tickers.values() for t in cat]
     
-    # Download 1 year of data for percentile calculations
-    data = yf.download(all_ticks, period="1y", interval="1d", progress=False)['Close']
-    return data
+    try:
+        data = yf.download(all_ticks, period="1y", interval="1d", progress=False)['Close']
+        return data
+    except Exception as e:
+        st.error(f"Data Fetch Error: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def fetch_cpi_data():
+    """Fetches latest CPI (Inflation) from Finnhub"""
+    try:
+        finnhub_client = finnhub.Client(api_key=FINNHUB_KEY)
+        # Look back 2 months to ensure we catch the latest release
+        start_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        
+        # Get economic calendar
+        calendar = finnhub_client.economic_calendar(_from=start_date, to=end_date)
+        
+        # Filter for US CPI YoY
+        cpi_events = [e for e in calendar['economicCalendar'] if 'Consumer Price Index (YoY)' in e['event'] and e['country'] == 'US']
+        
+        if cpi_events:
+            # Sort by date descending
+            latest_cpi = sorted(cpi_events, key=lambda x: x['date'], reverse=True)[0]
+            return {
+                "actual": latest_cpi['actual'],
+                "prev": latest_cpi['prev'],
+                "date": latest_cpi['date']
+            }
+        return None
+    except:
+        return None
 
 @st.cache_data(ttl=1800)
 def fetch_news_headlines():
     """Uses DuckDuckGo to get top market news summaries"""
     try:
-        results = DDGS().news(keywords="stock market news today", region="wt-wt", safesearch="off", max_results=5)
+        results = DDGS().news(keywords="financial markets news", region="wt-wt", safesearch="off", max_results=5)
         return results
     except:
         return []
 
-def calculate_metrics(data):
-    """Computes derived metrics like IV Rank, SMA alignment, and Sector Rotation"""
+def calculate_metrics(data, cpi_data):
+    """Computes derived metrics"""
     metrics = {}
     
-    # 1. Volatility Context (IV Percentile)
-    current_vix = data['^VIX'].iloc[-1]
-    vix_history = data['^VIX'].dropna()
-    # Scipy: Calculate percentile rank of current VIX relative to last year
-    iv_rank = stats.percentileofscore(vix_history, current_vix)
+    # 1. Volatility (VIX)
+    try:
+        current_vix = data['^VIX'].iloc[-1]
+        vix_history = data['^VIX'].dropna()
+        iv_rank = stats.percentileofscore(vix_history, current_vix)
+        metrics['vix'] = {'value': current_vix, 'rank': iv_rank}
+    except:
+        metrics['vix'] = {'value': 15.0, 'rank': 50}
     
-    metrics['vix'] = {
-        'value': current_vix,
-        'rank': iv_rank,
-        'change': current_vix - data['^VIX'].iloc[-2]
-    }
-    
-    # 2. Trend Alignment (SPY)
-    spy = data['SPY']
-    sma200 = spy.rolling(200).mean().iloc[-1]
-    sma50 = spy.rolling(50).mean().iloc[-1]
-    price = spy.iloc[-1]
-    
-    trend_state = "Neutral"
-    if price > sma200:
-        trend_state = "Bullish" if price > sma50 else "Bullish (Pullback)"
-    else:
-        trend_state = "Bearish" if price < sma50 else "Bearish (Correction)"
+    # 2. Trend (SPY)
+    try:
+        spy = data['SPY']
+        sma200 = spy.rolling(200).mean().iloc[-1]
+        sma50 = spy.rolling(50).mean().iloc[-1]
+        price = spy.iloc[-1]
         
-    metrics['spy'] = {
-        'price': price,
-        'sma200': sma200,
-        'sma50': sma50,
-        'state': trend_state
-    }
+        trend_state = "Neutral"
+        if price > sma200:
+            trend_state = "Bullish" if price > sma50 else "Bullish (Pullback)"
+        else:
+            trend_state = "Bearish" if price < sma50 else "Bearish (Correction)"
+            
+        metrics['spy'] = {'price': price, 'sma200': sma200, 'sma50': sma50, 'state': trend_state}
+    except:
+        metrics['spy'] = {'price': 0, 'sma200': 0, 'sma50': 0, 'state': "Error"}
     
     # 3. Sector Risk (Risk On/Off)
-    # Compare 20-day returns of Offense (Tech XLK) vs Defense (Utilities XLU)
-    offense = data['XLK'].pct_change(20).iloc[-1]
-    defense = data['XLU'].pct_change(20).iloc[-1]
-    
-    metrics['risk_mode'] = "Risk On" if offense > defense else "Risk Off"
+    try:
+        offense = data['XLK'].pct_change(20).iloc[-1]
+        defense = data['XLU'].pct_change(20).iloc[-1]
+        metrics['risk_mode'] = "Risk On" if offense > defense else "Risk Off"
+    except:
+        metrics['risk_mode'] = "Neutral"
+
+    # 4. Macro (Rates & CPI)
+    try:
+        tnx = data['^TNX'].iloc[-1] # 10 Year Yield
+        tnx_prev = data['^TNX'].iloc[-2]
+        
+        cpi_val = cpi_data['actual'] if cpi_data else 3.0 # Fallback
+        cpi_prev = cpi_data['prev'] if cpi_data else 3.0
+        
+        metrics['macro'] = {
+            'tnx': tnx,
+            'tnx_chg': tnx - tnx_prev,
+            'cpi': cpi_val,
+            'cpi_prev': cpi_prev,
+            'cpi_date': cpi_data['date'] if cpi_data else "N/A"
+        }
+    except:
+        metrics['macro'] = {'tnx': 4.0, 'tnx_chg': 0, 'cpi': 3.0, 'cpi_prev': 3.0, 'cpi_date': "N/A"}
     
     return metrics
 
@@ -113,6 +178,8 @@ def calculate_metrics(data):
 
 def plot_trend_altair(data):
     """Interactive Altair Chart for SPY Trends"""
+    if 'SPY' not in data: return None
+    
     df = data['SPY'].reset_index()
     df.columns = ['Date', 'Price']
     df['SMA200'] = df['Price'].rolling(200).mean()
@@ -132,7 +199,7 @@ def plot_trend_altair(data):
     sma50 = base.mark_line(color=NEUTRAL_COLOR, strokeDash=[2, 2]).encode(y='SMA50', tooltip=['SMA50'])
     
     chart = (line + sma200 + sma50).properties(
-        height=250, 
+        height=200, 
         title="SPY Market Structure (Price vs 50/200 SMA)"
     ).configure_axis(
         grid=False, labelColor='#888', titleColor='#888'
@@ -169,19 +236,35 @@ def draw_vix_gauge(val, rank):
 
 # ---------------- MAIN APP LAYOUT ----------------
 
-st.title("Macro Intelligence Hub")
-st.markdown("Contextual analysis for volatility and credit spread positioning.")
-st.markdown(f"<hr style='border-top: 1px solid #333;'>", unsafe_allow_html=True)
+# HEADER SECTION
+header_col1, header_col2 = st.columns([1, 4])
+with header_col1:
+    if os.path.exists("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG"):
+        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=120)
+    else:
+        st.markdown("<h2 style='color:white; margin:0;'>DR CAPITAL</h2>", unsafe_allow_html=True)
+
+with header_col2:
+    st.markdown("""
+    <div style='text-align: left; padding-top: 10px;'>
+        <h1 style='margin:0; padding:0; font-size: 28px;'>Macro Intelligence Hub</h1>
+        <p style='margin:0; font-size: 14px; color: gray;'>Strategic Volatility & Trend Analysis</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.markdown(f"<hr style='border-top: 1px solid #333; margin-top:5px;'>", unsafe_allow_html=True)
 
 # LOAD DATA
 with st.spinner("Analyzing Global Markets..."):
-    try:
-        raw_data = fetch_market_data()
-        metrics = calculate_metrics(raw_data)
-        news = fetch_news_headlines()
-    except Exception as e:
-        st.error(f"Data Feed Error: {e}")
+    raw_data = fetch_market_data()
+    cpi_data = fetch_cpi_data()
+    
+    if raw_data.empty:
+        st.error("Market Data Feed Offline. Please refresh.")
         st.stop()
+        
+    metrics = calculate_metrics(raw_data, cpi_data)
+    news = fetch_news_headlines()
 
 # ---------------- ROW 1: THE BIG THREE ----------------
 c1, c2, c3 = st.columns(3)
@@ -191,7 +274,6 @@ with c1:
     vix_val = metrics['vix']['value']
     vix_rank = metrics['vix']['rank']
     
-    # Interpretation Logic
     if vix_val < 13:
         vix_msg = "Premiums are cheap. It is hard to find edge. Risk/Reward is poor."
         vix_tag = "COMPLACENT"
@@ -246,36 +328,73 @@ with c2:
     </div>
     """, unsafe_allow_html=True)
     
-    # Render Altair Chart inside the column
-    st.altair_chart(plot_trend_altair(raw_data), use_container_width=True)
+    chart = plot_trend_altair(raw_data)
+    if chart: st.altair_chart(chart, use_container_width=True)
 
-# 3. RISK/SECTOR CARD
+# 3. MACRO BACKDROP (NEW CARD)
 with c3:
-    risk_mode = metrics['risk_mode']
+    m = metrics['macro']
+    tnx_color = WARNING_COLOR if m['tnx'] > 4.5 else NEUTRAL_COLOR
+    cpi_color = WARNING_COLOR if m['cpi'] > 3.5 else SUCCESS_COLOR
     
-    if risk_mode == "Risk On":
-        r_col = SUCCESS_COLOR
-        r_msg = "Money is flowing into Tech & Discretionary. Investors are confident."
-    else:
-        r_col = NEUTRAL_COLOR
-        r_msg = "Money is rotating into Utilities & Staples. Investors are defensive."
-        
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-title">Internal Rotation</div>
-        <div class="metric-value" style="color:{r_col}">{risk_mode}</div>
+        <div class="metric-title">Macro Backdrop</div>
+        
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-top:15px;">
+            <div>
+                <div class="mini-stat-label">10-Year Yield</div>
+                <div class="metric-value" style="font-size:22px; color:{tnx_color}">{m['tnx']:.2f}%</div>
+                <div style="font-size:11px; color:#888;">{m['tnx_chg']:+.2f}% change</div>
+            </div>
+            <div>
+                <div class="mini-stat-label">Inflation (CPI)</div>
+                <div class="metric-value" style="font-size:22px; color:{cpi_color}">{m['cpi']:.1f}%</div>
+                <div style="font-size:11px; color:#888;">Prev: {m['cpi_prev']:.1f}%</div>
+            </div>
+        </div>
+        
         <div class="interpretation">
-            <strong>What it means:</strong> {r_msg}<br>
-            <span style="color:#666; font-size:11px;">Comparing XLK (Offense) vs XLU (Defense)</span>
+            <strong>Fed Watch:</strong> Higher yields hurt valuations. Higher CPI keeps the Fed hawkish.<br>
+            <span style="color:#666; font-size:11px;">Latest CPI Date: {m['cpi_date']}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+# ---------------- ROW 2: PLAYBOOK & NEWS ----------------
+r2_col1, r2_col2 = st.columns([2, 1])
+
+with r2_col1:
+    st.subheader("🛡️ The Playbook")
     
-    # News Feed using DuckDuckGo
-    st.markdown("<div style='margin-top:10px; font-size:14px; font-weight:bold; color:#ddd;'>🌍 Why is the market moving?</div>", unsafe_allow_html=True)
-    
+    if vix_val < 13:
+        strategy_title = "The Sniper Phase (Patience)"
+        strategy_body = "Volatility is too low. Risk/Reward is poor. **Action:** Reduce trade frequency. Buy Debit Spreads instead."
+        strategy_color = WARNING_COLOR
+    elif metrics['spy']['price'] < metrics['spy']['sma200']:
+        strategy_title = "The Bunker Phase (Defense)"
+        strategy_body = "Trend is broken. Selling puts is risky. **Action:** Sit in cash. Wait for Price > 200 SMA."
+        strategy_color = WARNING_COLOR
+    elif 13 <= vix_val <= 25:
+        strategy_title = "The Harvest Phase (Aggressive)"
+        strategy_body = "Conditions are perfect. Trend is up, premiums are fair. **Action:** Sell 30-45 DTE Put Spreads."
+        strategy_color = SUCCESS_COLOR
+    else:
+        strategy_title = "The Storm Phase (Caution)"
+        strategy_body = "Volatility is extreme. **Action:** Cut position size by 50%. Widen strikes."
+        strategy_color = NEUTRAL_COLOR
+
+    st.markdown(f"""
+    <div style="background-color: {strategy_color}20; border-left: 5px solid {strategy_color}; padding: 15px; border-radius: 4px; height: 100%;">
+        <h3 style="margin:0; color: {strategy_color};">{strategy_title}</h3>
+        <p style="margin:10px 0 0 0; color: #ddd;">{strategy_body}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with r2_col2:
+    st.subheader("🌍 Headlines")
     if news:
-        for n in news[:3]: # Show top 3 headlines
+        for n in news[:3]: 
             st.markdown(f"""
             <div style="font-size:12px; margin-bottom:8px; border-left: 2px solid #444; padding-left:8px;">
                 <a href="{n['url']}" target="_blank" style="color:#58a6ff; text-decoration:none;">{n['title']}</a>
@@ -284,35 +403,6 @@ with c3:
     else:
         st.caption("No immediate headlines found.")
 
-# ---------------- ROW 2: TRADER'S PLAYBOOK ----------------
-
-st.subheader("🛡️ The Playbook: How to Trade This Market")
-
-# Determine Strategy based on Matrix
-if vix_val < 13:
-    strategy_title = "The Sniper Phase (Patience)"
-    strategy_body = "Volatility is too low. Option sellers are getting paid pennies to take steamroller risk. **Action:** Reduce trade frequency. Buy Debit Spreads instead, or wait for a pullback."
-    strategy_color = WARNING_COLOR
-elif metrics['spy']['price'] < metrics['spy']['sma200']:
-    strategy_title = "The Bunker Phase (Defense)"
-    strategy_body = "The long-term trend is broken. Selling puts here is extremely risky. **Action:** Sit in cash. Do not average down. Wait for Price > 200 SMA."
-    strategy_color = WARNING_COLOR
-elif 13 <= vix_val <= 25:
-    strategy_title = "The Harvest Phase (Aggressive)"
-    strategy_body = "Conditions are perfect. Trend is up, premiums are fair. **Action:** Sell 30-45 DTE Put Spreads on high-quality tickers (check Spread Finder)."
-    strategy_color = SUCCESS_COLOR
-else:
-    strategy_title = "The Storm Phase (Caution)"
-    strategy_body = "Volatility is extreme. Prices will swing wildly. **Action:** Cut position size by 50%. Widen your strikes to stay safe."
-    strategy_color = NEUTRAL_COLOR
-
-st.markdown(f"""
-<div style="background-color: {strategy_color}20; border-left: 5px solid {strategy_color}; padding: 15px; border-radius: 4px;">
-    <h3 style="margin:0; color: {strategy_color};">{strategy_title}</h3>
-    <p style="margin:10px 0 0 0; color: #ddd;">{strategy_body}</p>
-</div>
-""", unsafe_allow_html=True)
-
 st.divider()
 
 # ---------------- ROW 3: DETAILED TABLES ----------------
@@ -320,14 +410,26 @@ with st.expander("📊 View Raw Sector Performance Data"):
     st.caption("20-Day Performance (Identifying Rotation)")
     
     try:
-        available_sectors = [s for s in ['XLK', 'XLF', 'XLE', 'XLV', 'XLY', 'XLP', 'XLI', 'XLU'] if s in raw_data.columns]
-        sectors = raw_data[available_sectors]
-        perf = sectors.pct_change(20).iloc[-1] * 100
+        # Define fields we want to track
+        sector_list = ['XLK', 'XLF', 'XLE', 'XLV', 'XLY', 'XLP', 'XLI', 'XLU', 'XLC', 'XLB', 'XLRE']
+        commodity_list = ['GLD', 'SLV', 'USO', 'TLT', '^TNX']
+        
+        full_list = sector_list + commodity_list
+        available = [t for t in full_list if t in raw_data.columns]
+        
+        subset = raw_data[available]
+        perf = subset.pct_change(20).iloc[-1] * 100
+        
         perf_df = pd.DataFrame(perf).reset_index()
-        perf_df.columns = ['Sector', '20d Return %']
+        perf_df.columns = ['Ticker', '20d Return %']
+        
+        # Add friendly names
+        perf_df['Name'] = perf_df['Ticker'].map(TICKER_MAP).fillna(perf_df['Ticker'])
+        
+        # Reorder columns
+        perf_df = perf_df[['Name', 'Ticker', '20d Return %']]
         perf_df = perf_df.sort_values('20d Return %', ascending=False)
         
-        # PATCHED: Explicit formatting with subset
         st.dataframe(
             perf_df.style.background_gradient(cmap='RdYlGn', subset=['20d Return %'])
             .format("{:.2f}%", subset=['20d Return %']), 
@@ -335,4 +437,4 @@ with st.expander("📊 View Raw Sector Performance Data"):
             hide_index=True
         )
     except Exception as e:
-        st.error(f"Could not calculate sector table: {e}")
+        st.error(f"Could not calculate performance table: {e}")
