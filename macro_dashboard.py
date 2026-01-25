@@ -47,7 +47,7 @@ def fetch_market_data():
     tickers = {
         "Main": ["SPY", "QQQ", "IWM"],
         "Vol": ["^VIX", "^VVIX"],
-        "Rates": ["^TNX", "TLT"], # 10yr Yield, Bonds
+        "Rates": ["^TNX", "TLT"], 
         "Sectors": ["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU"]
     }
     all_ticks = [t for cat in tickers.values() for t in cat]
@@ -318,14 +318,21 @@ st.divider()
 # ---------------- ROW 3: DETAILED TABLES ----------------
 with st.expander("📊 View Raw Sector Performance Data"):
     st.caption("20-Day Performance (Identifying Rotation)")
-    sectors = raw_data[['XLK', 'XLF', 'XLE', 'XLV', 'XLY', 'XLP', 'XLI', 'XLU']]
-    perf = sectors.pct_change(20).iloc[-1] * 100
-    perf_df = pd.DataFrame(perf).reset_index()
-    perf_df.columns = ['Sector', '20d Return %']
-    perf_df = perf_df.sort_values('20d Return %', ascending=False)
     
-    st.dataframe(
-        perf_df.style.background_gradient(cmap='RdYlGn', subset=['20d Return %']).format("{:.2f}%"),
-        use_container_width=True,
-        hide_index=True
-    )
+    try:
+        available_sectors = [s for s in ['XLK', 'XLF', 'XLE', 'XLV', 'XLY', 'XLP', 'XLI', 'XLU'] if s in raw_data.columns]
+        sectors = raw_data[available_sectors]
+        perf = sectors.pct_change(20).iloc[-1] * 100
+        perf_df = pd.DataFrame(perf).reset_index()
+        perf_df.columns = ['Sector', '20d Return %']
+        perf_df = perf_df.sort_values('20d Return %', ascending=False)
+        
+        # PATCHED: Explicit formatting with subset
+        st.dataframe(
+            perf_df.style.background_gradient(cmap='RdYlGn', subset=['20d Return %'])
+            .format("{:.2f}%", subset=['20d Return %']), 
+            use_container_width=True,
+            hide_index=True
+        )
+    except Exception as e:
+        st.error(f"Could not calculate sector table: {e}")
