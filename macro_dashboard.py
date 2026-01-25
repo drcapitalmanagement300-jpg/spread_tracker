@@ -21,7 +21,7 @@ NEUTRAL_COLOR = "#FFA726"  # Orange
 BG_COLOR = "#0E1117"
 CARD_COLOR = "#262730"
 TEXT_COLOR = "#FAFAFA"
-FINNHUB_KEY = "d5mgc39r01ql1f2p69c0d5mgc39r01ql1f2p69cg" # Your Key
+FINNHUB_KEY = "d5mgc39r01ql1f2p69c0d5mgc39r01ql1f2p69cg" 
 
 # Name Mapping
 TICKER_MAP = {
@@ -85,18 +85,13 @@ def fetch_cpi_data():
     """Fetches latest CPI (Inflation) from Finnhub"""
     try:
         finnhub_client = finnhub.Client(api_key=FINNHUB_KEY)
-        # Look back 2 months to ensure we catch the latest release
         start_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
         end_date = datetime.now().strftime('%Y-%m-%d')
         
-        # Get economic calendar
         calendar = finnhub_client.economic_calendar(_from=start_date, to=end_date)
-        
-        # Filter for US CPI YoY
         cpi_events = [e for e in calendar['economicCalendar'] if 'Consumer Price Index (YoY)' in e['event'] and e['country'] == 'US']
         
         if cpi_events:
-            # Sort by date descending
             latest_cpi = sorted(cpi_events, key=lambda x: x['date'], reverse=True)[0]
             return {
                 "actual": latest_cpi['actual'],
@@ -120,7 +115,7 @@ def calculate_metrics(data, cpi_data):
     """Computes derived metrics"""
     metrics = {}
     
-    # 1. Volatility (VIX)
+    # 1. Volatility
     try:
         current_vix = data['^VIX'].iloc[-1]
         vix_history = data['^VIX'].dropna()
@@ -129,7 +124,7 @@ def calculate_metrics(data, cpi_data):
     except:
         metrics['vix'] = {'value': 15.0, 'rank': 50}
     
-    # 2. Trend (SPY)
+    # 2. Trend
     try:
         spy = data['SPY']
         sma200 = spy.rolling(200).mean().iloc[-1]
@@ -146,7 +141,7 @@ def calculate_metrics(data, cpi_data):
     except:
         metrics['spy'] = {'price': 0, 'sma200': 0, 'sma50': 0, 'state': "Error"}
     
-    # 3. Sector Risk (Risk On/Off)
+    # 3. Risk
     try:
         offense = data['XLK'].pct_change(20).iloc[-1]
         defense = data['XLU'].pct_change(20).iloc[-1]
@@ -154,12 +149,12 @@ def calculate_metrics(data, cpi_data):
     except:
         metrics['risk_mode'] = "Neutral"
 
-    # 4. Macro (Rates & CPI)
+    # 4. Macro
     try:
         tnx = data['^TNX'].iloc[-1] # 10 Year Yield
         tnx_prev = data['^TNX'].iloc[-2]
         
-        cpi_val = cpi_data['actual'] if cpi_data else 3.0 # Fallback
+        cpi_val = cpi_data['actual'] if cpi_data else 3.0
         cpi_prev = cpi_data['prev'] if cpi_data else 3.0
         
         metrics['macro'] = {
@@ -177,24 +172,18 @@ def calculate_metrics(data, cpi_data):
 # ---------------- VISUALIZATION ----------------
 
 def plot_trend_altair(data):
-    """Interactive Altair Chart for SPY Trends"""
     if 'SPY' not in data: return None
-    
     df = data['SPY'].reset_index()
     df.columns = ['Date', 'Price']
     df['SMA200'] = df['Price'].rolling(200).mean()
     df['SMA50'] = df['Price'].rolling(50).mean()
-    
-    # Filter to last 6 months for clarity
     df = df.tail(126)
     
     base = alt.Chart(df).encode(x='Date:T')
-    
     line = base.mark_line(color='#ffffff', strokeWidth=2).encode(
         y=alt.Y('Price', scale=alt.Scale(zero=False), title=None),
         tooltip=['Date', 'Price']
     )
-    
     sma200 = base.mark_line(color=SUCCESS_COLOR, strokeDash=[5, 5]).encode(y='SMA200', tooltip=['SMA200'])
     sma50 = base.mark_line(color=NEUTRAL_COLOR, strokeDash=[2, 2]).encode(y='SMA50', tooltip=['SMA50'])
     
@@ -208,23 +197,17 @@ def plot_trend_altair(data):
     return chart
 
 def draw_vix_gauge(val, rank):
-    """Matplotlib Gauge showing VIX Value AND IV Rank"""
     fig, ax = plt.subplots(figsize=(4, 2.2))
     fig.patch.set_facecolor(CARD_COLOR)
     ax.set_facecolor(CARD_COLOR)
     
-    # Logic: 0-40 scale
     color = SUCCESS_COLOR if 13 <= val <= 20 else (WARNING_COLOR if val < 13 or val > 30 else NEUTRAL_COLOR)
     
-    # Background Arc
     ax.add_patch(patches.Wedge((0.5, 0), 0.4, 0, 180, width=0.10, color='#333'))
-    
-    # Value Arc
     max_val = 40
     angle = min(val, max_val) / max_val * 180
     ax.add_patch(patches.Wedge((0.5, 0), 0.4, 180 - angle, 180, width=0.10, color=color))
     
-    # Text
     ax.text(0.5, 0.05, f"{val:.2f}", ha='center', va='bottom', fontsize=28, fontweight='bold', color='white')
     ax.text(0.5, -0.1, f"IV Rank: {rank:.0f}%", ha='center', va='top', fontsize=10, color='#aaa')
     
@@ -236,23 +219,27 @@ def draw_vix_gauge(val, rank):
 
 # ---------------- MAIN APP LAYOUT ----------------
 
-# HEADER SECTION
-header_col1, header_col2 = st.columns([1, 4])
+# 1. CONSISTENT HEADER (Matches Dashboard)
+header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
+
 with header_col1:
     if os.path.exists("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG"):
-        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=120)
+        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
     else:
         st.markdown("<h2 style='color:white; margin:0;'>DR CAPITAL</h2>", unsafe_allow_html=True)
 
 with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
-        <h1 style='margin:0; padding:0; font-size: 28px;'>Macro Intelligence Hub</h1>
-        <p style='margin:0; font-size: 14px; color: gray;'>Strategic Volatility & Trend Analysis</p>
+        <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Macro Intelligence Hub</h1>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Volatility & Trend Analysis</p>
     </div>
     """, unsafe_allow_html=True)
 
-st.markdown(f"<hr style='border-top: 1px solid #333; margin-top:5px;'>", unsafe_allow_html=True)
+with header_col3:
+    st.write("") # Spacer
+
+st.markdown(f"<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: 10px; margin-bottom: 10px;'>", unsafe_allow_html=True)
 
 # LOAD DATA
 with st.spinner("Analyzing Global Markets..."):
@@ -275,15 +262,15 @@ with c1:
     vix_rank = metrics['vix']['rank']
     
     if vix_val < 13:
-        vix_msg = "Premiums are cheap. It is hard to find edge. Risk/Reward is poor."
+        vix_msg = "Premiums are cheap. Edge is low."
         vix_tag = "COMPLACENT"
         vix_col = WARNING_COLOR
     elif 13 <= vix_val <= 22:
-        vix_msg = "Optimal zone. Premiums are fair, and moves are predictable."
+        vix_msg = "Optimal zone. Premiums are fair."
         vix_tag = "OPTIMAL"
         vix_col = SUCCESS_COLOR
     elif vix_val > 22:
-        vix_msg = "Fear is high. Premiums are juicy but moves are violent. Size down."
+        vix_msg = "Fear is high. Size down."
         vix_tag = "ELEVATED"
         vix_col = NEUTRAL_COLOR
         
@@ -311,10 +298,10 @@ with c2:
     
     if "Bullish" in trend_state:
         t_col = SUCCESS_COLOR
-        t_msg = "Market is in an uptrend. Put Credit Spreads have the wind at their back."
+        t_msg = "Market is in an uptrend. Put Credit Spreads favored."
     else:
         t_col = WARNING_COLOR
-        t_msg = "Market is trending down. Selling Puts is dangerous (catching knives)."
+        t_msg = "Market is trending down. Defensive cash favored."
 
     st.markdown(f"""
     <div class="metric-card">
@@ -331,13 +318,14 @@ with c2:
     chart = plot_trend_altair(raw_data)
     if chart: st.altair_chart(chart, use_container_width=True)
 
-# 3. MACRO BACKDROP (NEW CARD)
+# 3. MACRO BACKDROP (FIXED HTML)
 with c3:
     m = metrics['macro']
     tnx_color = WARNING_COLOR if m['tnx'] > 4.5 else NEUTRAL_COLOR
     cpi_color = WARNING_COLOR if m['cpi'] > 3.5 else SUCCESS_COLOR
     
-    st.markdown(f"""
+    # Cleaned up HTML string
+    macro_html = f"""
     <div class="metric-card">
         <div class="metric-title">Macro Backdrop</div>
         
@@ -359,7 +347,8 @@ with c3:
             <span style="color:#666; font-size:11px;">Latest CPI Date: {m['cpi_date']}</span>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(macro_html, unsafe_allow_html=True)
 
 # ---------------- ROW 2: PLAYBOOK & NEWS ----------------
 r2_col1, r2_col2 = st.columns([2, 1])
@@ -410,7 +399,6 @@ with st.expander("📊 View Raw Sector Performance Data"):
     st.caption("20-Day Performance (Identifying Rotation)")
     
     try:
-        # Define fields we want to track
         sector_list = ['XLK', 'XLF', 'XLE', 'XLV', 'XLY', 'XLP', 'XLI', 'XLU', 'XLC', 'XLB', 'XLRE']
         commodity_list = ['GLD', 'SLV', 'USO', 'TLT', '^TNX']
         
@@ -422,11 +410,7 @@ with st.expander("📊 View Raw Sector Performance Data"):
         
         perf_df = pd.DataFrame(perf).reset_index()
         perf_df.columns = ['Ticker', '20d Return %']
-        
-        # Add friendly names
         perf_df['Name'] = perf_df['Ticker'].map(TICKER_MAP).fillna(perf_df['Ticker'])
-        
-        # Reorder columns
         perf_df = perf_df[['Name', 'Ticker', '20d Return %']]
         perf_df = perf_df.sort_values('20d Return %', ascending=False)
         
