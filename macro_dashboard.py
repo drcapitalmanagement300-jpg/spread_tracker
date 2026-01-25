@@ -1,8 +1,9 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import numpy as np
 
 # ---------------- CONFIGURATION ----------------
 st.set_page_config(layout="wide", page_title="Macro Command Center", page_icon="⚡")
@@ -13,6 +14,7 @@ WARNING_COLOR = "#d32f2f"
 NEUTRAL_COLOR = "#FFA726"
 BG_COLOR = "#0E1117"
 CARD_COLOR = "#262730"
+TEXT_COLOR = "#FAFAFA"
 
 # Inject Custom CSS to match your main dashboard
 st.markdown(f"""
@@ -45,10 +47,16 @@ def get_macro_data():
         "Sectors": ["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU", "XLC", "XLB", "XLRE"]
     }
     all_ticks = [t for cat in tickers.values() for t in cat]
-    data = yf.download(all_ticks, period="6mo", interval="1d", progress=False)['Close']
-    return data, tickers['Sectors']
+    try:
+        data = yf.download(all_ticks, period="6mo", interval="1d", progress=False)['Close']
+        return data, tickers['Sectors']
+    except Exception as e:
+        st.error(f"Data Fetch Error: {e}")
+        return pd.DataFrame(), []
 
 def analyze_regime(data):
+    if data.empty: return {}
+
     # 1. VIX LOGIC
     try: vix = data['^VIX'].iloc[-1]
     except: vix = 15.0
@@ -67,20 +75,22 @@ def analyze_regime(data):
         vix_msg = "Extreme fear. Reduce size."
 
     # 2. TREND LOGIC (SPY)
-    spy = data['SPY']
-    sma200 = spy.rolling(200).mean().iloc[-1]
-    price = spy.iloc[-1]
-    
-    if price > sma200:
-        trend_txt, trend_col, trend_css = "BULLISH", SUCCESS_COLOR, "status-green"
-        trend_msg = "SPY > 200 SMA. Safe to sell puts."
-    else:
-        trend_txt, trend_col, trend_css = "BEARISH", WARNING_COLOR, "status-red"
-        trend_msg = "SPY < 200 SMA. Cash is king."
+    try:
+        spy = data['SPY']
+        sma200 = spy.rolling(200).mean().iloc[-1]
+        price = spy.iloc[-1]
+        
+        if price > sma200:
+            trend_txt, trend_col, trend_css = "BULLISH", SUCCESS_COLOR, "status-green"
+            trend_msg = "SPY > 200 SMA. Safe to sell puts."
+        else:
+            trend_txt, trend_col, trend_css = "BEARISH", WARNING_COLOR, "status-red"
+            trend_msg = "SPY < 200 SMA. Cash is king."
+    except:
+        price, sma200 = 0, 0
+        trend_txt, trend_col, trend_css, trend_msg = "ERROR", "#888", "", "No Data"
 
-    # 3. SECTOR LOGIC (Risk On/Off)
-    # Offense: Tech (XLK) + Discretionary (XLY)
-    # Defense: Utilities (XLU) + Staples (XLP)
+    # 3. SECTOR LOGIC
     try:
         offense = (data['XLK'].pct_change(20).iloc[-1] + data['XLY'].pct_change(20).iloc[-1]) / 2
         defense = (data['XLU'].pct_change(20).iloc[-1] + data['XLP'].pct_change(20).iloc[-1]) / 2
@@ -101,25 +111,60 @@ def analyze_regime(data):
         "sector": {"status": sec_txt, "color": sec_col, "css": sec_css, "msg": sec_msg}
     }
 
-# ---------------- UI COMPONENTS ----------------
-def draw_gauge(val, color):
-    fig = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = val,
-        number = {'font': {'color': "white", 'size': 24}},
-        gauge = {
-            'axis': {'range': [0, 40], 'tickwidth': 1, 'tickcolor': "#333"},
-            'bar': {'color': color},
-            'bgcolor': "rgba(0,0,0,0)",
-            'borderwidth': 0,
-            'steps': [
-                {'range': [0, 13], 'color': 'rgba(211, 47, 47, 0.2)'},
-                {'range': [13, 20], 'color': 'rgba(0, 200, 83, 0.2)'},
-                {'range': [20, 30], 'color': 'rgba(255, 167, 38, 0.2)'},
-                {'range': [30, 50], 'color': 'rgba(211, 47, 47, 0.2)'}
-            ],
-        }))
-    fig.update_layout(height=120, margin=dict(l=20, r=20, t=10, b=10), paper_bgcolor='rgba(0,0,0,0)', font={'color': "white"})
+# ---------------- VISUALIZATION HELPERS ----------------
+def draw_mpl_gauge(val, color):
+    """Draws a simple semi-circle gauge using Matplotlib"""
+    fig, ax = plt.subplots(figsize=(4, 2))
+    fig.patch.set_facecolor(CARD_COLOR)
+    ax.set_facecolor(CARD_COLOR)
+    
+    # Draw Background Arc
+    ax.add_patch(patches.Wedge((0.5, 0), 0.4, 0, 180, width=0.15, color='#333'))
+    
+    # Draw Value Arc (Simple logic: Map 0-40 VIX to 0-180 degrees)
+    max_vix = 40
+    angle_val = min(val, max_vix) / max_vix * 180
+    ax.add_patch(patches.Wedge((0.5, 0), 0.4, 180 - angle_val, 180, width=0.15, color=color))
+    
+    # Add Text
+    ax.text(0.5, 0, f"{val:.2f}", ha='center', va='bottom', fontsize=20, fontweight='bold', color='white')
+    
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 0.5)
+    ax.axis('off')
+    plt.tight_layout()
+    return fig
+
+def draw_mpl_bar_chart(df):
+    """Draws a horizontal bar chart for sectors"""
+    fig, ax = plt.subplots(figsize=(8, 4))
+    fig.patch.set_facecolor(BG_COLOR)
+    ax.set_facecolor(BG_COLOR)
+    
+    # Colors based on value
+    colors = [SUCCESS_COLOR if x >= 0 else WARNING_COLOR for x in df['Change']]
+    
+    bars = ax.barh(df['Sector'], df['Change'], color=colors, height=0.6)
+    
+    # Styling
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_color('#444')
+    ax.spines['left'].set_visible(False)
+    
+    ax.tick_params(axis='y', colors='white', labelsize=9)
+    ax.tick_params(axis='x', colors='white', labelsize=8)
+    ax.xaxis.grid(True, linestyle=':', alpha=0.3, color='#444')
+    
+    # Add value labels
+    for bar in bars:
+        width = bar.get_width()
+        label_x_pos = width + (0.1 if width > 0 else -0.1)
+        ax.text(label_x_pos, bar.get_y() + bar.get_height()/2, f'{width:.1f}%', 
+                va='center', ha='left' if width > 0 else 'right', color='white', fontsize=8)
+                
+    ax.axvline(0, color='white', linewidth=0.8, alpha=0.5)
+    plt.tight_layout()
     return fig
 
 # ---------------- MAIN APP ----------------
@@ -127,7 +172,6 @@ try:
     # Header
     c1, c2 = st.columns([1, 4])
     with c1:
-        # Use simple text if image not available on cloud
         st.markdown("<h2 style='color:white; margin:0;'>DR CAPITAL</h2>", unsafe_allow_html=True)
     with c2:
         st.markdown("""
@@ -144,6 +188,10 @@ try:
         df, sector_tickers = get_macro_data()
         regime = analyze_regime(df)
 
+    if not regime:
+        st.error("Could not load market data. Please refresh.")
+        st.stop()
+
     # ---------------- ROW 1: THE SIGNAL CARDS ----------------
     col1, col2, col3 = st.columns(3)
 
@@ -152,11 +200,10 @@ try:
         st.markdown(f"""
         <div class="macro-card">
             <div class="macro-label">Volatility Regime (VIX)</div>
-            <div style="height: 120px;">
         """, unsafe_allow_html=True)
-        st.plotly_chart(draw_gauge(regime['vix']['val'], regime['vix']['color']), use_container_width=True)
+        # Use Matplotlib Gauge
+        st.pyplot(draw_mpl_gauge(regime['vix']['val'], regime['vix']['color']), use_container_width=True)
         st.markdown(f"""
-            </div>
             <div class="macro-status {regime['vix']['css']}">{regime['vix']['status']}</div>
             <div style="font-size: 12px; color: #888; margin-top: 8px;">{regime['vix']['msg']}</div>
         </div>
@@ -200,27 +247,10 @@ try:
     daily_returns = df[sector_tickers].pct_change().iloc[-1] * 100
     sec_df = pd.DataFrame(daily_returns).reset_index()
     sec_df.columns = ['Sector', 'Change']
-    sec_df = sec_df.sort_values('Change', ascending=False)
+    sec_df = sec_df.sort_values('Change', ascending=True) # Ascending for horizontal bar chart
     
-    # Custom Bar Chart matching UI
-    fig_sec = px.bar(
-        sec_df, x='Sector', y='Change',
-        color='Change',
-        color_continuous_scale=[WARNING_COLOR, "#333", SUCCESS_COLOR],
-        range_color=[-2, 2],
-        text_auto='.2f'
-    )
-    fig_sec.update_layout(
-        plot_bgcolor=BG_COLOR,
-        paper_bgcolor=BG_COLOR,
-        font={'color': 'white'},
-        xaxis={'title': None, 'gridcolor': '#333'},
-        yaxis={'title': '% Change', 'gridcolor': '#333'},
-        coloraxis_showscale=False,
-        height=300
-    )
-    fig_sec.update_traces(textposition='outside')
-    st.plotly_chart(fig_sec, use_container_width=True)
+    # Draw Matplotlib Chart
+    st.pyplot(draw_mpl_bar_chart(sec_df), use_container_width=True)
 
 except Exception as e:
     st.error(f"Data Feed Error: {e}")
