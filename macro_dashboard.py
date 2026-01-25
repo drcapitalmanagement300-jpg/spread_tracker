@@ -9,6 +9,7 @@ from scipy import stats
 from duckduckgo_search import DDGS
 import finnhub
 import os
+import re
 from datetime import datetime, timedelta
 
 # ---------------- CONFIGURATION ----------------
@@ -20,7 +21,6 @@ WARNING_COLOR = "#d32f2f"  # Red
 NEUTRAL_COLOR = "#FFA726"  # Orange
 BG_COLOR = "#0E1117"
 CARD_COLOR = "#262730"
-TEXT_COLOR = "#FAFAFA"
 FINNHUB_KEY = "d5mgc39r01ql1f2p69c0d5mgc39r01ql1f2p69cg" 
 
 # Name Mapping
@@ -61,14 +61,6 @@ st.markdown(f"""
 
 # ---------------- DATA ENGINES ----------------
 
-@st.cache_data(ttl=60) 
-def fetch_live_ticker(ticker):
-    try:
-        data = yf.Ticker(ticker).history(period="1d")
-        if not data.empty: return data['Close'].iloc[-1]
-        return 0.0
-    except: return 0.0
-
 @st.cache_data(ttl=300)
 def fetch_market_data():
     tickers = {
@@ -86,58 +78,121 @@ def fetch_market_data():
         st.error(f"Data Fetch Error: {e}")
         return pd.DataFrame()
 
+# --- BACKUP SEARCH ENGINE (Rescues broken API calls) ---
+def fetch_macro_backup():
+    """Uses DuckDuckGo to find CPI/Fed info if API fails"""
+    backup = {'cpi': None, 'fed': None}
+    
+    try:
+        # 1. Search for CPI
+        cpi_results = DDGS().text("current US CPI inflation rate year over year actual", max_results=2)
+        for r in cpi_results:
+            # Look for percentage pattern like 3.1% or 2.9%
+            match = re.search(r"(\d+\.\d+)%", r['body'])
+            if match:
+                val = float(match.group(1))
+                # Basic sanity check (CPI won't be 50% or 0.1%)
+                if 1.0 < val < 10.0:
+                    backup['cpi'] = {
+                        'val': f"{val}%",
+                        'status': "Search Est.", # Indicate source
+                        'date': "Latest Release"
+                    }
+                    break
+        
+        # 2. Search for Fed Date
+        fed_results = DDGS().text("next FOMC meeting date 2025", max_results=2)
+        for r in fed_results:
+            # Very basic check if we find a month name
+            body_lower = r['body'].lower()
+            months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+            for m in months:
+                if m in body_lower and "meeting" in body_lower:
+                    backup['fed'] = {'date': "Check Calendar", 'expectation': "Search Active"} 
+                    break
+                    
+    except: pass
+    return backup
+
 @st.cache_data(ttl=3600)
 def fetch_economic_events():
-    """Robust Economic Event Fetcher (Graceful Failure)"""
+    """Tries API -> Falls back to Search -> Returns Safe Defaults"""
+    
+    # DEFAULT STATE (Clean Gray)
+    result = {
+        'cpi': {'val': '--', 'status': 'Unavailable', 'date': '-'},
+        'fed': {'date': 'TBD', 'expectation': 'Unknown'}
+    }
+
     try:
         finnhub_client = finnhub.Client(api_key=FINNHUB_KEY)
         today = datetime.now()
-        start_date = (today - timedelta(days=90)).strftime('%Y-%m-%d')
+        # Widen window to 4 months to catch quarterly delays
+        start_date = (today - timedelta(days=120)).strftime('%Y-%m-%d')
         end_date = (today + timedelta(days=90)).strftime('%Y-%m-%d')
         
         calendar = finnhub_client.economic_calendar(_from=start_date, to=end_date)
+        
+        # Guard against API key error returning dict with 'error' key instead of 'economicCalendar'
+        if not calendar or 'economicCalendar' not in calendar:
+            raise Exception("Invalid API Response")
+
         events = calendar.get('economicCalendar', [])
         
-        # 1. CPI LOGIC
-        cpi_data = {'val': '--', 'status': 'Unavailable', 'date': '-'}
-        cpi_events = [e for e in events if 'consumer price index' in e.get('event', '').lower() and 'yoy' in e.get('event', '').lower() and e['country'] == 'US']
-        past_cpi = [e for e in cpi_events if e.get('actual') is not None]
+        # --- 1. CPI LOGIC ---
+        # Robust filtering: Check for "CPI" or "Consumer Price Index"
+        cpi_events = [
+            e for e in events 
+            if ('consumer price index' in e.get('event', '').lower() or 'cpi' in e.get('event', '').lower())
+            and 'yoy' in e.get('event', '').lower()
+            and e.get('country') == 'US'
+        ]
         
-        if past_cpi:
-            latest = sorted(past_cpi, key=lambda x: x['date'], reverse=True)[0]
+        completed_cpi = [e for e in cpi_events if e.get('actual') is not None]
+        
+        if completed_cpi:
+            latest = sorted(completed_cpi, key=lambda x: x['date'], reverse=True)[0]
             actual = latest.get('actual')
             estimate = latest.get('estimate')
+            
             status = "In Line"
             if estimate is not None and actual is not None:
                 if actual > estimate: status = "Hot (Bearish)"
                 elif actual < estimate: status = "Cool (Bullish)"
             
-            cpi_data = {
+            result['cpi'] = {
                 'val': f"{actual}%",
                 'status': status,
                 'date': latest['date'].split(' ')[0]
             }
-
-        # 2. FED LOGIC
-        fed_data = {'date': 'TBD', 'expectation': 'Wait & See'}
+        
+        # --- 2. FED LOGIC ---
         fed_events = [e for e in events if 'fed interest rate decision' in e.get('event', '').lower() and e['country'] == 'US']
         future_fed = [e for e in fed_events if e['date'] >= today.strftime('%Y-%m-%d')]
         
         if future_fed:
             next_meeting = sorted(future_fed, key=lambda x: x['date'])[0]
-            fed_data['date'] = next_meeting['date'].split(' ')[0]
+            
             est = next_meeting.get('estimate')
             prev = next_meeting.get('prev')
-            if est and prev:
-                if est < prev: fed_data['expectation'] = "CUT Expected"
-                elif est > prev: fed_data['expectation'] = "HIKE Expected"
-                else: fed_data['expectation'] = "HOLD Expected"
             
-        return {'cpi': cpi_data, 'fed': fed_data}
+            expectation = "Hold Expected"
+            if est is not None and prev is not None:
+                if est < prev: expectation = "CUT Expected"
+                elif est > prev: expectation = "HIKE Expected"
+            
+            result['fed'] = {
+                'date': next_meeting['date'].split(' ')[0],
+                'expectation': expectation
+            }
+            
+    except Exception as e:
+        # API Failed: Trigger Backup Search
+        backup = fetch_macro_backup()
+        if backup['cpi']: result['cpi'] = backup['cpi']
+        if backup['fed']: result['fed'] = backup['fed']
         
-    except:
-        # Graceful Fallback - No red errors
-        return {'cpi': {'val': '--', 'status': 'Unavailable', 'date': '-'}, 'fed': {'date': 'TBD', 'expectation': 'Unknown'}}
+    return result
 
 @st.cache_data(ttl=1800)
 def fetch_news_headlines():
@@ -165,16 +220,18 @@ def calculate_metrics(data, eco_data):
         sma200 = spy.rolling(200).mean().iloc[-1]
         sma50 = spy.rolling(50).mean().iloc[-1]
         price = spy.iloc[-1]
+        
         trend_state = "Neutral"
         if price > sma200:
             trend_state = "Bullish" if price > sma50 else "Bullish (Weak)"
         else:
             trend_state = "Bearish" if price < sma50 else "Bearish (Rally)"
+            
         metrics['spy'] = {'price': price, 'sma200': sma200, 'sma50': sma50, 'state': trend_state}
     except:
         metrics['spy'] = {'price': 0, 'sma200': 0, 'sma50': 0, 'state': "Error"}
     
-    # 3. Risk
+    # 3. Risk (Enhanced)
     try:
         offense = data['SMH'].pct_change(20).iloc[-1]
         defense = data['XLU'].pct_change(20).iloc[-1]
@@ -205,6 +262,7 @@ def calculate_metrics(data, eco_data):
 
 def plot_spy_chart_mpl(data):
     if 'SPY' not in data: return None
+    
     df = data['SPY'].reset_index()
     df.columns = ['Date', 'Close']
     df['SMA200'] = df['Close'].rolling(200).mean()
@@ -249,6 +307,7 @@ def draw_vix_gauge(val, rank):
 
 # ---------------- MAIN APP LAYOUT ----------------
 
+# HEADER
 header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
 with header_col1:
     if os.path.exists("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG"):
@@ -276,10 +335,10 @@ with st.spinner("Analyzing Global Markets..."):
     metrics = calculate_metrics(raw_data, eco_data)
     news = fetch_news_headlines()
 
-# ---------------- ROW 1: THE BIG THREE ----------------
+# ---------------- ROW 1: METRICS ----------------
 c1, c2, c3 = st.columns(3)
 
-# 1. VOLATILITY COMMAND
+# 1. VOLATILITY
 with c1:
     vix_val = metrics['vix']['value']
     vix_rank = metrics['vix']['rank']
@@ -306,7 +365,7 @@ with c1:
     </div>
     """, unsafe_allow_html=True)
 
-# 2. TREND & CHART
+# 2. TREND
 with c2:
     trend_state = metrics['spy']['state']
     t_col = SUCCESS_COLOR if "Bullish" in trend_state else WARNING_COLOR
@@ -325,36 +384,39 @@ with c2:
     </div>
     """, unsafe_allow_html=True)
 
-# 3. MACRO BACKDROP (TIDY LAYOUT)
+# 3. MACRO BACKDROP
 with c3:
     m = metrics['macro']
     tnx_color = WARNING_COLOR if m['tnx'] > 4.5 else "#eee"
     
+    # Clean up display values
+    cpi_val = m['cpi']['val']
     cpi_status = m['cpi']['status']
     cpi_color = SUCCESS_COLOR if "Cool" in cpi_status or "Line" in cpi_status else "#eee"
     if "Hot" in cpi_status: cpi_color = WARNING_COLOR
     
+    fed_date = m['fed']['date']
     fed_status = m['fed']['expectation']
     fed_color = SUCCESS_COLOR if "CUT" in fed_status else "#eee"
     
-    # HTML STRING WITHOUT INDENTATION TO FIX RENDERING
+    # HTML Layout - Flexbox for stability
     macro_html = f"""<div class="metric-card">
 <div class="metric-title">Macro Backdrop</div>
 <div style="display: flex; justify-content: space-between; margin-top: 20px; gap: 10px;">
 <div style="flex: 1; border-right: 1px solid #444; padding-right: 10px;">
 <div class="sub-metric">10-Year Yield</div>
 <div class="metric-value" style="color:{tnx_color}">{m['tnx']:.2f}%</div>
-<div style="font-size:12px; font-weight:bold; color:#888;">{m['tnx_chg']:+.2f}%</div>
+<div style="font-size:12px; font-weight:bold; color:#888;">{m['tnx_chg']:+.2f} pts</div>
 </div>
 <div style="flex: 1; padding-left: 10px;">
 <div class="sub-metric">Inflation (CPI)</div>
-<div class="metric-value" style="color:#eee">{m['cpi']['val']}</div>
+<div class="metric-value" style="color:#eee">{cpi_val}</div>
 <div style="font-size:12px; font-weight:bold; color:{cpi_color}">{cpi_status}</div>
 </div>
 </div>
 <hr style="border-top:1px solid #444; margin:15px 0;">
 <div>
-<div class="sub-metric">Next Fed Decision: <span style="color:#eee;">{m['fed']['date']}</span></div>
+<div class="sub-metric">Next Fed Decision: <span style="color:#eee;">{fed_date}</span></div>
 <div style="font-size:18px; font-weight:bold; color:{fed_color}; margin-top:5px;">{fed_status}</div>
 </div>
 </div>"""
