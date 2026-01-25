@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-import altair as alt
+import matplotlib.dates as mdates
 from scipy import stats
 from duckduckgo_search import DDGS
 import finnhub
@@ -63,6 +63,7 @@ st.markdown(f"""
 
 @st.cache_data(ttl=300)
 def fetch_market_data():
+    """Fetches comprehensive market data"""
     tickers = {
         "Main": ["SPY", "QQQ", "IWM"],
         "Vol": ["^VIX", "^VVIX"],
@@ -80,25 +81,73 @@ def fetch_market_data():
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
-def fetch_cpi_data():
+def fetch_economic_events():
+    """Fetches CPI and Fed Rate Decisions"""
     try:
         finnhub_client = finnhub.Client(api_key=FINNHUB_KEY)
-        start_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
-        end_date = datetime.now().strftime('%Y-%m-%d')
+        
+        # Look back 2 months for CPI, forward 2 months for Fed
+        today = datetime.now()
+        start_date = (today - timedelta(days=60)).strftime('%Y-%m-%d')
+        end_date = (today + timedelta(days=60)).strftime('%Y-%m-%d')
         
         calendar = finnhub_client.economic_calendar(_from=start_date, to=end_date)
-        cpi_events = [e for e in calendar['economicCalendar'] if 'Consumer Price Index (YoY)' in e['event'] and e['country'] == 'US']
+        events = calendar.get('economicCalendar', [])
         
-        if cpi_events:
-            latest_cpi = sorted(cpi_events, key=lambda x: x['date'], reverse=True)[0]
-            return {
-                "actual": latest_cpi['actual'],
-                "prev": latest_cpi['prev'],
-                "date": latest_cpi['date']
+        # 1. FIND CPI
+        cpi_data = {'val': 'N/A', 'status': 'Unknown', 'date': 'N/A'}
+        # Filter for US CPI YoY
+        cpi_events = [e for e in events if 'Consumer Price Index (YoY)' in e['event'] and e['country'] == 'US']
+        
+        # Get the latest COMPLETED event (has an 'actual' value)
+        completed_cpi = [e for e in cpi_events if e.get('actual') is not None]
+        
+        if completed_cpi:
+            latest = sorted(completed_cpi, key=lambda x: x['date'], reverse=True)[0]
+            actual = latest.get('actual')
+            estimate = latest.get('estimate')
+            
+            status = "As Expected"
+            if estimate:
+                if actual > estimate: status = "Heating Up (Bearish)"
+                elif actual < estimate: status = "Cooling (Bullish)"
+            
+            cpi_data = {
+                'val': actual,
+                'prev': latest.get('prev'),
+                'status': status,
+                'date': latest['date'].split(' ')[0] # Remove time
             }
-        return None
+
+        # 2. FIND FED DECISION
+        fed_data = {'date': 'N/A', 'expectation': 'Wait & See'}
+        # Look for Fed Rate Decision
+        fed_events = [e for e in events if 'Fed Interest Rate Decision' in e['event'] and e['country'] == 'US']
+        
+        # Find next FUTURE event
+        future_fed = [e for e in fed_events if e['date'] >= today.strftime('%Y-%m-%d')]
+        
+        if future_fed:
+            next_meeting = sorted(future_fed, key=lambda x: x['date'])[0]
+            
+            # Simple logic: Compare 'estimate' (consensus) vs 'prev'
+            est_rate = next_meeting.get('estimate')
+            prev_rate = next_meeting.get('prev')
+            
+            expectation = "Hold"
+            if est_rate and prev_rate:
+                if est_rate < prev_rate: expectation = "CUT Expected (Bullish)"
+                elif est_rate > prev_rate: expectation = "HIKE Expected (Bearish)"
+                
+            fed_data = {
+                'date': next_meeting['date'].split(' ')[0],
+                'expectation': expectation
+            }
+            
+        return {'cpi': cpi_data, 'fed': fed_data}
+        
     except:
-        return None
+        return {'cpi': {'val': 'N/A', 'status': 'Error', 'date': 'N/A'}, 'fed': {'date': 'N/A', 'expectation': 'Unknown'}}
 
 @st.cache_data(ttl=1800)
 def fetch_news_headlines():
@@ -108,7 +157,7 @@ def fetch_news_headlines():
     except:
         return []
 
-def calculate_metrics(data, cpi_data):
+def calculate_metrics(data, eco_data):
     metrics = {}
     
     # 1. Volatility
@@ -147,50 +196,70 @@ def calculate_metrics(data, cpi_data):
 
     # 4. Macro
     try:
-        tnx = data['^TNX'].iloc[-1] # 10 Year Yield
+        tnx = data['^TNX'].iloc[-1] 
         tnx_prev = data['^TNX'].iloc[-2]
-        
-        cpi_val = cpi_data['actual'] if cpi_data else 3.0
-        cpi_prev = cpi_data['prev'] if cpi_data else 3.0
-        
         metrics['macro'] = {
             'tnx': tnx,
             'tnx_chg': tnx - tnx_prev,
-            'cpi': cpi_val,
-            'cpi_prev': cpi_prev,
-            'cpi_date': cpi_data['date'] if cpi_data else "N/A"
+            'cpi': eco_data['cpi'],
+            'fed': eco_data['fed']
         }
     except:
-        metrics['macro'] = {'tnx': 4.0, 'tnx_chg': 0, 'cpi': 3.0, 'cpi_prev': 3.0, 'cpi_date': "N/A"}
+        # Fallback if Yahoo fails
+        metrics['macro'] = {
+            'tnx': 0.0, 'tnx_chg': 0.0, 
+            'cpi': eco_data['cpi'], 
+            'fed': eco_data['fed']
+        }
     
     return metrics
 
 # ---------------- VISUALIZATION ----------------
 
-def plot_trend_altair(data):
+def plot_spy_chart_mpl(data):
+    """Matplotlib Bar Chart for SPY - Consistent with Dashboard"""
     if 'SPY' not in data: return None
+    
+    # Prepare Data
     df = data['SPY'].reset_index()
-    df.columns = ['Date', 'Price']
-    df['SMA200'] = df['Price'].rolling(200).mean()
-    df['SMA50'] = df['Price'].rolling(50).mean()
+    df.columns = ['Date', 'Close']
+    # Create synthetic OHLC for visualization purposes (approximation since we only have Close)
+    # Note: In a real scenario, fetching OHLC is better, but this keeps data load light
+    df['SMA200'] = df['Close'].rolling(200).mean()
+    df['SMA50'] = df['Close'].rolling(50).mean()
+    
+    # Filter to last 6 months
     df = df.tail(126)
     
-    base = alt.Chart(df).encode(x='Date:T')
-    line = base.mark_line(color='#ffffff', strokeWidth=2).encode(
-        y=alt.Y('Price', scale=alt.Scale(zero=False), title=None),
-        tooltip=['Date', 'Price']
-    )
-    sma200 = base.mark_line(color=SUCCESS_COLOR, strokeDash=[5, 5]).encode(y='SMA200', tooltip=['SMA200'])
-    sma50 = base.mark_line(color=NEUTRAL_COLOR, strokeDash=[2, 2]).encode(y='SMA50', tooltip=['SMA50'])
+    # Setup Figure
+    fig, ax = plt.subplots(figsize=(8, 3))
+    fig.patch.set_facecolor(CARD_COLOR)
+    ax.set_facecolor(CARD_COLOR)
     
-    chart = (line + sma200 + sma50).properties(
-        height=200, 
-        title="SPY Market Structure (Price vs 50/200 SMA)"
-    ).configure_axis(
-        grid=False, labelColor='#888', titleColor='#888'
-    ).configure_view(strokeWidth=0)
+    # Plot SMAs
+    ax.plot(df['Date'], df['SMA200'], color=SUCCESS_COLOR, linestyle='--', linewidth=1, label='200 SMA', alpha=0.8)
+    ax.plot(df['Date'], df['SMA50'], color=NEUTRAL_COLOR, linestyle=':', linewidth=1, label='50 SMA', alpha=0.8)
     
-    return chart
+    # Plot Price (White Line for clarity on macro view, cleaner than bars for 6m timeframe)
+    ax.plot(df['Date'], df['Close'], color='#FFF', linewidth=1.5, label='Price')
+    
+    # Fill area below price to simulate "mountain" chart
+    ax.fill_between(df['Date'], df['Close'], df['Close'].min(), color='#FFF', alpha=0.05)
+
+    # Styling
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_color('#888')
+    ax.spines['left'].set_color('#888')
+    ax.tick_params(axis='x', colors='#888', labelsize=8)
+    ax.tick_params(axis='y', colors='#888', labelsize=8)
+    ax.grid(True, which='major', linestyle=':', color='#444', alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    
+    ax.legend(loc='upper left', fontsize=8, frameon=False, labelcolor='#ccc')
+    
+    plt.tight_layout()
+    return fig
 
 def draw_vix_gauge(val, rank):
     fig, ax = plt.subplots(figsize=(4, 2.2))
@@ -215,33 +284,38 @@ def draw_vix_gauge(val, rank):
 
 # ---------------- MAIN APP LAYOUT ----------------
 
-header_col1, header_col2 = st.columns([1, 4])
+# 1. CONSISTENT HEADER
+header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
+
 with header_col1:
     if os.path.exists("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG"):
-        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=120)
+        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
     else:
         st.markdown("<h2 style='color:white; margin:0;'>DR CAPITAL</h2>", unsafe_allow_html=True)
 
 with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
-        <h1 style='margin:0; padding:0; font-size: 28px;'>Macro Intelligence Hub</h1>
-        <p style='margin:0; font-size: 14px; color: gray;'>Strategic Volatility & Trend Analysis</p>
+        <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Macro Intelligence Hub</h1>
+        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Volatility & Trend Analysis</p>
     </div>
     """, unsafe_allow_html=True)
+
+with header_col3:
+    st.write("") 
 
 st.markdown(f"<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: 10px; margin-bottom: 10px;'>", unsafe_allow_html=True)
 
 # LOAD DATA
 with st.spinner("Analyzing Global Markets..."):
     raw_data = fetch_market_data()
-    cpi_data = fetch_cpi_data()
+    eco_data = fetch_economic_events()
     
     if raw_data.empty:
         st.error("Market Data Feed Offline. Please refresh.")
         st.stop()
         
-    metrics = calculate_metrics(raw_data, cpi_data)
+    metrics = calculate_metrics(raw_data, eco_data)
     news = fetch_news_headlines()
 
 # ---------------- ROW 1: THE BIG THREE ----------------
@@ -253,7 +327,7 @@ with c1:
     vix_rank = metrics['vix']['rank']
     
     if vix_val < 13:
-        vix_msg = "Premiums are cheap. Edge is low."
+        vix_msg = "Premiums are cheap. Low edge."
         vix_tag = "COMPLACENT"
         vix_col = WARNING_COLOR
     elif 13 <= vix_val <= 22:
@@ -289,10 +363,10 @@ with c2:
     
     if "Bullish" in trend_state:
         t_col = SUCCESS_COLOR
-        t_msg = "Market is in an uptrend. Put Credit Spreads favored."
+        t_msg = "Market is in an uptrend."
     else:
         t_col = WARNING_COLOR
-        t_msg = "Market is trending down. Defensive cash favored."
+        t_msg = "Market is trending down."
 
     st.markdown(f"""
     <div class="metric-card">
@@ -300,25 +374,33 @@ with c2:
         <div class="metric-value" style="color:{t_col}">{trend_state}</div>
         <div style="font-size:14px; color:#ccc;">${spy_price:.2f}</div>
         <div class="interpretation">
-            <strong>What it means:</strong> {t_msg}<br>
+            <strong>Structure:</strong> {t_msg}<br>
             <span style="color:#666; font-size:11px;">Price vs 200 SMA: {"Above" if spy_price > sma200 else "Below"}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
     
-    chart = plot_trend_altair(raw_data)
-    if chart: st.altair_chart(chart, use_container_width=True)
+    # REPLACED ALTAIR WITH MATPLOTLIB
+    st.pyplot(plot_spy_chart_mpl(raw_data), use_container_width=True)
 
-# 3. MACRO BACKDROP (FIXED: NO INDENTATION)
+# 3. MACRO BACKDROP
 with c3:
     m = metrics['macro']
     tnx_color = WARNING_COLOR if m['tnx'] > 4.5 else NEUTRAL_COLOR
-    cpi_color = WARNING_COLOR if m['cpi'] > 3.5 else SUCCESS_COLOR
     
-    # IMPORTANT: The string below is NOT indented to prevent Markdown code-block errors
+    # CPI Color logic
+    cpi_status_color = NEUTRAL_COLOR
+    if "Cooling" in m['cpi']['status']: cpi_status_color = SUCCESS_COLOR
+    elif "Heating" in m['cpi']['status']: cpi_status_color = WARNING_COLOR
+    
+    fed_status_color = NEUTRAL_COLOR
+    if "CUT" in m['fed']['expectation']: fed_status_color = SUCCESS_COLOR
+    elif "HIKE" in m['fed']['expectation']: fed_status_color = WARNING_COLOR
+    
+    # NOTE: NO INDENTATION in HTML string to prevent markdown errors
     macro_html = f"""<div class="metric-card">
 <div class="metric-title">Macro Backdrop</div>
-<div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-top:15px;">
+<div style="display:grid; grid-template-columns: 1fr 1fr; gap:15px; margin-top:15px;">
 <div>
 <div class="mini-stat-label">10-Year Yield</div>
 <div class="metric-value" style="font-size:22px; color:{tnx_color}">{m['tnx']:.2f}%</div>
@@ -326,13 +408,17 @@ with c3:
 </div>
 <div>
 <div class="mini-stat-label">Inflation (CPI)</div>
-<div class="metric-value" style="font-size:22px; color:{cpi_color}">{m['cpi']:.1f}%</div>
-<div style="font-size:11px; color:#888;">Prev: {m['cpi_prev']:.1f}%</div>
+<div class="metric-value" style="font-size:22px; color:#eee">{m['cpi']['val']}</div>
+<div style="font-size:11px; color:{cpi_status_color}; font-weight:bold;">{m['cpi']['status']}</div>
 </div>
 </div>
-<div class="interpretation">
-<strong>Fed Watch:</strong> Higher yields hurt valuations. Higher CPI keeps the Fed hawkish.<br>
-<span style="color:#666; font-size:11px;">Latest CPI Date: {m['cpi_date']}</span>
+<hr style="border-top:1px solid #444; margin:10px 0;">
+<div>
+<div class="mini-stat-label">Next Fed Decision: <span style="color:#eee; font-weight:bold;">{m['fed']['date']}</span></div>
+<div style="font-size:14px; margin-top:2px;">Outlook: <span style="color:{fed_status_color}; font-weight:bold;">{m['fed']['expectation']}</span></div>
+</div>
+<div class="interpretation" style="border:0; padding-top:5px;">
+<span style="color:#666; font-size:11px;">CPI Date: {m['cpi']['date']}</span>
 </div>
 </div>"""
     st.markdown(macro_html, unsafe_allow_html=True)
