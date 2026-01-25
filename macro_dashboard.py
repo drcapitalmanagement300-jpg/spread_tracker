@@ -63,7 +63,6 @@ st.markdown(f"""
 
 @st.cache_data(ttl=300)
 def fetch_market_data():
-    """Fetches comprehensive market data"""
     tickers = {
         "Main": ["SPY", "QQQ", "IWM"],
         "Vol": ["^VIX", "^VVIX"],
@@ -82,7 +81,6 @@ def fetch_market_data():
 
 @st.cache_data(ttl=3600)
 def fetch_cpi_data():
-    """Fetches latest CPI (Inflation) from Finnhub"""
     try:
         finnhub_client = finnhub.Client(api_key=FINNHUB_KEY)
         start_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
@@ -104,7 +102,6 @@ def fetch_cpi_data():
 
 @st.cache_data(ttl=1800)
 def fetch_news_headlines():
-    """Uses DuckDuckGo to get top market news summaries"""
     try:
         results = DDGS().news(keywords="financial markets news", region="wt-wt", safesearch="off", max_results=5)
         return results
@@ -112,7 +109,6 @@ def fetch_news_headlines():
         return []
 
 def calculate_metrics(data, cpi_data):
-    """Computes derived metrics"""
     metrics = {}
     
     # 1. Volatility
@@ -219,25 +215,20 @@ def draw_vix_gauge(val, rank):
 
 # ---------------- MAIN APP LAYOUT ----------------
 
-# 1. CONSISTENT HEADER (Matches Dashboard)
-header_col1, header_col2, header_col3 = st.columns([1.5, 7, 1.5])
-
+header_col1, header_col2 = st.columns([1, 4])
 with header_col1:
     if os.path.exists("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG"):
-        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=130)
+        st.image("754D6DFF-2326-4C87-BB7E-21411B2F2373.PNG", width=120)
     else:
         st.markdown("<h2 style='color:white; margin:0;'>DR CAPITAL</h2>", unsafe_allow_html=True)
 
 with header_col2:
     st.markdown("""
     <div style='text-align: left; padding-top: 10px;'>
-        <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Macro Intelligence Hub</h1>
-        <p style='margin-top: 0px; font-size: 18px; color: gray;'>Strategic Volatility & Trend Analysis</p>
+        <h1 style='margin:0; padding:0; font-size: 28px;'>Macro Intelligence Hub</h1>
+        <p style='margin:0; font-size: 14px; color: gray;'>Strategic Volatility & Trend Analysis</p>
     </div>
     """, unsafe_allow_html=True)
-
-with header_col3:
-    st.write("") # Spacer
 
 st.markdown(f"<hr style='border: 0; border-top: 1px solid #FFFFFF; margin-top: 10px; margin-bottom: 10px;'>", unsafe_allow_html=True)
 
@@ -318,36 +309,32 @@ with c2:
     chart = plot_trend_altair(raw_data)
     if chart: st.altair_chart(chart, use_container_width=True)
 
-# 3. MACRO BACKDROP (FIXED HTML)
+# 3. MACRO BACKDROP (FIXED: NO INDENTATION)
 with c3:
     m = metrics['macro']
     tnx_color = WARNING_COLOR if m['tnx'] > 4.5 else NEUTRAL_COLOR
     cpi_color = WARNING_COLOR if m['cpi'] > 3.5 else SUCCESS_COLOR
     
-    # Cleaned up HTML string
-    macro_html = f"""
-    <div class="metric-card">
-        <div class="metric-title">Macro Backdrop</div>
-        
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-top:15px;">
-            <div>
-                <div class="mini-stat-label">10-Year Yield</div>
-                <div class="metric-value" style="font-size:22px; color:{tnx_color}">{m['tnx']:.2f}%</div>
-                <div style="font-size:11px; color:#888;">{m['tnx_chg']:+.2f}% change</div>
-            </div>
-            <div>
-                <div class="mini-stat-label">Inflation (CPI)</div>
-                <div class="metric-value" style="font-size:22px; color:{cpi_color}">{m['cpi']:.1f}%</div>
-                <div style="font-size:11px; color:#888;">Prev: {m['cpi_prev']:.1f}%</div>
-            </div>
-        </div>
-        
-        <div class="interpretation">
-            <strong>Fed Watch:</strong> Higher yields hurt valuations. Higher CPI keeps the Fed hawkish.<br>
-            <span style="color:#666; font-size:11px;">Latest CPI Date: {m['cpi_date']}</span>
-        </div>
-    </div>
-    """
+    # IMPORTANT: The string below is NOT indented to prevent Markdown code-block errors
+    macro_html = f"""<div class="metric-card">
+<div class="metric-title">Macro Backdrop</div>
+<div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-top:15px;">
+<div>
+<div class="mini-stat-label">10-Year Yield</div>
+<div class="metric-value" style="font-size:22px; color:{tnx_color}">{m['tnx']:.2f}%</div>
+<div style="font-size:11px; color:#888;">{m['tnx_chg']:+.2f}% change</div>
+</div>
+<div>
+<div class="mini-stat-label">Inflation (CPI)</div>
+<div class="metric-value" style="font-size:22px; color:{cpi_color}">{m['cpi']:.1f}%</div>
+<div style="font-size:11px; color:#888;">Prev: {m['cpi_prev']:.1f}%</div>
+</div>
+</div>
+<div class="interpretation">
+<strong>Fed Watch:</strong> Higher yields hurt valuations. Higher CPI keeps the Fed hawkish.<br>
+<span style="color:#666; font-size:11px;">Latest CPI Date: {m['cpi_date']}</span>
+</div>
+</div>"""
     st.markdown(macro_html, unsafe_allow_html=True)
 
 # ---------------- ROW 2: PLAYBOOK & NEWS ----------------
