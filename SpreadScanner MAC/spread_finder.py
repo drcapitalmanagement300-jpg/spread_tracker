@@ -81,6 +81,7 @@ if "init_done" not in st.session_state:
     service = get_drive_service_local()
     if service:
         st.session_state.drive_service = service
+        # Initial load only
         st.session_state.trades = load_from_drive_local(service)
         st.toast("✅ Alpha Engine Online")
     else:
@@ -239,7 +240,7 @@ def process_market_structure(ticker_obj, ticker):
         }
     except: return None
 
-# --- SCANNER LOGIC (STRICT WIDTH) ---
+# --- SCANNER LOGIC ---
 def find_alpha_setup(ticker, stock_obj, data, width_target, min_roi, dev_mode):
     try:
         if not dev_mode and data['price'] < data['sma_200']:
@@ -280,7 +281,7 @@ def find_alpha_setup(ticker, stock_obj, data, width_target, min_roi, dev_mode):
             row['impliedVolatility'] if row['impliedVolatility'] > 0 else atm_iv
         ), axis=1)
 
-        # Wide Delta Search (18-35)
+        # Wide Delta Search
         candidates = puts[(puts['delta'] > -0.35) & (puts['delta'] < -0.18)]
         if candidates.empty: return None, "No Strikes in Delta Range"
 
@@ -293,13 +294,12 @@ def find_alpha_setup(ticker, stock_obj, data, width_target, min_roi, dev_mode):
             min_oi = 500 if ticker in ETFS else 100
             if not dev_mode and (short_leg.get('openInterest', 0) < min_oi): continue
 
-            # STRICT WIDTH LOGIC: ONLY try the specific target (e.g. $5)
+            # STRICT WIDTH LOGIC
             long_target = short_strike - width_target
             long_leg_idx = (puts['strike'] - long_target).abs().argsort()[:1]
             if long_leg_idx.empty: continue
             long_leg = puts.iloc[long_leg_idx].iloc[0]
             
-            # Verify exact width match (within $0.50 tolerance for strikes)
             actual_width = short_strike - long_leg['strike']
             if abs(actual_width - width_target) > 0.5: continue 
 
@@ -382,7 +382,6 @@ with st.sidebar:
     # LIVE VIX CHECK
     current_vix = get_market_vix()
     
-    # VIX Logic
     if current_vix < 13:
         vix_status = "Low Edge (Cheap)"
         vix_color = "#AAA"
@@ -560,10 +559,25 @@ if st.session_state.scan_results:
                                 "expiration": s['expiration_raw'], "credit": s['credit'],
                                 "entry_date": datetime.now().date().isoformat(), "pnl_history": []
                             }
-                            st.session_state.trades.append(new_trade)
-                            save_to_drive_local(st.session_state.drive_service, st.session_state.trades)
-                            st.session_state[btn_key] = True
-                            st.rerun()
+                            
+                            # --- CRITICAL FIX: READ BEFORE WRITE ---
+                            if st.session_state.drive_service:
+                                latest_cloud_trades = load_from_drive_local(st.session_state.drive_service)
+                                latest_cloud_trades.append(new_trade)
+                                save_success = save_to_drive_local(st.session_state.drive_service, latest_cloud_trades)
+                                
+                                if save_success:
+                                    st.session_state.trades = latest_cloud_trades # Sync local
+                                    st.session_state[btn_key] = True
+                                    st.toast(f"✅ Saved {t} to Cloud!")
+                                    st.rerun()
+                                else:
+                                    st.error("Save Failed!")
+                            else:
+                                st.session_state.trades.append(new_trade)
+                                st.session_state[btn_key] = True
+                                st.rerun()
+                            # ---------------------------------------
                     else:
                         st.success(f"✅ Added {qty} {t}")
 
