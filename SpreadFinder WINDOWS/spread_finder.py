@@ -34,7 +34,7 @@ FINNHUB_API_KEY = "d5mgc39r01ql1f2p69c0d5mgc39r01ql1f2p69cg"
 @st.cache_resource
 def get_drive_service_local():
     if not key_path:
-        st.error(f"❌ CRITICAL ERROR: Could not find '{key_filename}'")
+        st.warning(f"⚠️ Drive Key Missing: '{key_filename}'. Scanner works, but saving disabled.")
         return None
     SCOPES = ['https://www.googleapis.com/auth/drive']
     try:
@@ -46,6 +46,7 @@ def get_drive_service_local():
 
 # --- PERSISTENCE ---
 def load_from_drive_local(service):
+    if not service: return []
     try:
         FILE_ID = "1CvUDz7NDGaJgyZxQFL9bi5JS2M7nX6K-"
         from googleapiclient.http import MediaIoBaseDownload
@@ -60,6 +61,7 @@ def load_from_drive_local(service):
     except: return []
 
 def save_to_drive_local(service, data):
+    if not service: return False
     try:
         FILE_ID = "1CvUDz7NDGaJgyZxQFL9bi5JS2M7nX6K-"
         from googleapiclient.http import MediaIoBaseUpload
@@ -81,7 +83,6 @@ if "init_done" not in st.session_state:
     service = get_drive_service_local()
     if service:
         st.session_state.drive_service = service
-        # Initial load only
         st.session_state.trades = load_from_drive_local(service)
         st.toast("✅ Alpha Engine Online")
     else:
@@ -130,7 +131,8 @@ ETFS = [k for k, v in SECTOR_DB.items() if "ETF" in v]
 # --- BLACK-SCHOLES ENGINE ---
 def black_scholes_delta(S, K, T, r, sigma, option_type="put"):
     try:
-        if T <= 0 or sigma <= 0: return -0.5
+        if T <= 0: return -0.5
+        sigma = max(sigma, 0.10)
         d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
         if option_type == "call": return norm.cdf(d1)
         else: return norm.cdf(d1) - 1
@@ -141,7 +143,7 @@ def get_market_vix():
     try:
         vix = yf.Ticker("^VIX")
         hist = vix.history(period="1d")
-        if hist.empty: return 15.0 # Fallback
+        if hist.empty: return 15.0 
         return hist['Close'].iloc[-1]
     except: return 15.0
 
@@ -169,7 +171,7 @@ def calculate_alpha_score(data, spread_metrics, market_vix):
     score = 0
     reasons = []
     
-    # 1. Trend Quality (30 Pts)
+    # 1. Trend Quality
     if data['price'] > data['sma_200']:
         score += 15
         if data['price'] < data['sma_20']: 
@@ -180,7 +182,7 @@ def calculate_alpha_score(data, spread_metrics, market_vix):
     else:
         reasons.append("Trend Weak")
 
-    # 2. Volatility Edge (30 Pts)
+    # 2. Volatility Edge
     vrp_ratio = spread_metrics['iv'] / spread_metrics['hv'] if spread_metrics['hv'] > 0 else 1.0
     if vrp_ratio > 1.5: 
         score += 30
@@ -189,14 +191,14 @@ def calculate_alpha_score(data, spread_metrics, market_vix):
         score += 20
         reasons.append("Good VRP")
     
-    # 3. Macro Context (VIX)
+    # 3. Macro Context
     if market_vix > 20:
         score += 10
         reasons.append("High VIX")
     elif market_vix < 12:
-        score -= 10 # Penalty for low premiums
+        score -= 10 
         
-    # 4. Entry/RSI (20 Pts)
+    # 4. Entry/RSI
     if data['rsi'] < 40: 
         score += 20
         reasons.append("Oversold")
@@ -220,7 +222,6 @@ def process_market_structure(ticker_obj, ticker):
         hist['Returns'] = hist['Close'].pct_change()
         hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252)
         
-        # RSI
         delta = hist['Close'].diff()
         gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
         loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
@@ -271,19 +272,29 @@ def find_alpha_setup(ticker, stock_obj, data, width_target, min_roi, dev_mode):
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - now).days
         T, r = dte / 365.0, 0.045
         
+        # Delta Calc
         atm_idx = (puts['strike'] - data['price']).abs().argsort()[:1]
-        if atm_idx.empty: return None, "Data Err"
-        atm_iv = puts.iloc[atm_idx]['impliedVolatility'].values[0]
-        if atm_iv == 0: atm_iv = max(data['hv']/100, 0.2)
+        atm_iv = 0.5 
+        if not atm_idx.empty:
+            raw_iv = puts.iloc[atm_idx]['impliedVolatility'].values[0]
+            if raw_iv > 0: atm_iv = raw_iv
+        
+        if atm_iv < 0.01: atm_iv = max(data['hv']/100, 0.3)
 
         puts['delta'] = puts.apply(lambda row: black_scholes_delta(
             data['price'], row['strike'], T, r, 
-            row['impliedVolatility'] if row['impliedVolatility'] > 0 else atm_iv
+            row['impliedVolatility'] if row['impliedVolatility'] > 0.01 else atm_iv
         ), axis=1)
 
-        # Wide Delta Search
-        candidates = puts[(puts['delta'] > -0.35) & (puts['delta'] < -0.18)]
-        if candidates.empty: return None, "No Strikes in Delta Range"
+        # --- OPTIMIZED AGGRESSION (-0.30 Delta) ---
+        candidates = puts[
+            (puts['delta'] > -0.30) & 
+            (puts['delta'] < -0.15) & 
+            (puts['strike'] < data['price'] * 0.98) # 2% Physical Buffer
+        ]
+        
+        if candidates.empty: 
+            return None, f"No Prime Strikes Found"
 
         best_spread = None
         rejection_reason = "Low ROI"
@@ -291,26 +302,26 @@ def find_alpha_setup(ticker, stock_obj, data, width_target, min_roi, dev_mode):
         for _, short_leg in candidates.sort_values('strike', ascending=False).iterrows():
             short_strike = short_leg['strike']
             
-            min_oi = 500 if ticker in ETFS else 100
+            min_oi = 100
             if not dev_mode and (short_leg.get('openInterest', 0) < min_oi): continue
 
-            # STRICT WIDTH LOGIC
             long_target = short_strike - width_target
             long_leg_idx = (puts['strike'] - long_target).abs().argsort()[:1]
             if long_leg_idx.empty: continue
             long_leg = puts.iloc[long_leg_idx].iloc[0]
             
             actual_width = short_strike - long_leg['strike']
-            if abs(actual_width - width_target) > 0.5: continue 
+            if abs(actual_width - width_target) > 1.5: continue 
 
             credit = short_leg['bid'] - long_leg['ask']
+            if credit <= 0: credit = (short_leg['lastPrice'] - long_leg['lastPrice']) * 0.9 
+
             risk = actual_width - credit
+            roi = (credit / risk) * 100
             
             if risk <= 0 or credit <= 0: continue
             
-            roi = (credit / risk) * 100
-            
-            if roi >= (min_roi if not dev_mode else 5.0):
+            if roi >= (min_roi if not dev_mode else 1.0):
                 is_safe, msg = check_earnings_safety(ticker, best_exp)
                 if not is_safe and not dev_mode: 
                     rejection_reason = f"Earnings ({msg})"
@@ -335,32 +346,28 @@ def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte)
     fig, ax = plt.subplots(figsize=(4, 1.3)) 
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(BG_COLOR)
-    
     try:
         last_60 = hist.tail(60).copy()
         dates = last_60.index
         bar_colors = np.where(last_60['Close'] >= last_60['Open'], SUCCESS_COLOR, WARNING_COLOR)
         heights = last_60['Close'] - last_60['Open']
         bottoms = last_60['Open']
-        
         ax.bar(dates, heights, bottom=bottoms, color=bar_colors, width=0.8, align='center', alpha=0.9)
-        
         if iv > 0 and dte > 0:
             last_date = dates[-1]
             future_days = np.arange(1, dte + 5)
             future_dates = [last_date + timedelta(days=int(d)) for d in future_days]
-            std_move = current_price * (iv / 100.0) * np.sqrt(future_days / 365.0)
+            safe_iv = max(iv / 100.0, 0.1) 
+            std_move = current_price * safe_iv * np.sqrt(future_days / 365.0)
             upper_cone = current_price + std_move
             lower_cone = current_price - std_move
             ax.plot(future_dates, upper_cone, color=SUCCESS_COLOR, linestyle=':', linewidth=1, alpha=0.6)
             ax.plot(future_dates, lower_cone, color=SUCCESS_COLOR, linestyle=':', linewidth=1, alpha=0.6)
             ax.fill_between(future_dates, lower_cone, upper_cone, color=SUCCESS_COLOR, alpha=0.1)
-        
-        ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, alpha=0.9)
-        ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.6)
+        ax.axhline(y=short_strike, color=STRIKE_COLOR, linestyle='-', linewidth=1, label="Short")
+        ax.axhline(y=long_strike, color=STRIKE_COLOR, linestyle='-', linewidth=0.8, alpha=0.5)
         ax.grid(True, which='major', linestyle=':', color=GRID_COLOR, alpha=0.3)
-    except: pass
-    
+    except Exception as e: pass
     ax.axis('off') 
     plt.tight_layout(pad=0.1)
     return fig
@@ -379,21 +386,16 @@ st.markdown("""
 with st.sidebar:
     st.header("Alpha Settings")
     
-    # LIVE VIX CHECK
     current_vix = get_market_vix()
     
     if current_vix < 13:
-        vix_status = "Low Edge (Cheap)"
-        vix_color = "#AAA"
+        vix_status, vix_color = "Low Edge (Cheap)", "#AAA"
     elif 13 <= current_vix <= 20:
-        vix_status = "Optimal Income Zone"
-        vix_color = SUCCESS_COLOR
+        vix_status, vix_color = "Optimal Income Zone", SUCCESS_COLOR
     elif 20 < current_vix <= 30:
-        vix_status = "High Premium (Juicy)"
-        vix_color = "#FFA726"
+        vix_status, vix_color = "High Premium (Juicy)", "#FFA726"
     else:
-        vix_status = "Extreme Fear (Risky)"
-        vix_color = "#FF5252"
+        vix_status, vix_color = "Extreme Fear (Risky)", "#FF5252"
 
     st.markdown(f"""
     <div style='border:1px solid {vix_color}; padding:10px; border-radius:5px; text-align:center; margin-bottom:15px;'>
@@ -404,7 +406,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     
     dev_mode = st.checkbox("Dev Mode (Bypass Filters)", value=False)
-    width_target = st.slider("Spread Width ($)", 1, 10, 5, 1) # Strict Width
+    width_target = st.slider("Spread Width ($)", 1, 10, 5, 1) 
     min_roi = st.slider("Min ROI %", 5, 30, 10, 1)
     if st.button("Reset Scanner"):
         st.session_state.scan_results = []
@@ -417,14 +419,13 @@ if st.button("Run Alpha Scan"):
     st.session_state.scan_log = []
     
     if not st.session_state.drive_service:
-        st.error("❌ Drive Missing")
-        st.stop()
+        st.warning("Running in Offline Mode (Trades won't save to Cloud)")
         
     progress = st.progress(0)
     status = st.empty()
     log_box = st.empty()
     
-    current_vix = get_market_vix() # Fetch once for the run
+    current_vix = get_market_vix() 
     
     total = len(LIQUID_TICKERS)
     
@@ -487,7 +488,6 @@ if st.session_state.scan_results:
                 
                 reasons_text = " + ".join(res['reasons']) if res['reasons'] else "Standard"
                 
-                # Vix Warning Label
                 vix_warning = ""
                 if vix < 13: vix_warning = "<span style='color:#FF5252; font-weight:bold; font-size:11px;'>⚠️ LOW VIX</span>"
                 elif vix > 30: vix_warning = "<span style='color:#FF5252; font-weight:bold; font-size:11px;'>⚠️ HIGH VIX</span>"
@@ -549,7 +549,8 @@ if st.session_state.scan_results:
                 with col_btn:
                     add_key = f"add_{t}_{i}"
                     btn_key = f"btn_state_{t}_{i}"
-                    if btn_key not in st.session_state: st.session_state[btn_key] = False
+                    # --- FIXED BUTTON STATE CRASH ---
+                    if btn_key not in st.session_state: st.session_state[btn_key] = False 
 
                     if not st.session_state[btn_key]:
                         if st.button(f"Add Trade", key=add_key, use_container_width=True):
@@ -560,14 +561,14 @@ if st.session_state.scan_results:
                                 "entry_date": datetime.now().date().isoformat(), "pnl_history": []
                             }
                             
-                            # --- CRITICAL FIX: READ BEFORE WRITE ---
+                            # --- RACE CONDITION FIX: READ BEFORE WRITE ---
                             if st.session_state.drive_service:
                                 latest_cloud_trades = load_from_drive_local(st.session_state.drive_service)
                                 latest_cloud_trades.append(new_trade)
                                 save_success = save_to_drive_local(st.session_state.drive_service, latest_cloud_trades)
                                 
                                 if save_success:
-                                    st.session_state.trades = latest_cloud_trades # Sync local
+                                    st.session_state.trades = latest_cloud_trades
                                     st.session_state[btn_key] = True
                                     st.toast(f"✅ Saved {t} to Cloud!")
                                     st.rerun()
@@ -577,7 +578,6 @@ if st.session_state.scan_results:
                                 st.session_state.trades.append(new_trade)
                                 st.session_state[btn_key] = True
                                 st.rerun()
-                            # ---------------------------------------
                     else:
                         st.success(f"✅ Added {qty} {t}")
 
