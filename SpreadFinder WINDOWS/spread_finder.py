@@ -5,9 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import time
-import random
 import os
-import sys
 from scipy.stats import norm
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -34,7 +32,7 @@ FINNHUB_API_KEY = "d5mgc39r01ql1f2p69c0d5mgc39r01ql1f2p69cg"
 @st.cache_resource
 def get_drive_service_local():
     if not key_path:
-        st.warning(f"⚠️ Drive Key Missing: '{key_filename}'. Scanner works, but saving disabled.")
+        st.warning(f"⚠️ Drive Key Missing. Scanner working in Offline Mode.")
         return None
     SCOPES = ['https://www.googleapis.com/auth/drive']
     try:
@@ -128,14 +126,41 @@ SECTOR_DB = {
 LIQUID_TICKERS = list(SECTOR_DB.keys())
 ETFS = [k for k, v in SECTOR_DB.items() if "ETF" in v]
 
+# --- BULK DATA ENGINE ---
+@st.cache_data(ttl=300)
+def fetch_bulk_history(tickers):
+    try:
+        data = yf.download(tickers, period="1y", interval="1d", group_by='ticker', progress=False, threads=True)
+        return data
+    except Exception as e:
+        return pd.DataFrame()
+
+# --- MATH (ATR & SAFETY) ---
+def calculate_atr(df, period=14):
+    try:
+        df = df.copy()
+        df['H-L'] = df['High'] - df['Low']
+        df['H-C'] = np.abs(df['High'] - df['Close'].shift(1))
+        df['L-C'] = np.abs(df['Low'] - df['Close'].shift(1))
+        df['TR'] = df[['H-L', 'H-C', 'L-C']].max(axis=1)
+        return df['TR'].rolling(window=period).mean().iloc[-1]
+    except: return 0.0
+
+def calculate_safety_metrics(hist, current_price):
+    try:
+        returns = hist['Close'].pct_change()
+        hv_30 = returns.rolling(window=30).std().iloc[-1] * np.sqrt(252) * 100
+        atr_14 = calculate_atr(hist)
+        return hv_30, atr_14
+    except: return 100.0, 1.0
+
 # --- BLACK-SCHOLES ENGINE ---
 def black_scholes_delta(S, K, T, r, sigma, option_type="put"):
     try:
         if T <= 0: return -0.5
         sigma = max(sigma, 0.10)
         d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        if option_type == "call": return norm.cdf(d1)
-        else: return norm.cdf(d1) - 1
+        return norm.cdf(d1) - 1
     except: return -0.5 
 
 # --- VIX CHECKER ---
@@ -166,86 +191,74 @@ def check_earnings_safety(ticker, expiration_date_str):
         return True, "Safe"
     except: return True, "Check"
 
-# --- AI SCORING ENGINE ---
-def calculate_alpha_score(data, spread_metrics, market_vix):
+# --- SCORING ENGINE ---
+def calculate_goldilocks_score(data, spread, atr_target):
     score = 0
     reasons = []
     
-    # 1. Trend Quality
-    if data['price'] > data['sma_200']:
-        score += 15
-        if data['price'] < data['sma_20']: 
-            score += 15
-            reasons.append("Perfect Dip")
-        else:
-            reasons.append("Trend Up")
-    else:
-        reasons.append("Trend Weak")
-
-    # 2. Volatility Edge
-    vrp_ratio = spread_metrics['iv'] / spread_metrics['hv'] if spread_metrics['hv'] > 0 else 1.0
-    if vrp_ratio > 1.5: 
-        score += 30
-        reasons.append("High VRP")
-    elif vrp_ratio > 1.2: 
-        score += 20
-        reasons.append("Good VRP")
+    # 1. ATR CUSHION SCORE
+    atr = data['atr']
+    dist = data['price'] - spread['short']
+    atr_multiple = dist / atr if atr > 0 else 0
     
-    # 3. Macro Context
-    if market_vix > 20:
-        score += 10
-        reasons.append("High VIX")
-    elif market_vix < 12:
-        score -= 10 
-        
-    # 4. Entry/RSI
-    if data['rsi'] < 40: 
+    if atr_multiple >= atr_target + 2:
+        score += 30
+        reasons.append(f"Fortress ({atr_multiple:.1f}x)")
+    elif atr_multiple >= atr_target:
         score += 20
-        reasons.append("Oversold")
-    elif data['rsi'] < 50:
-        score += 10
+        reasons.append(f"Safe ({atr_multiple:.1f}x)")
+    
+    # 2. TREND SCORE
+    if data['price'] > data['sma_50']:
+        score += 20
+        reasons.append("Bull Trend")
         
+    # 3. VOLATILITY QUALITY
+    if data['hv'] < 30:
+        score += 15
+        reasons.append("Stable Vol")
+        
+    # 4. DELTA SWEET SPOT
+    delta = abs(spread['delta'])
+    if 0.18 <= delta <= 0.25:
+        score += 25
+        reasons.append("Delta Goldilocks")
+    
     return min(score, 100), reasons
 
 # --- DATA PROCESSOR ---
-def process_market_structure(ticker_obj, ticker):
+def process_market_structure(hist_df, ticker):
     try:
-        hist = ticker_obj.history(period="1y", auto_adjust=True)
-        if hist.empty: return None
+        if hist_df is None or hist_df.empty: return None
+        hist = hist_df.copy()
+        if 'Close' not in hist.columns: return None
         
         current_price = hist['Close'].iloc[-1]
         
-        hist['SMA_20'] = hist['Close'].rolling(window=20).mean()
         hist['SMA_50'] = hist['Close'].rolling(window=50).mean()
         hist['SMA_200'] = hist['Close'].rolling(window=200).mean()
         
-        hist['Returns'] = hist['Close'].pct_change()
-        hist['HV'] = hist['Returns'].rolling(window=30).std() * np.sqrt(252)
+        hv, atr = calculate_safety_metrics(hist, current_price)
         
-        delta = hist['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-        loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
+        if hv > 50: return None
         
         return {
             "price": current_price,
             "change_pct": ((current_price - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2]) * 100,
-            "sma_20": hist['SMA_20'].iloc[-1],
             "sma_50": hist['SMA_50'].iloc[-1],
             "sma_200": hist['SMA_200'].iloc[-1],
-            "hv": hist['HV'].iloc[-1] * 100,
-            "rsi": rsi.iloc[-1],
+            "hv": hv,
+            "atr": atr,
             "sector": SECTOR_DB.get(ticker, "Stock"),
             "hist": hist
         }
     except: return None
 
 # --- SCANNER LOGIC ---
-def find_alpha_setup(ticker, stock_obj, data, width_target, min_roi, dev_mode):
+def find_balanced_setup(ticker, stock_obj, data, width_target, min_roi, atr_safety, dev_mode):
     try:
         if not dev_mode and data['price'] < data['sma_200']:
-            return None, "Bearish Trend (<200 SMA)"
+            return None, "Bearish (< SMA200)"
 
         try: exps = stock_obj.options
         except: return None, "No Options"
@@ -272,7 +285,6 @@ def find_alpha_setup(ticker, stock_obj, data, width_target, min_roi, dev_mode):
         dte = (datetime.strptime(best_exp, "%Y-%m-%d") - now).days
         T, r = dte / 365.0, 0.045
         
-        # Delta Calc
         atm_idx = (puts['strike'] - data['price']).abs().argsort()[:1]
         atm_iv = 0.5 
         if not atm_idx.empty:
@@ -286,21 +298,24 @@ def find_alpha_setup(ticker, stock_obj, data, width_target, min_roi, dev_mode):
             row['impliedVolatility'] if row['impliedVolatility'] > 0.01 else atm_iv
         ), axis=1)
 
-        # --- OPTIMIZED AGGRESSION (-0.30 Delta) ---
         candidates = puts[
-            (puts['delta'] > -0.30) & 
+            (puts['delta'] > -0.28) & 
             (puts['delta'] < -0.15) & 
-            (puts['strike'] < data['price'] * 0.98) # 2% Physical Buffer
+            (puts['strike'] < data['price']) 
         ]
         
         if candidates.empty: 
-            return None, f"No Prime Strikes Found"
+            return None, f"No Goldilocks Strikes"
 
         best_spread = None
         rejection_reason = "Low ROI"
 
         for _, short_leg in candidates.sort_values('strike', ascending=False).iterrows():
             short_strike = short_leg['strike']
+            
+            dist = data['price'] - short_strike
+            if not dev_mode and (dist < (data['atr'] * atr_safety)):
+                continue 
             
             min_oi = 100
             if not dev_mode and (short_leg.get('openInterest', 0) < min_oi): continue
@@ -370,21 +385,22 @@ def plot_sparkline_cone(hist, short_strike, long_strike, current_price, iv, dte)
     except Exception as e: pass
     ax.axis('off') 
     plt.tight_layout(pad=0.1)
+    plt.close(fig)
     return fig
 
 # --- HEADER ---
 st.markdown("""
 <div style='text-align: left; padding-top: 10px;'>
-    <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Alpha Spread Scanner <span style='font-size:16px; color:#00C853; vertical-align:middle;'>[AI Enabled]</span></h1>
+    <h1 style='margin-bottom: 0px; padding-bottom: 0px;'>Alpha Spread Scanner <span style='font-size:16px; color:#00C853; vertical-align:middle;'>[Goldilocks Edition]</span></h1>
     <p style='margin-top: 0px; font-size: 14px; color: #888;'>
-        Filtering for: <strong style='color:#00C853'>Trend Stack</strong> • 
-        <strong style='color:#29B6F6'>Vol Risk Premium</strong> • 
-        <strong style='color:#FFA726'>Skew Edge</strong>
+        Filtering for: <strong style='color:#00C853'>Safety Distance (ATR)</strong> • 
+        <strong style='color:#29B6F6'>Income Delta (-0.20)</strong> • 
+        <strong style='color:#FFA726'>Trend Confirmation</strong>
     </p>
 </div>""", unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("Alpha Settings")
+    st.header("Risk Dial")
     
     current_vix = get_market_vix()
     
@@ -392,10 +408,8 @@ with st.sidebar:
         vix_status, vix_color = "Low Edge (Cheap)", "#AAA"
     elif 13 <= current_vix <= 20:
         vix_status, vix_color = "Optimal Income Zone", SUCCESS_COLOR
-    elif 20 < current_vix <= 30:
-        vix_status, vix_color = "High Premium (Juicy)", "#FFA726"
     else:
-        vix_status, vix_color = "Extreme Fear (Risky)", "#FF5252"
+        vix_status, vix_color = "High Premium (Juicy)", "#FFA726"
 
     st.markdown(f"""
     <div style='border:1px solid {vix_color}; padding:10px; border-radius:5px; text-align:center; margin-bottom:15px;'>
@@ -405,9 +419,14 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     
-    dev_mode = st.checkbox("Dev Mode (Bypass Filters)", value=False)
+    # RISK CONTROLS
+    atr_safety = st.slider("Safety Distance (x ATR)", 2.0, 8.0, 4.0, 0.5, help="Higher = Safer/Lower ROI. Lower = More Aggressive.")
     width_target = st.slider("Spread Width ($)", 1, 10, 5, 1) 
-    min_roi = st.slider("Min ROI %", 5, 30, 10, 1)
+    min_roi = st.slider("Min ROI %", 5, 30, 12, 1) 
+    
+    st.markdown("---")
+    dev_mode = st.checkbox("Dev Mode (Bypass Filters)", value=False)
+    
     if st.button("Reset Scanner"):
         st.session_state.scan_results = []
         st.session_state.scan_log = []
@@ -419,7 +438,7 @@ if st.button("Run Alpha Scan"):
     st.session_state.scan_log = []
     
     if not st.session_state.drive_service:
-        st.warning("Running in Offline Mode (Trades won't save to Cloud)")
+        st.warning("Running in Offline Mode")
         
     progress = st.progress(0)
     status = st.empty()
@@ -429,27 +448,43 @@ if st.button("Run Alpha Scan"):
     
     total = len(LIQUID_TICKERS)
     
+    # 1. BULK DOWNLOAD PHASE
+    status.text(f"Fetching market data for {total} tickers...")
+    try:
+        bulk_data = fetch_bulk_history(LIQUID_TICKERS)
+    except:
+        bulk_data = pd.DataFrame()
+        
+    # 2. ANALYSIS PHASE
     for i, ticker in enumerate(LIQUID_TICKERS):
         progress.progress((i + 1) / total)
-        status.text(f"Scanning {ticker}...")
+        status.text(f"Analyzing {ticker}...")
         
         try:
-            ticker_obj = yf.Ticker(ticker)
-            data = process_market_structure(ticker_obj, ticker)
+            try:
+                if isinstance(bulk_data.columns, pd.MultiIndex):
+                    hist = bulk_data[ticker].copy()
+                else:
+                    hist = bulk_data.copy()
+            except:
+                hist = pd.DataFrame()
+
+            data = process_market_structure(hist, ticker)
             
             if not data:
-                st.session_state.scan_log.append(f"[{ticker}] No Data")
+                st.session_state.scan_log.append(f"[{ticker}] Skpped (Structure)")
                 continue
                 
-            spread, reason = find_alpha_setup(
-                ticker, ticker_obj, data, width_target, min_roi, dev_mode
+            ticker_obj = yf.Ticker(ticker)
+            spread, reason = find_balanced_setup(
+                ticker, ticker_obj, data, width_target, min_roi, atr_safety, dev_mode
             )
             
             if spread:
-                ai_score, reasons = calculate_alpha_score(data, spread, current_vix)
+                ai_score, reasons = calculate_goldilocks_score(data, spread, atr_safety)
                 
                 if ai_score >= 50 or dev_mode:
-                    st.session_state.scan_log.append(f"[{ticker}] 🚀 MATCH | Score: {ai_score}")
+                    st.session_state.scan_log.append(f"[{ticker}] ✨ GOLDILOCKS MATCH | Score: {ai_score}")
                     st.session_state.scan_results.append({
                         "ticker": ticker, "data": data, "spread": spread, 
                         "score": ai_score, "reasons": reasons, "vix": current_vix
@@ -461,7 +496,7 @@ if st.button("Run Alpha Scan"):
             st.session_state.scan_log.append(f"[{ticker}] Error: {str(e)}")
             
         log_box.code("\n".join(st.session_state.scan_log[-8:]))
-        time.sleep(0.1)
+        time.sleep(0.05) 
 
     status.text("Alpha Scan Complete")
 
@@ -479,19 +514,14 @@ if st.session_state.scan_results:
         
         with cols[i % 3]:
             with st.container(border=True):
-                # Header
                 pill_color = "price-pill-green" if d['change_pct'] >= 0 else "price-pill-red"
                 
-                if score >= 80: badge = "💎 ALPHA SETUP"
-                elif score >= 65: badge = "⭐ PRIME EDGE"
+                if score >= 80: badge = "💎 PERFECT FIT"
+                elif score >= 65: badge = "⭐ BALANCED"
                 else: badge = "✔️ VIABLE"
                 
                 reasons_text = " + ".join(res['reasons']) if res['reasons'] else "Standard"
                 
-                vix_warning = ""
-                if vix < 13: vix_warning = "<span style='color:#FF5252; font-weight:bold; font-size:11px;'>⚠️ LOW VIX</span>"
-                elif vix > 30: vix_warning = "<span style='color:#FF5252; font-weight:bold; font-size:11px;'>⚠️ HIGH VIX</span>"
-
                 st.markdown(f"""
                 <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                     <div>
@@ -504,8 +534,7 @@ if st.session_state.scan_results:
                     </div>
                 </div>
                 <div style="margin-top: 5px;">
-                    <span style="font-size: 11px; color: #00E676;">⚡ {reasons_text}</span>
-                    <span style="float:right;">{vix_warning}</span>
+                    <span style="font-size: 11px; color: #00E676;">{reasons_text}</span>
                 </div>
                 """, unsafe_allow_html=True)
                 
@@ -533,8 +562,8 @@ if st.session_state.scan_results:
                     <div class="metric-label">Expiry</div>
                     <div class="metric-value">{s['expiration']} <span style="color:#888; font-size:12px;">({s['dte']}d)</span></div>
                     <div style="height: 8px;"></div>
-                    <div class="metric-label">Volatility</div>
-                    <div><span style="color:#29B6F6; font-weight:bold;">{s['iv']:.1f}%</span> <span style="color:#666; font-size:11px;">(vs {s['hv']:.1f})</span></div>
+                    <div class="metric-label">Buffer</div>
+                    <div><span style="color:#29B6F6; font-weight:bold;">{((d['price'] - s['short'])/d['atr']):.1f}x ATR</span></div>
                     """, unsafe_allow_html=True)
                 
                 st.markdown("---")
@@ -549,7 +578,6 @@ if st.session_state.scan_results:
                 with col_btn:
                     add_key = f"add_{t}_{i}"
                     btn_key = f"btn_state_{t}_{i}"
-                    # --- FIXED BUTTON STATE CRASH ---
                     if btn_key not in st.session_state: st.session_state[btn_key] = False 
 
                     if not st.session_state[btn_key]:
@@ -561,7 +589,6 @@ if st.session_state.scan_results:
                                 "entry_date": datetime.now().date().isoformat(), "pnl_history": []
                             }
                             
-                            # --- RACE CONDITION FIX: READ BEFORE WRITE ---
                             if st.session_state.drive_service:
                                 latest_cloud_trades = load_from_drive_local(st.session_state.drive_service)
                                 latest_cloud_trades.append(new_trade)
